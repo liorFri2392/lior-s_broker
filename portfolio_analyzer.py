@@ -109,7 +109,7 @@ class PortfolioAnalyzer:
                             return ticker, price
                         except Exception:
                             return ticker, None
-                except Exception:
+                except Exception as e:
                     print(f"Warning: Could not fetch price for {ticker}: {e}")
                     return ticker, None
             
