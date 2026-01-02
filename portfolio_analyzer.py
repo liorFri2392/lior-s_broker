@@ -50,17 +50,27 @@ class PortfolioAnalyzer:
                     cache_data = json.load(f)
                     # Load price cache (only valid entries)
                     now = datetime.now()
-                    for ticker, data in cache_data.get('price_cache', {}).items():
-                        cached_time = datetime.fromisoformat(data['timestamp'])
-                        if now - cached_time < self.cache_timeout:
-                            self.price_cache[ticker] = (data['price'], cached_time)
+                    price_cache_data = cache_data.get('price_cache', {})
+                    if price_cache_data and isinstance(price_cache_data, dict):
+                        for ticker, data in price_cache_data.items():
+                            if data and isinstance(data, dict) and 'timestamp' in data and 'price' in data:
+                                try:
+                                    cached_time = datetime.fromisoformat(data['timestamp'])
+                                    if now - cached_time < self.cache_timeout:
+                                        self.price_cache[ticker] = (data['price'], cached_time)
+                                except (ValueError, KeyError) as e:
+                                    logger.debug(f"Failed to load cache entry for {ticker}: {e}")
+                                    continue
                     # Load exchange rate cache
-                    if 'exchange_rate' in cache_data:
-                        ex_data = cache_data['exchange_rate']
-                        cached_time = datetime.fromisoformat(ex_data['timestamp'])
-                        if now - cached_time < self.cache_timeout:
-                            self.exchange_rate_usd_ils = ex_data['rate']
-                            self.exchange_rate_cache_time = cached_time
+                    ex_data = cache_data.get('exchange_rate')
+                    if ex_data and isinstance(ex_data, dict) and 'timestamp' in ex_data and 'rate' in ex_data:
+                        try:
+                            cached_time = datetime.fromisoformat(ex_data['timestamp'])
+                            if now - cached_time < self.cache_timeout:
+                                self.exchange_rate_usd_ils = ex_data['rate']
+                                self.exchange_rate_cache_time = cached_time
+                        except (ValueError, KeyError) as e:
+                            logger.debug(f"Failed to load exchange rate cache: {e}")
                     logger.info(f"Loaded cache from {self.cache_file}")
         except Exception as e:
             logger.warning(f"Failed to load cache: {e}")
