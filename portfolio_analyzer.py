@@ -57,9 +57,10 @@ class PortfolioAnalyzer:
         }
     
     def save_portfolio(self, portfolio: Dict):
-        """Save portfolio to JSON file."""
+        """Save portfolio to JSON file locally."""
         portfolio["last_updated"] = datetime.now().isoformat()
-        with open(self.portfolio_file, 'w', encoding='utf-8') as f:
+        portfolio_path = os.path.abspath(self.portfolio_file)
+        with open(portfolio_path, 'w', encoding='utf-8') as f:
             json.dump(portfolio, f, indent=2, ensure_ascii=False)
     
     def get_current_prices(self, tickers: List[str]) -> Dict[str, float]:
@@ -556,7 +557,110 @@ class PortfolioAnalyzer:
         # Print results
         self.print_analysis_results(results)
         
+        # Ask for confirmation if rebalancing is needed
+        if rebalancing["needed"] and (rebalancing["recommendations"] or rebalancing["buy_recommendations"]):
+            confirmed = self.ask_rebalancing_confirmation()
+            if confirmed:
+                self.update_portfolio_from_rebalancing(portfolio, rebalancing, analyses)
+                print("\n✅ Portfolio updated successfully based on rebalancing actions!\n")
+            else:
+                print("\n❌ Portfolio not updated. No changes were made.\n")
+        
         return results
+    
+    def ask_rebalancing_confirmation(self) -> bool:
+        """Ask user for confirmation to execute rebalancing."""
+        while True:
+            response = input("\nDid you execute the rebalancing actions (sell/buy)? (yes/no): ").strip().lower()
+            if response in ['yes', 'y', 'כן', 'י']:
+                return True
+            elif response in ['no', 'n', 'לא', 'ל']:
+                return False
+            else:
+                print("Please enter 'yes' or 'no' (כן/לא)")
+    
+    def update_portfolio_from_rebalancing(self, portfolio: Dict, rebalancing: Dict, analyses: List[Dict]):
+        """Update portfolio.json based on rebalancing recommendations."""
+        exchange_rate = self.get_exchange_rate()
+        
+        # Process SELL actions
+        for rec in rebalancing.get("recommendations", []):
+            if rec["action"] == "SELL":
+                ticker = rec["ticker"]
+                shares_to_sell = rec.get("reduce_shares", rec.get("sell_shares", 0))
+                
+                # Find and update the holding
+                for holding in portfolio.get("holdings", []):
+                    if holding["ticker"] == ticker:
+                        current_quantity = holding.get("quantity", 0)
+                        new_quantity = max(0, current_quantity - shares_to_sell)
+                        
+                        if new_quantity > 0:
+                            # Update quantity and value
+                            holding["quantity"] = new_quantity
+                            current_price = rec.get("current_price_usd", holding.get("last_price", 0))
+                            holding["last_price"] = current_price
+                            holding["current_value"] = new_quantity * current_price
+                        else:
+                            # Remove holding if quantity becomes 0
+                            portfolio["holdings"].remove(holding)
+                        
+                        # Add to cash
+                        sell_amount = shares_to_sell * rec.get("current_price_usd", holding.get("last_price", 0))
+                        portfolio["cash"] = portfolio.get("cash", 0) + sell_amount
+                        break
+        
+        # Process BUY actions
+        for rec in rebalancing.get("buy_recommendations", []):
+            ticker = rec["ticker"]
+            shares_to_buy = rec.get("shares", 0)
+            price = rec.get("price", 0)
+            buy_amount = rec.get("allocation_amount", shares_to_buy * price)
+            
+            if shares_to_buy > 0 and price > 0:
+                # Check if holding already exists
+                existing_holding = None
+                for holding in portfolio.get("holdings", []):
+                    if holding["ticker"] == ticker:
+                        existing_holding = holding
+                        break
+                
+                if existing_holding:
+                    # Update existing holding
+                    existing_holding["quantity"] += shares_to_buy
+                    existing_holding["last_price"] = price
+                    existing_holding["current_value"] = existing_holding["quantity"] * price
+                else:
+                    # Add new holding
+                    new_holding = {
+                        "ticker": ticker,
+                        "quantity": shares_to_buy,
+                        "last_price": price,
+                        "current_value": shares_to_buy * price
+                    }
+                    portfolio.setdefault("holdings", []).append(new_holding)
+                
+                # Subtract from cash
+                portfolio["cash"] = max(0, portfolio.get("cash", 0) - buy_amount)
+        
+        # Recalculate total value
+        total_value = portfolio.get("cash", 0)
+        for holding in portfolio.get("holdings", []):
+            total_value += holding.get("current_value", 0)
+        portfolio["total_value"] = total_value
+        
+        # Save updated portfolio
+        self.save_portfolio(portfolio)
+        
+        # Print summary
+        print("\n" + "-" * 60)
+        print("PORTFOLIO UPDATE SUMMARY")
+        print("-" * 60)
+        print(f"Cash: ${portfolio.get('cash', 0):,.2f} (₪{portfolio.get('cash', 0) * exchange_rate:,.2f})")
+        print(f"Total Holdings: {len(portfolio.get('holdings', []))}")
+        print(f"Total Portfolio Value: ${total_value:,.2f} (₪{total_value * exchange_rate:,.2f})")
+        portfolio_path = os.path.abspath(self.portfolio_file)
+        print(f"\n✅ Portfolio saved locally to: {portfolio_path}")
     
     def print_analysis_results(self, results: Dict):
         """Print analysis results in a formatted way."""
