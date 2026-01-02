@@ -116,3 +116,4 @@ Alerts include:
 - Use **App Passwords** for Gmail, not your regular password
 - GitHub Secrets are encrypted and only accessible to workflows
 
+

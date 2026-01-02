@@ -6,13 +6,15 @@ Includes: Candlestick patterns, statistical models, bond analysis, yield optimiz
 
 import pandas as pd
 import numpy as np
-from scipy import stats
 from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import PolynomialFeatures
 from typing import Dict, List, Optional, Tuple
 import yfinance as yf
+import logging
 import warnings
 warnings.filterwarnings('ignore')
+
+logger = logging.getLogger(__name__)
 
 class AdvancedAnalyzer:
     """Advanced statistical and technical analysis for ultimate broker functionality."""
@@ -104,7 +106,8 @@ class AdvancedAnalyzer:
                 poly_lr.fit(X_poly, y)
                 X_future = poly_features.transform(np.array([[len(closes) + periods]]))
                 poly_forecast = poly_lr.predict(X_future)[0]
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Polynomial regression failed, using linear: {e}")
                 # Fallback to linear if polynomial fails
                 poly_forecast = linear_forecast
             
@@ -131,7 +134,8 @@ class AdvancedAnalyzer:
                 "confidence_interval": confidence_interval,
                 "forecast_periods": periods
             }
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Failed to calculate statistical forecast: {e}")
             return {}
     
     def analyze_bonds(self, ticker: str) -> Dict:
@@ -268,7 +272,8 @@ class AdvancedAnalyzer:
                 
                 optimized.append(candidate)
                 
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Failed to optimize candidate {candidate.get('ticker', 'unknown')}: {e}")
                 continue
         
         # Sort by optimization score (highest yield potential)
@@ -291,7 +296,8 @@ class AdvancedAnalyzer:
                 if not data.empty:
                     returns = data['Close'].pct_change().dropna()
                     returns_data[ticker] = returns
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Failed to get returns data for {ticker}: {e}")
                 continue
         
         if not returns_data:

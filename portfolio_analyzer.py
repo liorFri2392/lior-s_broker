@@ -6,20 +6,24 @@ Analyzes portfolio holdings, provides recommendations, and suggests rebalancing.
 
 import json
 import os
-import sys
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
-from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from scipy import stats
-import requests
 from newsapi import NewsApiClient
 from advanced_analysis import AdvancedAnalyzer
 import warnings
 warnings.filterwarnings('ignore')
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 class PortfolioAnalyzer:
     """Advanced portfolio analysis system with news, trends, and statistical analysis."""
@@ -34,7 +38,53 @@ class PortfolioAnalyzer:
         self.market_data_cache = {}  # Cache for market data: {ticker: (data, timestamp)}
         self.news_cache = {}  # Cache for news: {ticker: (sentiment, timestamp)}
         self.cache_timeout = timedelta(minutes=5)  # Cache timeout
+        self.cache_file = ".cache.json"  # Persistent cache file
         self.advanced_analyzer = AdvancedAnalyzer()  # Advanced analysis module
+        self._load_cache()  # Load persistent cache on init
+    
+    def _load_cache(self):
+        """Load persistent cache from file."""
+        try:
+            if os.path.exists(self.cache_file):
+                with open(self.cache_file, 'r', encoding='utf-8') as f:
+                    cache_data = json.load(f)
+                    # Load price cache (only valid entries)
+                    now = datetime.now()
+                    for ticker, data in cache_data.get('price_cache', {}).items():
+                        cached_time = datetime.fromisoformat(data['timestamp'])
+                        if now - cached_time < self.cache_timeout:
+                            self.price_cache[ticker] = (data['price'], cached_time)
+                    # Load exchange rate cache
+                    if 'exchange_rate' in cache_data:
+                        ex_data = cache_data['exchange_rate']
+                        cached_time = datetime.fromisoformat(ex_data['timestamp'])
+                        if now - cached_time < self.cache_timeout:
+                            self.exchange_rate_usd_ils = ex_data['rate']
+                            self.exchange_rate_cache_time = cached_time
+                    logger.info(f"Loaded cache from {self.cache_file}")
+        except Exception as e:
+            logger.warning(f"Failed to load cache: {e}")
+    
+    def _save_cache(self):
+        """Save cache to persistent file."""
+        try:
+            cache_data = {
+                'price_cache': {
+                    ticker: {
+                        'price': price,
+                        'timestamp': timestamp.isoformat()
+                    }
+                    for ticker, (price, timestamp) in self.price_cache.items()
+                },
+                'exchange_rate': {
+                    'rate': self.exchange_rate_usd_ils,
+                    'timestamp': self.exchange_rate_cache_time.isoformat() if self.exchange_rate_cache_time else None
+                } if self.exchange_rate_cache_time else None
+            }
+            with open(self.cache_file, 'w', encoding='utf-8') as f:
+                json.dump(cache_data, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Failed to save cache: {e}")
     
     def get_exchange_rate(self) -> float:
         """Get current USD/ILS exchange rate with caching."""
@@ -53,9 +103,11 @@ class PortfolioAnalyzer:
                 rate = float(hist['Close'].iloc[-1])
                 self.exchange_rate_usd_ils = rate
                 self.exchange_rate_cache_time = now
+                self._save_cache()  # Save to persistent cache
                 return rate
             return self.exchange_rate_usd_ils
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Failed to fetch exchange rate: {e}")
             return self.exchange_rate_usd_ils
         
     def load_portfolio(self) -> Dict:
@@ -101,7 +153,8 @@ class PortfolioAnalyzer:
                     return False, "Market is CLOSED - Weekend (Prices from last close)"
                 else:
                     return False, "Market is CLOSED - After hours (Prices from last close)"
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Failed to determine market status: {e}")
             return None, "Unable to determine market status"
     
     def get_current_prices(self, tickers: List[str]) -> Tuple[Dict[str, float], Optional[bool], str]:
@@ -141,8 +194,10 @@ class PortfolioAnalyzer:
                             price = float(stock.fast_info.get('lastPrice', 0))
                             if price > 0:
                                 self.price_cache[ticker] = (price, now)
+                                self._save_cache()  # Save to persistent cache
                                 return ticker, price, True  # True = real-time
-                        except Exception:
+                        except Exception as e:
+                            logger.debug(f"Failed to get real-time price for {ticker}: {e}")
                             pass
                     
                     # Fallback to historical data (last close)
@@ -150,17 +205,20 @@ class PortfolioAnalyzer:
                     if not info.empty:
                         price = float(info['Close'].iloc[-1])
                         self.price_cache[ticker] = (price, now)
+                        self._save_cache()  # Save to persistent cache
                         return ticker, price, False  # False = last close
                     else:
                         try:
                             price = float(stock.fast_info.get('lastPrice', 0))
                             if price > 0:
                                 self.price_cache[ticker] = (price, now)
+                                self._save_cache()  # Save to persistent cache
                                 return ticker, price, False
-                        except Exception:
+                        except Exception as e:
+                            logger.debug(f"Failed to get fallback price for {ticker}: {e}")
                             return ticker, None, False
                 except Exception as e:
-                    print(f"Warning: Could not fetch price for {ticker}: {e}")
+                    logger.warning(f"Could not fetch price for {ticker}: {e}")
                     return ticker, None, False
             
             with ThreadPoolExecutor(max_workers=5) as executor:
@@ -190,7 +248,8 @@ class PortfolioAnalyzer:
             if not data.empty:
                 self.market_data_cache[cache_key] = (data, now)
             return data
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Failed to fetch market data for {ticker}: {e}")
             return pd.DataFrame()
     
     def calculate_technical_indicators(self, data: pd.DataFrame) -> Dict:
@@ -248,7 +307,8 @@ class PortfolioAnalyzer:
                     indicators['beta'] = 1.0
             else:
                 indicators['beta'] = 1.0
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Failed to calculate beta: {e}")
             indicators['beta'] = 1.0  # Default beta
         
         # Maximum Drawdown
@@ -282,15 +342,17 @@ class PortfolioAnalyzer:
                     indicators['pattern_signal'] = 'BULLISH'
                 elif bearish_patterns:
                     indicators['pattern_signal'] = 'BEARISH'
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Failed to detect candlestick patterns: {e}")
             pass
         
         # Statistical forecast (mid-term yield optimization)
         try:
             forecast = self.advanced_analyzer.calculate_statistical_forecast(data, periods=252*3)  # 3 years
-            if forecast:
-                indicators['forecast'] = forecast
-        except Exception:
+                if forecast:
+                    indicators['forecast'] = forecast
+        except Exception as e:
+            logger.debug(f"Failed to calculate statistical forecast: {e}")
             pass
         
         return indicators
@@ -369,9 +431,11 @@ class PortfolioAnalyzer:
                             }
                             for article in articles['articles'][:3]
                         ])
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"Failed to fetch NewsAPI data: {e}")
                     pass
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Failed to fetch news sentiment for {ticker}: {e}")
             pass  # Silent fail, use default sentiment
         
         # Cache the result
@@ -461,7 +525,8 @@ class PortfolioAnalyzer:
                     score += 10
                 elif industry_trend.get("trend") == "DOWNTREND":
                     score -= 10
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Failed to analyze industry trend: {e}")
             pass  # Industry trend analysis is optional
         
         # Statistical forecast (mid-term yield) - from technical indicators
@@ -511,7 +576,8 @@ class PortfolioAnalyzer:
                         score += 10
                     elif risk_adj_yield < 0.5:
                         score -= 10
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Failed to analyze bonds: {e}")
                 pass
         
         analysis["recommendation_score"] = max(0, min(100, score))
@@ -607,7 +673,8 @@ class PortfolioAnalyzer:
                             "recommendation": "BUY",
                             "reasons": ["Diversification", "Low expense ratio" if info.get('annualReportExpenseRatio', 1) < 0.001 else "Good diversification"]
                         }
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Failed to analyze ETF candidate {etf}: {e}")
                 pass
             return None
         

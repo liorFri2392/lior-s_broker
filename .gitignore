@@ -21,3 +21,6 @@ venv/
 # Portfolio data - should not be committed
 portfolio.json
 
+# Cache files
+.cache.json
+

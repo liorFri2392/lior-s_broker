@@ -7,12 +7,15 @@ Runs deep analysis to find critical buy/sell opportunities
 import json
 import os
 import sys
+import logging
 from datetime import datetime
 from typing import Dict, List, Optional
 from portfolio_analyzer import PortfolioAnalyzer
 from deposit_advisor import DepositAdvisor
 from email_notifier import EmailNotifier
 import yfinance as yf
+
+logger = logging.getLogger(__name__)
 
 class CriticalAlertSystem:
     """Detects and alerts on critical portfolio opportunities."""
@@ -44,7 +47,7 @@ class CriticalAlertSystem:
             return weekday < 5  # Monday to Friday
             
         except Exception as e:
-            print(f"Warning: Could not determine market status: {e}")
+            logger.warning(f"Could not determine market status: {e}")
             # Fallback to weekday check
             weekday = datetime.now().weekday()
             return weekday < 5
@@ -224,7 +227,8 @@ class CriticalAlertSystem:
                         "reason": f"SPY surged {recent_return:.2f}% - Consider taking profits",
                         "details": "Market experiencing significant gains. Consider rebalancing to lock in profits."
                     })
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Failed to check market anomalies: {e}")
             pass
         
         return anomalies

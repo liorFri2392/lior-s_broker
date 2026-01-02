@@ -5,7 +5,7 @@ Deposit Advisor - Recommends ETF purchases based on deposit amount and current p
 
 import json
 import os
-import sys
+import logging
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 import yfinance as yf
@@ -13,6 +13,8 @@ import pandas as pd
 import numpy as np
 from portfolio_analyzer import PortfolioAnalyzer
 from advanced_analysis import AdvancedAnalyzer
+
+logger = logging.getLogger(__name__)
 
 class DepositAdvisor:
     """Advises on ETF purchases when depositing funds."""
@@ -130,7 +132,8 @@ class DepositAdvisor:
                     # Calculate recent momentum (last 20 days)
                     momentum = (data['Close'].iloc[-1] / data['Close'].iloc[-20] - 1) * 100 if len(data) >= 20 else 0
                     category_momentums.append(momentum)
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Failed to analyze ETF {etf} in category {category}: {e}")
                 continue
         
         if not category_returns:
@@ -199,7 +202,8 @@ class DepositAdvisor:
                     if price > 0:
                         analysis["current_price"] = price
                         price_found = True
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"Failed to get real-time price for {ticker}: {e}")
                     pass  # Fall through to historical data
             
             # Fallback to historical data (last close) if real-time price not found
@@ -210,7 +214,8 @@ class DepositAdvisor:
                 else:
                     try:
                         analysis["current_price"] = float(stock.fast_info.get('lastPrice', 0))
-                    except Exception:
+                    except Exception as e:
+                        logger.debug(f"Failed to get fallback price for {ticker}: {e}")
                         return analysis
             
             # Get historical data for analysis
@@ -323,7 +328,8 @@ class DepositAdvisor:
                     elif expected_return > 10:
                         score += 10
                         analysis["reasons"].append(f"📊 Strong mid-term yield potential: {expected_return:.1f}% (3yr forecast)")
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Failed to calculate statistical forecast for {ticker}: {e}")
                 pass
             
             # 9. Candlestick patterns (5 points)
@@ -335,7 +341,8 @@ class DepositAdvisor:
                     if bullish:
                         score += 5
                         analysis["reasons"].append(f"📈 Bullish candlestick pattern detected: {bullish[0].get('pattern')}")
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Failed to detect candlestick patterns for {ticker}: {e}")
                 pass
             
             # 10. Bond analysis (if applicable)
@@ -353,7 +360,8 @@ class DepositAdvisor:
                         elif risk_adj_yield > 1:
                             score += 10
                             analysis["reasons"].append(f"💵 Good bond yield: {current_yield:.2f}%")
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"Failed to analyze bonds for {ticker}: {e}")
                     pass
             
             analysis["score"] = max(0, min(100, score))
@@ -373,7 +381,7 @@ class DepositAdvisor:
                 analysis["recommendation"] = "STRONG AVOID"
                 
         except Exception as e:
-            print(f"Error analyzing {ticker}: {e}")
+            logger.error(f"Error analyzing {ticker}: {e}")
             analysis["reasons"].append(f"Error in analysis: {str(e)}")
         
         return analysis
