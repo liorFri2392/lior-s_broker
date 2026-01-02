@@ -23,6 +23,7 @@ class DepositAdvisor:
         "INTERNATIONAL": ["VEA", "VXUS", "EFA", "EEM"],
         "EMERGING_MARKETS": ["VWO", "EEM", "IEMG"],
         "TECHNOLOGY": ["XLK", "VGT", "FTEC", "QQQ"],
+        "AI_AND_ROBOTICS": ["BOTZ", "ROBO", "AIQ", "IRBO", "CHAT"],
         "HEALTHCARE": ["XLV", "VHT", "IBB"],
         "FINANCIAL": ["XLF", "VFH", "IYF"],
         "ENERGY": ["XLE", "VDE", "IYE"],
@@ -30,7 +31,8 @@ class DepositAdvisor:
         "REAL_ESTATE": ["VNQ", "SCHH", "IYR"],
         "BONDS": ["BND", "AGG", "TLT"],
         "GOLD": ["GLD", "IAU", "SGOL"],
-        "CRYPTO": ["GBTC", "BITO"],
+        "SILVER": ["SLV", "SIVR", "PSLV"],
+        "CRYPTO": ["GBTC", "BITO", "ETHE"],
         "DIVIDEND": ["VYM", "SCHD", "DVY"],
         "GROWTH": ["VUG", "IVW", "IWF"],
         "VALUE": ["VTV", "IVE", "IWD"]

@@ -445,19 +445,23 @@ class PortfolioAnalyzer:
         }
     
     def find_best_etfs_to_buy(self, amount_usd: float, current_holdings: List[str], exclude_tickers: List[str] = None) -> List[Dict]:
-        """Find best ETFs to buy for diversification."""
-        exclude_tickers = exclude_tickers or []
+        """Find best ETFs to buy for diversification - uses all categories from DepositAdvisor."""
+        from deposit_advisor import DepositAdvisor
         
-        # Popular ETF categories for diversification
+        exclude_tickers = exclude_tickers or []
+        advisor = DepositAdvisor(self.portfolio_file)
+        
+        # Get all ETFs from all categories (including Gold, Silver, Crypto, AI, etc.)
+        all_etfs = []
+        for category, etfs in advisor.ETF_CATEGORIES.items():
+            for etf in etfs:
+                if etf not in all_etfs:
+                    all_etfs.append(etf)
+        
+        # Filter out current holdings and excluded
         diversification_etfs = [
-            "VEA", "VXUS", "VWO", "IEMG",  # International
-            "IWM", "VB", "IJR",  # Small cap
-            "VNQ", "SCHH",  # Real estate
-            "XLK", "VGT",  # Tech
-            "XLE", "VDE",  # Energy
-            "XLF", "VFH",  # Financial
-            "VYM", "SCHD",  # Dividend
-            "VUG", "VTV",  # Growth/Value
+            etf for etf in all_etfs 
+            if etf not in current_holdings and etf not in exclude_tickers
         ]
         
         # Filter out current holdings and excluded
