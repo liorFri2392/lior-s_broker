@@ -1,18 +1,36 @@
-.PHONY: analyze deposit setup install
+.PHONY: analyze deposit setup install venv clean
+
+# Virtual environment directory
+VENV = venv
+PYTHON = $(VENV)/bin/python3
+PIP = $(VENV)/bin/pip3
 
 # Default target
 all: help
 
 help:
 	@echo "Available commands:"
+	@echo "  make venv       - Create virtual environment"
+	@echo "  make install    - Install required Python packages"
+	@echo "  make setup      - Initial setup (create venv, install packages, create portfolio.json)"
 	@echo "  make analyze    - Analyze current portfolio and provide recommendations"
 	@echo "  make deposit    - Get recommendations for depositing funds"
-	@echo "  make install    - Install required Python packages"
-	@echo "  make setup      - Initial setup (install packages and create portfolio.json)"
+	@echo "  make clean      - Remove virtual environment"
 
-install:
+venv:
+	@echo "Creating virtual environment..."
+	@if [ ! -d "$(VENV)" ]; then \
+		python3 -m venv $(VENV); \
+		echo "Virtual environment created."; \
+	else \
+		echo "Virtual environment already exists."; \
+	fi
+
+install: venv
 	@echo "Installing required packages..."
-	pip3 install -r requirements.txt
+	@$(PIP) install --upgrade pip
+	@$(PIP) install -r requirements.txt
+	@echo "Packages installed successfully."
 
 setup: install
 	@echo "Setting up initial portfolio structure..."
@@ -22,13 +40,20 @@ setup: install
 	else \
 		echo "portfolio.json already exists"; \
 	fi
+	@echo ""
+	@echo "✅ Setup complete! You can now use 'make analyze' or 'make deposit'"
 
-analyze:
+analyze: venv
 	@echo "Running portfolio analysis..."
-	python3 portfolio_analyzer.py
+	@$(PYTHON) portfolio_analyzer.py
 
-deposit:
+deposit: venv
 	@echo "Deposit Advisory System"
 	@read -p "Enter deposit amount in ILS (₪): " amount; \
-	python3 deposit_advisor.py $$amount
+	$(PYTHON) deposit_advisor.py $$amount
+
+clean:
+	@echo "Removing virtual environment..."
+	@rm -rf $(VENV)
+	@echo "Virtual environment removed."
 
