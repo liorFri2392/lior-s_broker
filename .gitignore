@@ -18,3 +18,6 @@ portfolio.json.backup
 # Virtual environment
 venv/
 
+# Portfolio data - should not be committed
+portfolio.json
+
