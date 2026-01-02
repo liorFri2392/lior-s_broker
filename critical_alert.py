@@ -140,12 +140,21 @@ class CriticalAlertSystem:
         }
     
     def scan_critical_buy_opportunities(self) -> List[Dict]:
-        """Scan for ETFs with exceptional buy opportunities."""
+        """Scan for ETFs with exceptional buy opportunities, considering current portfolio."""
         critical_buys = []
+        
+        # Get current portfolio holdings to avoid recommending what we already have
+        portfolio = self.analyzer.load_portfolio()
+        current_holdings = [h.get("ticker", "").upper() for h in portfolio.get("holdings", [])]
+        portfolio_value = portfolio.get("total_value", 0)
+        cash_available = portfolio.get("cash", 0)
+        
+        logger.info(f"Current portfolio has {len(current_holdings)} holdings: {current_holdings}")
+        logger.info(f"Portfolio value: ${portfolio_value:,.2f}, Cash available: ${cash_available:,.2f}")
         
         # Focus on high-potential categories
         high_potential_categories = [
-            "AI", "TECHNOLOGY", "SEMICONDUCTORS", "CRYPTO", "CLEAN_ENERGY",
+            "AI_AND_ROBOTICS", "TECHNOLOGY", "SEMICONDUCTORS", "CRYPTO", "CLEAN_ENERGY",
             "HEALTHCARE", "FINANCIAL", "GROWTH", "MOMENTUM"
         ]
         
@@ -155,14 +164,23 @@ class CriticalAlertSystem:
             if category in self.advisor.ETF_CATEGORIES:
                 etfs = self.advisor.ETF_CATEGORIES[category][:3]  # Top 3 from each category
                 for etf in etfs:
-                    if etf not in analyzed_etfs:
+                    etf_upper = etf.upper()
+                    # Skip if already in portfolio (unless it's a great opportunity to increase)
+                    if etf_upper not in analyzed_etfs:
                         analyzed_etfs.append(etf)
         
-        print(f"   Analyzing {len(analyzed_etfs)} high-potential ETFs...")
+        print(f"   Analyzing {len(analyzed_etfs)} high-potential ETFs (excluding current holdings)...")
         
         # Analyze in batches
         for i, etf in enumerate(analyzed_etfs[:20]):  # Limit to 20 for performance
             try:
+                etf_upper = etf.upper()
+                
+                # Skip if already in portfolio (focus on diversification)
+                if etf_upper in current_holdings:
+                    logger.debug(f"Skipping {etf} - already in portfolio")
+                    continue
+                
                 analysis = self.advisor.analyze_etf(etf, verbose=False)
                 score = analysis.get("score", 0)
                 
@@ -176,15 +194,19 @@ class CriticalAlertSystem:
                     # 2. Strong expected return (>15%)
                     # 3. Positive technical indicators
                     if expected_return > 15 or score >= 85:
+                        # Calculate recommended amount based on available cash
+                        recommended_amount = min(1000, cash_available * 0.1) if cash_available > 0 else 1000
+                        
                         critical_buys.append({
                             "type": "BUY",
                             "ticker": etf,
                             "priority": "CRITICAL" if score >= 85 else "HIGH",
-                            "reason": f"Exceptional opportunity - Score: {score}/100. Expected 3yr return: {expected_return:.1f}%",
-                            "amount": 1000,  # Suggest $1000 minimum
+                            "reason": f"Exceptional opportunity - Score: {score}/100. Expected 3yr return: {expected_return:.1f}%. Not in current portfolio.",
+                            "amount": recommended_amount,
                             "expected_return": expected_return,
                             "score": score,
-                            "details": "; ".join(reasons[:3])  # Top 3 reasons
+                            "details": "; ".join(reasons[:3]),  # Top 3 reasons
+                            "diversification": "New holding - adds diversification"
                         })
                 
                 # Progress indicator
