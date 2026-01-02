@@ -679,16 +679,17 @@ class PortfolioAnalyzer:
             if not rebalancing["reason"]:
                 rebalancing["reason"] = "Low diversification - consider adding more holdings"
         
-        # Check for underperforming holdings
+        # Check for underperforming holdings (STRONG SELL or SELL recommendations)
         for analysis in analyses:
-            if analysis["recommendation_score"] < 30:
+            if analysis["recommendation"] in ["STRONG SELL", "SELL"] or analysis["recommendation_score"] < 30:
                 rebalancing["needed"] = True
                 if not rebalancing["reason"]:
-                    rebalancing["reason"] = f"Underperforming holding: {analysis['ticker']}"
+                    rebalancing["reason"] = f"Underperforming holding: {analysis['ticker']} (Score: {analysis['recommendation_score']:.1f}/100)"
                 
-                # Calculate sell amount
-                sell_value_usd = analysis["current_value"]
-                sell_shares = analysis["quantity"]
+                # Calculate sell amount (sell 50% if STRONG SELL, 25% if SELL)
+                sell_percentage = 0.5 if analysis["recommendation"] == "STRONG SELL" else 0.25
+                sell_value_usd = analysis["current_value"] * sell_percentage
+                sell_shares = int(analysis["quantity"] * sell_percentage)
                 total_sell_amount += sell_value_usd
                 rebalancing["recommendations"].append({
                     "action": "SELL",
@@ -696,8 +697,14 @@ class PortfolioAnalyzer:
                     "sell_amount_usd": sell_value_usd,
                     "sell_shares": sell_shares,
                     "current_price_usd": analysis["current_price"],
-                    "reason": f"Low recommendation score: {analysis['recommendation_score']:.1f} - Consider selling {sell_shares} shares (${sell_value_usd:,.2f})"
+                    "reason": f"{analysis['recommendation']} - Score: {analysis['recommendation_score']:.1f}/100. Consider selling {sell_shares} shares (${sell_value_usd:,.2f})"
                 })
+        
+        # Check for holdings with very low scores but not yet SELL (warning threshold)
+        low_score_holdings = [a for a in analyses if 30 <= a["recommendation_score"] < 40]
+        if low_score_holdings and not rebalancing["needed"]:
+            # Don't force rebalancing, but note it in the reason
+            rebalancing["reason"] = f"Some holdings have low scores: {', '.join([a['ticker'] for a in low_score_holdings])}"
         
         # If we're selling, recommend what to buy instead
         if total_sell_amount > 0 and rebalancing["recommendations"]:
@@ -730,6 +737,12 @@ class PortfolioAnalyzer:
             print("   ⚡ Using REAL-TIME prices")
         else:
             print("   📅 Using LAST CLOSE prices")
+        
+        # Show cache usage info
+        cached_prices = sum(1 for t in tickers if t in self.price_cache and 
+                           datetime.now() - self.price_cache[t][1] < (timedelta(minutes=1) if market_status else self.cache_timeout))
+        if cached_prices > 0:
+            print(f"   💾 Using cached prices for {cached_prices}/{len(tickers)} tickers (cache: {'1 min' if market_status else '5 min'})")
         print()
         
         # Analyze each holding in parallel for better performance
