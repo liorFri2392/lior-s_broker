@@ -192,6 +192,7 @@ class CriticalAlertSystem:
                     print(f"   Progress: {i + 1}/{min(len(analyzed_etfs), 20)} ETFs analyzed...")
                     
             except Exception as e:
+                logger.debug(f"Failed to analyze ETF {etf}: {e}")
                 continue  # Skip failed analyses
         
         return critical_buys
@@ -259,8 +260,9 @@ class CriticalAlertSystem:
             return success
             
         except Exception as e:
+            logger.error(f"Error sending alerts: {e}", exc_info=True)
             print(f"\n❌ Error sending alerts: {e}")
-            print("   Make sure EMAIL_SENDER and EMAIL_PASSWORD are set in .env file")
+            print("   Make sure EMAIL_SENDER and EMAIL_PASSWORD are set in environment variables")
             return False
     
     def run(self) -> Dict:

@@ -5,6 +5,7 @@ Email Notifier Module - Sends critical alerts via Gmail SMTP
 
 import smtplib
 import os
+import logging
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import List, Dict
@@ -12,6 +13,8 @@ from datetime import datetime
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 class EmailNotifier:
     """Send email notifications for critical portfolio actions."""
@@ -22,7 +25,8 @@ class EmailNotifier:
         self.recipient_email = os.getenv("EMAIL_RECIPIENT", self.sender_email)  # Default to sender if not set
         
         if not self.sender_email or not self.sender_password:
-            raise ValueError("EMAIL_SENDER and EMAIL_PASSWORD must be set in .env file")
+            logger.error("EMAIL_SENDER and EMAIL_PASSWORD must be set in environment variables")
+            raise ValueError("EMAIL_SENDER and EMAIL_PASSWORD must be set in .env file or environment variables")
     
     def send_critical_alert(self, subject: str, critical_items: List[Dict], portfolio_value: float = None) -> bool:
         """Send critical alert email with urgent actions."""
@@ -112,10 +116,12 @@ class EmailNotifier:
                 server.login(self.sender_email, self.sender_password)
                 server.send_message(msg)
             
+            logger.info(f"Critical alert email sent successfully to {self.recipient_email}")
             print(f"✅ Critical alert email sent successfully to {self.recipient_email}")
             return True
             
         except Exception as e:
+            logger.error(f"Error sending critical alert email: {e}", exc_info=True)
             print(f"❌ Error sending email: {e}")
             return False
     
@@ -145,9 +151,11 @@ class EmailNotifier:
                 server.login(self.sender_email, self.sender_password)
                 server.send_message(msg)
             
+            logger.info(f"Daily summary email sent successfully to {self.recipient_email}")
             return True
             
         except Exception as e:
+            logger.error(f"Error sending daily summary email: {e}", exc_info=True)
             print(f"❌ Error sending daily summary: {e}")
             return False
 
