@@ -16,26 +16,69 @@ from portfolio_analyzer import PortfolioAnalyzer
 class DepositAdvisor:
     """Advises on ETF purchases when depositing funds."""
     
-    # Popular ETF categories and tickers
+    # Popular ETF categories and tickers - organized by trends and industries
     ETF_CATEGORIES = {
+        # Core Market Exposure
         "US_LARGE_CAP": ["SPY", "VOO", "IVV", "QQQ"],
         "US_SMALL_CAP": ["IWM", "VB", "IJR"],
         "INTERNATIONAL": ["VEA", "VXUS", "EFA", "EEM"],
         "EMERGING_MARKETS": ["VWO", "EEM", "IEMG"],
+        
+        # Technology & Innovation (High Growth Trends)
         "TECHNOLOGY": ["XLK", "VGT", "FTEC", "QQQ"],
         "AI_AND_ROBOTICS": ["BOTZ", "ROBO", "AIQ", "IRBO", "CHAT"],
+        "SEMICONDUCTORS": ["SOXX", "SMH", "XSD"],
+        "CLOUD_COMPUTING": ["WCLD", "SKYY", "CLOU"],
+        "CYBERSECURITY": ["HACK", "CIBR", "BUG"],
+        "ELECTRIC_VEHICLES": ["DRIV", "IDRV", "KARS"],
+        "CLEAN_ENERGY": ["ICLN", "QCLN", "PBW"],
+        
+        # Healthcare & Biotech (Defensive + Growth)
         "HEALTHCARE": ["XLV", "VHT", "IBB"],
+        "BIOTECH": ["IBB", "XBI", "BBH"],
+        "GENOMICS": ["GNOM", "ARKG", "HELX"],
+        
+        # Financial Services
         "FINANCIAL": ["XLF", "VFH", "IYF"],
+        "FINTECH": ["FINX", "IPAY", "ARKF"],
+        
+        # Energy & Commodities
         "ENERGY": ["XLE", "VDE", "IYE"],
-        "CONSUMER": ["XLY", "VCR", "IYC"],
-        "REAL_ESTATE": ["VNQ", "SCHH", "IYR"],
-        "BONDS": ["BND", "AGG", "TLT"],
+        "OIL_GAS": ["XOP", "XES", "IEZ"],
         "GOLD": ["GLD", "IAU", "SGOL"],
         "SILVER": ["SLV", "SIVR", "PSLV"],
+        "COMMODITIES": ["DBC", "GSG", "PDBC"],
+        
+        # Consumer & Retail
+        "CONSUMER": ["XLY", "VCR", "IYC"],
+        "CONSUMER_STAPLES": ["XLP", "VDC", "IYK"],
+        "E_COMMERCE": ["IBUY", "ONLN", "CLIX"],
+        
+        # Real Estate & Infrastructure
+        "REAL_ESTATE": ["VNQ", "SCHH", "IYR"],
+        "INFRASTRUCTURE": ["IFRA", "PAVE", "IGF"],
+        
+        # Fixed Income
+        "BONDS": ["BND", "AGG", "TLT"],
+        "HIGH_YIELD": ["HYG", "JNK", "SHYG"],
+        "TIPS": ["TIP", "SCHP", "VTIP"],
+        
+        # Digital Assets
         "CRYPTO": ["GBTC", "BITO", "ETHE"],
+        "BLOCKCHAIN": ["BLOK", "LEGR", "KOIN"],
+        
+        # Investment Styles
         "DIVIDEND": ["VYM", "SCHD", "DVY"],
         "GROWTH": ["VUG", "IVW", "IWF"],
-        "VALUE": ["VTV", "IVE", "IWD"]
+        "VALUE": ["VTV", "IVE", "IWD"],
+        "MOMENTUM": ["MTUM", "QMOM", "DWAS"],
+        
+        # Thematic & Future Trends
+        "ESG": ["ESG", "ESGD", "SUSL"],
+        "WATER": ["PHO", "CGW", "FIW"],
+        "AGRICULTURE": ["DBA", "MOO", "VEGI"],
+        "DEFENSE": ["ITA", "XAR", "PPA"],
+        "AEROSPACE": ["ITA", "XAR", "PPA"]
     }
     
     def __init__(self, portfolio_file: str = "portfolio.json"):
@@ -64,8 +107,64 @@ class DepositAdvisor:
             print(f"Warning: Could not fetch exchange rate, using default: {e}")
             return self.exchange_rate_usd_ils
     
+    def analyze_industry_trends(self, category: str) -> Dict:
+        """Analyze industry trends for a category by comparing all ETFs in that category."""
+        if category not in self.ETF_CATEGORIES:
+            return {"trend": "UNKNOWN", "score": 50, "reason": "Category not found"}
+        
+        etfs = self.ETF_CATEGORIES[category]
+        category_returns = []
+        category_momentums = []
+        
+        for etf in etfs[:3]:  # Analyze top 3 ETFs in category
+            try:
+                stock = yf.Ticker(etf)
+                data = stock.history(period="6mo")
+                if not data.empty and len(data) > 20:
+                    # Calculate 6-month return
+                    return_6m = (data['Close'].iloc[-1] / data['Close'].iloc[0] - 1) * 100
+                    category_returns.append(return_6m)
+                    
+                    # Calculate recent momentum (last 20 days)
+                    momentum = (data['Close'].iloc[-1] / data['Close'].iloc[-20] - 1) * 100 if len(data) >= 20 else 0
+                    category_momentums.append(momentum)
+            except Exception:
+                continue
+        
+        if not category_returns:
+            return {"trend": "UNKNOWN", "score": 50, "reason": "Insufficient data"}
+        
+        avg_return = np.mean(category_returns)
+        avg_momentum = np.mean(category_momentums)
+        
+        # Determine trend
+        if avg_return > 15 and avg_momentum > 5:
+            trend = "STRONG_UPTREND"
+            score = 75
+            reason = f"Strong industry performance: {avg_return:.1f}% return, {avg_momentum:.1f}% momentum"
+        elif avg_return > 5 and avg_momentum > 0:
+            trend = "UPTREND"
+            score = 65
+            reason = f"Positive industry trend: {avg_return:.1f}% return"
+        elif avg_return < -10 or avg_momentum < -5:
+            trend = "DOWNTREND"
+            score = 35
+            reason = f"Weak industry performance: {avg_return:.1f}% return"
+        else:
+            trend = "NEUTRAL"
+            score = 50
+            reason = f"Neutral industry trend: {avg_return:.1f}% return"
+        
+        return {
+            "trend": trend,
+            "score": score,
+            "reason": reason,
+            "avg_return": avg_return,
+            "avg_momentum": avg_momentum
+        }
+    
     def analyze_etf(self, ticker: str) -> Dict:
-        """Analyze an ETF for investment potential."""
+        """Analyze an ETF for investment potential with industry trend analysis."""
         print(f"Analyzing ETF: {ticker}...")
         
         analysis = {
@@ -73,7 +172,8 @@ class DepositAdvisor:
             "score": 0,
             "current_price": 0,
             "recommendation": "NEUTRAL",
-            "reasons": []
+            "reasons": [],
+            "industry_trend": {}
         }
         
         try:
@@ -179,6 +279,28 @@ class DepositAdvisor:
             elif current_price < sma_20 < sma_50:
                 score -= 10
                 analysis["reasons"].append("Bearish trend (price below moving averages)")
+            
+            # 7. Industry trend analysis (15 points) - NEW!
+            etf_category = None
+            for cat, etfs in self.ETF_CATEGORIES.items():
+                if ticker in etfs:
+                    etf_category = cat
+                    break
+            
+            if etf_category:
+                industry_trend = self.analyze_industry_trends(etf_category)
+                analysis["industry_trend"] = industry_trend
+                
+                # Add industry trend to score
+                if industry_trend["trend"] == "STRONG_UPTREND":
+                    score += 15
+                    analysis["reasons"].append(f"🔥 Hot industry: {industry_trend['reason']}")
+                elif industry_trend["trend"] == "UPTREND":
+                    score += 10
+                    analysis["reasons"].append(f"📈 Growing industry: {industry_trend['reason']}")
+                elif industry_trend["trend"] == "DOWNTREND":
+                    score -= 10
+                    analysis["reasons"].append(f"📉 Declining industry: {industry_trend['reason']}")
             
             analysis["score"] = max(0, min(100, score))
             analysis["annual_return"] = annual_return
