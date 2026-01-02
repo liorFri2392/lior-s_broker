@@ -83,14 +83,26 @@ class DepositAdvisor:
             analysis["category"] = info.get("category", "Unknown")
             analysis["expense_ratio"] = info.get("annualReportExpenseRatio", 0) * 100
             
-            # Get price
+            # Get price - check market status first
+            market_status, market_message = self.analyzer.is_market_open()
+            
+            # Try to get real-time price if market is open
+            if market_status:
+                try:
+                    analysis["current_price"] = float(stock.fast_info.get('lastPrice', 0))
+                    if analysis["current_price"] > 0:
+                        return analysis  # Got real-time price, continue with analysis
+                except Exception:
+                    pass  # Fall through to historical data
+            
+            # Fallback to historical data (last close)
             hist = stock.history(period="1d")
             if not hist.empty:
                 analysis["current_price"] = float(hist['Close'].iloc[-1])
             else:
                 try:
-                    analysis["current_price"] = float(stock.fast_info['lastPrice'])
-                except:
+                    analysis["current_price"] = float(stock.fast_info.get('lastPrice', 0))
+                except Exception:
                     return analysis
             
             # Get historical data for analysis
@@ -393,6 +405,15 @@ class DepositAdvisor:
         print("DEPOSIT ADVISORY SYSTEM")
         print("=" * 60)
         
+        # Check and display market status
+        market_status, market_message = self.analyzer.is_market_open()
+        print(f"\n📊 Market Status: {market_message}")
+        if market_status:
+            print("   ⚡ Using REAL-TIME prices for recommendations")
+        else:
+            print("   📅 Using LAST CLOSE prices for recommendations")
+        print()
+        
         # Load portfolio
         portfolio = self.load_portfolio()
         
@@ -437,8 +458,12 @@ class DepositAdvisor:
         exchange_rate = self.get_exchange_rate()
         deposit_amount_usd = deposit_amount_ils / exchange_rate
         
+        # Get market status
+        market_status, market_message = self.analyzer.is_market_open()
+        
         print(f"\nDeposit Amount: ₪{deposit_amount_ils:,.2f} (${deposit_amount_usd:,.2f})")
         print(f"Exchange Rate: {exchange_rate} ILS/USD")
+        print(f"📊 {market_message}")
         
         if not recommendations:
             print("\nNo recommendations available at this time.")

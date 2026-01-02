@@ -6,16 +6,16 @@
     {
       "ticker": "XLV",
       "quantity": 6,
-      "last_price": 154.9550018310547,
-      "current_value": 929.7300109863281
+      "last_price": 680.6599731445312,
+      "current_value": 6125.939758300781
     },
     {
       "ticker": "SPY",
       "quantity": 9,
-      "last_price": 681.1900024414062,
-      "current_value": 6130.710021972656
+      "last_price": 154.9199981689453,
+      "current_value": 929.5199890136719
     }
   ],
-  "last_updated": "2026-01-02T18:50:23.425714",
-  "total_value": 7107.140032958984
+  "last_updated": "2026-01-02T18:53:33.293176",
+  "total_value": 7102.159747314453
 }
