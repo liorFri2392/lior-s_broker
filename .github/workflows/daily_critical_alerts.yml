@@ -1,0 +1,71 @@
+name: Daily Critical Portfolio Alerts
+
+on:
+  schedule:
+    # Run Monday-Friday at 10:00 AM and 2:00 PM EST (15:00 and 19:00 UTC)
+    # Adjust timezone as needed - EST is UTC-5, EDT is UTC-4
+    - cron: '0 15,19 * * 1-5'  # 10 AM and 2 PM EST on weekdays
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  check-critical-alerts:
+    runs-on: ubuntu-latest
+    name: Check for Critical Portfolio Actions
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Create portfolio.json from secret
+        env:
+          PORTFOLIO_JSON: ${{ secrets.PORTFOLIO_JSON }}
+        run: |
+          if [ -n "$PORTFOLIO_JSON" ]; then
+            echo "$PORTFOLIO_JSON" > portfolio.json
+          else
+            echo '{"currency": "USD", "cash": 0, "holdings": [], "last_updated": null, "total_value": 0}' > portfolio.json
+            echo "Warning: PORTFOLIO_JSON secret not set. Using empty portfolio."
+          fi
+      
+      - name: Set up email credentials
+        env:
+          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}
+        run: |
+          echo "EMAIL_SENDER=$EMAIL_SENDER" >> $GITHUB_ENV
+          echo "EMAIL_PASSWORD=$EMAIL_PASSWORD" >> $GITHUB_ENV
+          if [ -n "$EMAIL_RECIPIENT" ]; then
+            echo "EMAIL_RECIPIENT=$EMAIL_RECIPIENT" >> $GITHUB_ENV
+          else
+            echo "EMAIL_RECIPIENT=$EMAIL_SENDER" >> $GITHUB_ENV
+          fi
+      
+      - name: Run Critical Alert Check
+        env:
+          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT || secrets.EMAIL_SENDER }}
+        run: |
+          python critical_alert.py
+        continue-on-error: true  # Don't fail workflow if alerts are sent
+      
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: critical-alert-results
+          path: |
+            portfolio.json
+          retention-days: 1
+

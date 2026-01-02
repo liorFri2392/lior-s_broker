@@ -15,6 +15,7 @@ help:
 	@echo "  make setup      - Initial setup (create venv, install packages, create portfolio.json)"
 	@echo "  make analyze    - Analyze current portfolio and provide recommendations"
 	@echo "  make deposit    - Get recommendations for depositing funds"
+	@echo "  make alerts     - Check for critical portfolio actions (requires .env with email credentials)"
 	@echo "  make clean      - Remove virtual environment"
 
 venv:
@@ -51,6 +52,16 @@ deposit: venv
 	@echo "Deposit Advisory System"
 	@read -p "Enter deposit amount in ILS (₪): " amount; \
 	$(PYTHON) deposit_advisor.py $$amount
+
+alerts: venv
+	@echo "Checking for critical portfolio actions..."
+	@if [ ! -f .env ]; then \
+		echo "❌ Error: .env file not found!"; \
+		echo "   Please create .env file with EMAIL_SENDER and EMAIL_PASSWORD"; \
+		echo "   You can copy .env.example to .env and fill in your values"; \
+		exit 1; \
+	fi
+	@$(PYTHON) critical_alert.py
 
 clean:
 	@echo "Removing virtual environment..."
