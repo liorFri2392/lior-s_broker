@@ -17,6 +17,7 @@ import numpy as np
 from scipy import stats
 import requests
 from newsapi import NewsApiClient
+from advanced_analysis import AdvancedAnalyzer
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -33,6 +34,7 @@ class PortfolioAnalyzer:
         self.market_data_cache = {}  # Cache for market data: {ticker: (data, timestamp)}
         self.news_cache = {}  # Cache for news: {ticker: (sentiment, timestamp)}
         self.cache_timeout = timedelta(minutes=5)  # Cache timeout
+        self.advanced_analyzer = AdvancedAnalyzer()  # Advanced analysis module
     
     def get_exchange_rate(self) -> float:
         """Get current USD/ILS exchange rate with caching."""
@@ -257,6 +259,29 @@ class PortfolioAnalyzer:
                 indicators['trend'] = 'NEUTRAL'
         else:
             indicators['trend'] = 'NEUTRAL'
+        
+        # Candlestick patterns (advanced)
+        try:
+            candlestick_patterns = self.advanced_analyzer.detect_candlestick_patterns(data)
+            if candlestick_patterns:
+                indicators['candlestick_patterns'] = candlestick_patterns
+                # Add signal strength based on patterns
+                bullish_patterns = [p for p in candlestick_patterns if p.get('signal') == 'BULLISH']
+                bearish_patterns = [p for p in candlestick_patterns if p.get('signal') == 'BEARISH']
+                if bullish_patterns:
+                    indicators['pattern_signal'] = 'BULLISH'
+                elif bearish_patterns:
+                    indicators['pattern_signal'] = 'BEARISH'
+        except Exception:
+            pass
+        
+        # Statistical forecast (mid-term yield optimization)
+        try:
+            forecast = self.advanced_analyzer.calculate_statistical_forecast(data, periods=252*3)  # 3 years
+            if forecast:
+                indicators['forecast'] = forecast
+        except Exception:
+            pass
         
         return indicators
     

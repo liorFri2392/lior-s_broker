@@ -12,6 +12,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from portfolio_analyzer import PortfolioAnalyzer
+from advanced_analysis import AdvancedAnalyzer
 
 class DepositAdvisor:
     """Advises on ETF purchases when depositing funds."""
@@ -84,6 +85,7 @@ class DepositAdvisor:
     def __init__(self, portfolio_file: str = "portfolio.json"):
         self.portfolio_file = portfolio_file
         self.analyzer = PortfolioAnalyzer(portfolio_file)
+        self.advanced_analyzer = AdvancedAnalyzer()
         self.exchange_rate_usd_ils = 3.7  # Approximate, should be fetched from API
     
     def load_portfolio(self) -> Dict:
@@ -280,7 +282,7 @@ class DepositAdvisor:
                 score -= 10
                 analysis["reasons"].append("Bearish trend (price below moving averages)")
             
-            # 7. Industry trend analysis (15 points) - NEW!
+            # 7. Industry trend analysis (15 points)
             etf_category = None
             for cat, etfs in self.ETF_CATEGORIES.items():
                 if ticker in etfs:
@@ -301,6 +303,64 @@ class DepositAdvisor:
                 elif industry_trend["trend"] == "DOWNTREND":
                     score -= 10
                     analysis["reasons"].append(f"📉 Declining industry: {industry_trend['reason']}")
+            
+            # 8. Mid-term yield optimization (20 points) - ULTIMATE BROKER FEATURE
+            try:
+                mid_term_analysis = self.advanced_analyzer.optimize_mid_term_yield([{"ticker": ticker}], target_years=3)
+                if mid_term_analysis and len(mid_term_analysis) > 0:
+                    mt_analysis = mid_term_analysis[0].get("mid_term_analysis", {})
+                    expected_return = mt_analysis.get("expected_return", 0)
+                    optimization_score = mt_analysis.get("optimization_score", 0)
+                    
+                    analysis["mid_term_yield"] = {
+                        "expected_3yr_return": expected_return,
+                        "optimization_score": optimization_score,
+                        "sharpe_ratio": mt_analysis.get("sharpe_ratio", 0),
+                        "win_rate": mt_analysis.get("win_rate", 50)
+                    }
+                    
+                    # Add to score based on mid-term yield potential
+                    if expected_return > 15:
+                        score += 20
+                        analysis["reasons"].append(f"🎯 Excellent mid-term yield potential: {expected_return:.1f}% (3yr forecast)")
+                    elif expected_return > 10:
+                        score += 15
+                        analysis["reasons"].append(f"📊 Strong mid-term yield potential: {expected_return:.1f}% (3yr forecast)")
+                    elif expected_return > 5:
+                        score += 10
+                        analysis["reasons"].append(f"✅ Good mid-term yield potential: {expected_return:.1f}% (3yr forecast)")
+            except Exception:
+                pass
+            
+            # 9. Candlestick patterns (5 points)
+            try:
+                patterns = self.advanced_analyzer.detect_candlestick_patterns(data)
+                if patterns:
+                    analysis["candlestick_patterns"] = patterns
+                    bullish = [p for p in patterns if p.get('signal') == 'BULLISH']
+                    if bullish:
+                        score += 5
+                        analysis["reasons"].append(f"📈 Bullish candlestick pattern detected: {bullish[0].get('pattern')}")
+            except Exception:
+                pass
+            
+            # 10. Bond analysis (if applicable)
+            if etf_category in ["BONDS", "HIGH_YIELD", "TIPS"]:
+                try:
+                    bond_analysis = self.advanced_analyzer.analyze_bonds(ticker)
+                    if bond_analysis and "yield_analysis" in bond_analysis:
+                        analysis["bond_analysis"] = bond_analysis
+                        current_yield = bond_analysis["yield_analysis"].get("current_yield", 0)
+                        risk_adj_yield = bond_analysis["yield_analysis"].get("risk_adjusted_yield", 0)
+                        
+                        if risk_adj_yield > 2:
+                            score += 15
+                            analysis["reasons"].append(f"💰 Excellent bond yield: {current_yield:.2f}% (risk-adjusted: {risk_adj_yield:.2f})")
+                        elif risk_adj_yield > 1:
+                            score += 10
+                            analysis["reasons"].append(f"💵 Good bond yield: {current_yield:.2f}%")
+                except Exception:
+                    pass
             
             analysis["score"] = max(0, min(100, score))
             analysis["annual_return"] = annual_return
@@ -388,7 +448,23 @@ class DepositAdvisor:
                 
                 etf_analyses.append(analysis)
         
-        # Sort by score
+        # Optimize for mid-term yield (3-5 years) - ULTIMATE BROKER FEATURE
+        print("\n🔬 Optimizing for mid-term yield (3-5 years) using statistical models...")
+        optimized_etfs = self.advanced_analyzer.optimize_mid_term_yield(etf_analyses, target_years=3)
+        
+        # Combine score with mid-term yield optimization
+        for etf in etf_analyses:
+            ticker = etf["ticker"]
+            # Find matching optimized analysis
+            optimized = next((o for o in optimized_etfs if o.get("ticker") == ticker), None)
+            if optimized and "mid_term_analysis" in optimized:
+                opt_score = optimized["mid_term_analysis"].get("optimization_score", 0)
+                # Boost score by 30% if mid-term yield is excellent
+                if opt_score > 20:
+                    etf["score"] = min(100, etf["score"] + 10)
+                    etf["mid_term_boost"] = True
+        
+        # Sort by score (now includes mid-term optimization)
         etf_analyses.sort(key=lambda x: x["score"], reverse=True)
         
         # Select top recommendations
