@@ -77,6 +77,11 @@ class DepositAdvisor:
         "VALUE": ["VTV", "IVE", "IWD"],
         "MOMENTUM": ["MTUM", "QMOM", "DWAS"],
         
+        # Leveraged ETFs (HIGH RISK - For experienced investors only)
+        "LEVERAGED_2X": ["SSO", "QLD", "UWM", "EFO"],  # 2x leverage
+        "LEVERAGED_3X": ["TQQQ", "SPXL", "UPRO", "TNA", "FAS", "CURE"],  # 3x leverage (very high risk)
+        "LEVERAGED_INVERSE": ["SQQQ", "SPXS", "SPXU", "TZA", "FAZ"],  # Inverse leveraged (bearish)
+        
         # Thematic & Future Trends
         "ESG": ["ESG", "ESGD", "SUSL"],
         "WATER": ["PHO", "CGW", "FIW"],
@@ -180,8 +185,29 @@ class DepositAdvisor:
             "current_price": 0,
             "recommendation": "NEUTRAL",
             "reasons": [],
-            "industry_trend": {}
+            "industry_trend": {},
+            "is_leveraged": False,
+            "leverage_multiplier": 1.0,
+            "risk_level": "NORMAL"
         }
+        
+        # Check if ETF is leveraged
+        leveraged_2x = ["SSO", "QLD", "UWM", "EFO"]
+        leveraged_3x = ["TQQQ", "SPXL", "UPRO", "TNA", "FAS", "CURE", "SOXL", "LABU", "TECL"]
+        leveraged_inverse = ["SQQQ", "SPXS", "SPXU", "TZA", "FAZ", "SOXS", "LABD", "TECS"]
+        
+        if ticker.upper() in leveraged_2x:
+            analysis["is_leveraged"] = True
+            analysis["leverage_multiplier"] = 2.0
+            analysis["risk_level"] = "HIGH"
+        elif ticker.upper() in leveraged_3x:
+            analysis["is_leveraged"] = True
+            analysis["leverage_multiplier"] = 3.0
+            analysis["risk_level"] = "VERY_HIGH"
+        elif ticker.upper() in leveraged_inverse:
+            analysis["is_leveraged"] = True
+            analysis["leverage_multiplier"] = -3.0  # Negative for inverse
+            analysis["risk_level"] = "VERY_HIGH"
         
         try:
             stock = yf.Ticker(ticker)
@@ -262,14 +288,31 @@ class DepositAdvisor:
                 score -= 15
                 analysis["reasons"].append(f"Negative annual return: {annual_return:.1f}%")
             
-            # 2. Volatility (20 points)
+            # 2. Volatility (20 points) - Adjusted for leveraged ETFs
             volatility = returns.std() * np.sqrt(252) * 100
-            if volatility < 15:
-                score += 10
-                analysis["reasons"].append(f"Low volatility: {volatility:.1f}%")
-            elif volatility > 30:
-                score -= 10
-                analysis["reasons"].append(f"High volatility: {volatility:.1f}%")
+            
+            # Leveraged ETFs have inherently higher volatility - adjust expectations
+            if analysis["is_leveraged"]:
+                leverage = abs(analysis["leverage_multiplier"])
+                # For leveraged ETFs, multiply volatility threshold by leverage
+                volatility_threshold_low = 15 * leverage
+                volatility_threshold_high = 30 * leverage
+                
+                if volatility < volatility_threshold_low:
+                    score += 10
+                    analysis["reasons"].append(f"Relatively low volatility for {leverage}x leveraged ETF: {volatility:.1f}%")
+                elif volatility > volatility_threshold_high:
+                    score -= 15  # More penalty for high volatility in leveraged ETFs
+                    analysis["reasons"].append(f"⚠️ Very high volatility for {leverage}x leveraged ETF: {volatility:.1f}%")
+                else:
+                    analysis["reasons"].append(f"Expected high volatility for {leverage}x leveraged ETF: {volatility:.1f}%")
+            else:
+                if volatility < 15:
+                    score += 10
+                    analysis["reasons"].append(f"Low volatility: {volatility:.1f}%")
+                elif volatility > 30:
+                    score -= 10
+                    analysis["reasons"].append(f"High volatility: {volatility:.1f}%")
             
             # 3. Momentum (20 points)
             recent_return = (data['Close'].iloc[-1] / data['Close'].iloc[-20] - 1) * 100 if len(data) >= 20 else 0
@@ -385,21 +428,44 @@ class DepositAdvisor:
                     logger.debug(f"Failed to analyze bonds for {ticker}: {e}")
                     pass
             
+            # Adjust score for leveraged ETFs - reduce score due to high risk
+            if analysis["is_leveraged"]:
+                leverage = abs(analysis["leverage_multiplier"])
+                risk_penalty = 10 * leverage  # Penalty: 10 points for 2x, 20 for 3x
+                score -= risk_penalty
+                analysis["reasons"].append(f"⚠️ LEVERAGED ETF: {leverage}x leverage - High risk! Score reduced by {risk_penalty} points")
+                if analysis["leverage_multiplier"] < 0:
+                    analysis["reasons"].append(f"⚠️ INVERSE ETF: Moves opposite to market - Very risky!")
+            
             analysis["score"] = max(0, min(100, score))
             analysis["annual_return"] = annual_return
             analysis["volatility"] = volatility
             analysis["momentum"] = recent_return
             
-            if analysis["score"] >= 70:
-                analysis["recommendation"] = "STRONG BUY"
-            elif analysis["score"] >= 60:
-                analysis["recommendation"] = "BUY"
-            elif analysis["score"] >= 40:
-                analysis["recommendation"] = "HOLD"
-            elif analysis["score"] >= 30:
-                analysis["recommendation"] = "AVOID"
+            # Adjust recommendation thresholds for leveraged ETFs
+            if analysis["is_leveraged"]:
+                # Higher thresholds for leveraged ETFs due to risk
+                if analysis["score"] >= 80:
+                    analysis["recommendation"] = "STRONG BUY (HIGH RISK)"
+                elif analysis["score"] >= 70:
+                    analysis["recommendation"] = "BUY (HIGH RISK)"
+                elif analysis["score"] >= 50:
+                    analysis["recommendation"] = "HOLD (HIGH RISK)"
+                elif analysis["score"] >= 40:
+                    analysis["recommendation"] = "AVOID (HIGH RISK)"
+                else:
+                    analysis["recommendation"] = "STRONG AVOID (HIGH RISK)"
             else:
-                analysis["recommendation"] = "STRONG AVOID"
+                if analysis["score"] >= 70:
+                    analysis["recommendation"] = "STRONG BUY"
+                elif analysis["score"] >= 60:
+                    analysis["recommendation"] = "BUY"
+                elif analysis["score"] >= 40:
+                    analysis["recommendation"] = "HOLD"
+                elif analysis["score"] >= 30:
+                    analysis["recommendation"] = "AVOID"
+                else:
+                    analysis["recommendation"] = "STRONG AVOID"
                 
         except Exception as e:
             logger.error(f"Error analyzing {ticker}: {e}")
