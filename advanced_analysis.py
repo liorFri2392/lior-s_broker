@@ -76,49 +76,63 @@ class AdvancedAnalyzer:
         return patterns
     
     def calculate_statistical_forecast(self, data: pd.DataFrame, periods: int = 60) -> Dict:
-        """Calculate statistical forecast using regression models."""
+        """Calculate statistical forecast using regression models with error handling."""
         if data.empty or len(data) < 30:
             return {}
         
-        closes = data['Close'].values
-        dates = np.arange(len(closes))
-        
-        # Linear regression
-        X = dates.reshape(-1, 1)
-        y = closes
-        
-        # Simple linear regression
-        lr = LinearRegression()
-        lr.fit(X, y)
-        linear_forecast = lr.predict(np.array([[len(closes) + periods]]))[0]
-        
-        # Polynomial regression (degree 2)
-        poly_features = PolynomialFeatures(degree=2)
-        X_poly = poly_features.fit_transform(X)
-        poly_lr = LinearRegression()
-        poly_lr.fit(X_poly, y)
-        X_future = poly_features.transform(np.array([[len(closes) + periods]]))
-        poly_forecast = poly_lr.predict(X_future)[0]
-        
-        # Calculate confidence intervals
-        residuals = y - lr.predict(X)
-        std_error = np.std(residuals)
-        confidence_interval = 1.96 * std_error  # 95% confidence
-        
-        # Calculate expected return
-        current_price = closes[-1]
-        expected_return_linear = (linear_forecast / current_price - 1) * 100
-        expected_return_poly = (poly_forecast / current_price - 1) * 100
-        
-        return {
-            "current_price": current_price,
-            "forecast_linear": linear_forecast,
-            "forecast_polynomial": poly_forecast,
-            "expected_return_linear": expected_return_linear,
-            "expected_return_polynomial": expected_return_poly,
-            "confidence_interval": confidence_interval,
-            "forecast_periods": periods
-        }
+        try:
+            closes = data['Close'].values
+            if len(closes) < 30:
+                return {}
+            
+            dates = np.arange(len(closes))
+            
+            # Linear regression
+            X = dates.reshape(-1, 1)
+            y = closes
+            
+            # Simple linear regression
+            lr = LinearRegression()
+            lr.fit(X, y)
+            linear_forecast = lr.predict(np.array([[len(closes) + periods]]))[0]
+            
+            # Polynomial regression (degree 2) - more accurate for trends
+            try:
+                poly_features = PolynomialFeatures(degree=2)
+                X_poly = poly_features.fit_transform(X)
+                poly_lr = LinearRegression()
+                poly_lr.fit(X_poly, y)
+                X_future = poly_features.transform(np.array([[len(closes) + periods]]))
+                poly_forecast = poly_lr.predict(X_future)[0]
+            except Exception:
+                # Fallback to linear if polynomial fails
+                poly_forecast = linear_forecast
+            
+            # Calculate confidence intervals
+            residuals = y - lr.predict(X)
+            std_error = np.std(residuals) if len(residuals) > 0 else 0
+            confidence_interval = 1.96 * std_error if std_error > 0 else 0  # 95% confidence
+            
+            # Calculate expected return
+            current_price = closes[-1]
+            if current_price > 0:
+                expected_return_linear = (linear_forecast / current_price - 1) * 100
+                expected_return_poly = (poly_forecast / current_price - 1) * 100
+            else:
+                expected_return_linear = 0
+                expected_return_poly = 0
+            
+            return {
+                "current_price": current_price,
+                "forecast_linear": linear_forecast,
+                "forecast_polynomial": poly_forecast,
+                "expected_return_linear": expected_return_linear,
+                "expected_return_polynomial": expected_return_poly,
+                "confidence_interval": confidence_interval,
+                "forecast_periods": periods
+            }
+        except Exception:
+            return {}
     
     def analyze_bonds(self, ticker: str) -> Dict:
         """Advanced bond analysis focusing on yield and risk."""
@@ -197,6 +211,9 @@ class AdvancedAnalyzer:
     
     def optimize_mid_term_yield(self, candidates: List[Dict], target_years: int = 3) -> List[Dict]:
         """Optimize for highest yield in mid-term (3-5 years) using statistical models."""
+        if not candidates:
+            return []
+        
         optimized = []
         
         for candidate in candidates:
@@ -206,31 +223,34 @@ class AdvancedAnalyzer:
             
             try:
                 stock = yf.Ticker(ticker)
+                # Get enough data for analysis
                 data = stock.history(period=f"{target_years+1}y")
                 
-                if data.empty or len(data) < 100:
+                if data.empty or len(data) < 60:  # Minimum 60 days
                     continue
                 
                 # Calculate historical returns
                 returns = data['Close'].pct_change().dropna()
+                if len(returns) < 30:
+                    continue
                 
                 # Statistical projections
                 forecast = self.calculate_statistical_forecast(data, periods=target_years * 252)
                 
                 # Expected mid-term return
-                if forecast:
+                if forecast and forecast.get("expected_return_polynomial") is not None:
                     expected_return = forecast.get("expected_return_polynomial", 0)
                 else:
-                    # Fallback to historical average
-                    expected_return = returns.mean() * 252 * 100
+                    # Fallback to historical average annualized
+                    expected_return = returns.mean() * 252 * 100 if len(returns) > 0 else 0
                 
                 # Risk-adjusted return
-                volatility = returns.std() * np.sqrt(252) * 100
+                volatility = returns.std() * np.sqrt(252) * 100 if len(returns) > 0 else 0
                 sharpe_ratio = (expected_return / 100) / (volatility / 100) if volatility > 0 else 0
                 
                 # Calculate probability of positive return
-                positive_days = (returns > 0).sum()
-                win_rate = (positive_days / len(returns)) * 100
+                positive_days = (returns > 0).sum() if len(returns) > 0 else 0
+                win_rate = (positive_days / len(returns)) * 100 if len(returns) > 0 else 50
                 
                 # Score based on yield optimization
                 score = expected_return  # Base score is expected return
@@ -248,7 +268,7 @@ class AdvancedAnalyzer:
                 
                 optimized.append(candidate)
                 
-            except Exception as e:
+            except Exception:
                 continue
         
         # Sort by optimization score (highest yield potential)

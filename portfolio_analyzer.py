@@ -229,15 +229,25 @@ class PortfolioAnalyzer:
         # Beta (market correlation) - simplified
         try:
             spy = yf.Ticker("SPY")
-            spy_data = spy.history(period=period)
-            if not spy_data.empty and len(spy_data) == len(data):
-                spy_returns = spy_data['Close'].pct_change().dropna()
-                asset_returns = returns.dropna()
-                if len(spy_returns) == len(asset_returns) and len(asset_returns) > 0:
+            # Use same period as data
+            data_period = "1y" if len(data) < 252 else "2y" if len(data) < 504 else "5y"
+            spy_data = spy.history(period=data_period)
+            if not spy_data.empty:
+                # Align data lengths
+                min_len = min(len(data), len(spy_data))
+                spy_returns = spy_data['Close'].pct_change().dropna().tail(min_len)
+                asset_returns = returns.dropna().tail(min_len)
+                if len(spy_returns) == len(asset_returns) and len(asset_returns) > 10:
                     covariance = np.cov(asset_returns, spy_returns)[0][1]
                     spy_variance = np.var(spy_returns)
                     if spy_variance > 0:
                         indicators['beta'] = covariance / spy_variance
+                    else:
+                        indicators['beta'] = 1.0
+                else:
+                    indicators['beta'] = 1.0
+            else:
+                indicators['beta'] = 1.0
         except Exception:
             indicators['beta'] = 1.0  # Default beta
         
