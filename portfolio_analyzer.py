@@ -28,20 +28,32 @@ class PortfolioAnalyzer:
         self.news_api_key = os.getenv("NEWS_API_KEY", "")
         self.alpha_vantage_key = os.getenv("ALPHA_VANTAGE_KEY", "")
         self.exchange_rate_usd_ils = 3.7  # Default, will be updated
-        self.price_cache = {}  # Cache for prices
+        self.exchange_rate_cache_time = None  # Cache for exchange rate
+        self.price_cache = {}  # Cache for prices: {ticker: (price, timestamp)}
+        self.market_data_cache = {}  # Cache for market data: {ticker: (data, timestamp)}
+        self.news_cache = {}  # Cache for news: {ticker: (sentiment, timestamp)}
         self.cache_timeout = timedelta(minutes=5)  # Cache timeout
     
     def get_exchange_rate(self) -> float:
-        """Get current USD/ILS exchange rate."""
+        """Get current USD/ILS exchange rate with caching."""
+        now = datetime.now()
+        
+        # Check cache first
+        if (self.exchange_rate_cache_time and 
+            now - self.exchange_rate_cache_time < self.cache_timeout):
+            return self.exchange_rate_usd_ils
+        
+        # Fetch new rate
         try:
             usd_ils = yf.Ticker("USDILS=X")
             hist = usd_ils.history(period="1d")
             if not hist.empty:
                 rate = float(hist['Close'].iloc[-1])
                 self.exchange_rate_usd_ils = rate
+                self.exchange_rate_cache_time = now
                 return rate
             return self.exchange_rate_usd_ils
-        except Exception as e:
+        except Exception:
             return self.exchange_rate_usd_ils
         
     def load_portfolio(self) -> Dict:
@@ -95,9 +107,9 @@ class PortfolioAnalyzer:
                             price = float(stock.fast_info['lastPrice'])
                             self.price_cache[ticker] = (price, now)
                             return ticker, price
-                        except:
+                        except Exception:
                             return ticker, None
-                except Exception as e:
+                except Exception:
                     print(f"Warning: Could not fetch price for {ticker}: {e}")
                     return ticker, None
             
@@ -111,13 +123,24 @@ class PortfolioAnalyzer:
         return prices
     
     def get_market_data(self, ticker: str, period: str = "1y") -> pd.DataFrame:
-        """Get historical market data for analysis."""
+        """Get historical market data for analysis with caching."""
+        now = datetime.now()
+        cache_key = f"{ticker}_{period}"
+        
+        # Check cache first
+        if cache_key in self.market_data_cache:
+            cached_data, cached_time = self.market_data_cache[cache_key]
+            if now - cached_time < self.cache_timeout:
+                return cached_data
+        
+        # Fetch new data
         try:
             stock = yf.Ticker(ticker)
             data = stock.history(period=period)
+            if not data.empty:
+                self.market_data_cache[cache_key] = (data, now)
             return data
-        except Exception as e:
-            print(f"Error fetching market data for {ticker}: {e}")
+        except Exception:
             return pd.DataFrame()
     
     def calculate_technical_indicators(self, data: pd.DataFrame) -> Dict:
@@ -190,7 +213,15 @@ class PortfolioAnalyzer:
         return indicators
     
     def get_news_sentiment(self, ticker: str) -> Dict:
-        """Get news sentiment for a ticker with advanced analysis."""
+        """Get news sentiment for a ticker with advanced analysis and caching."""
+        now = datetime.now()
+        
+        # Check cache first
+        if ticker in self.news_cache:
+            cached_sentiment, cached_time = self.news_cache[ticker]
+            if now - cached_time < self.cache_timeout:
+                return cached_sentiment
+        
         sentiment = {
             "score": 50,  # Neutral base
             "articles_count": 0,
@@ -257,9 +288,11 @@ class PortfolioAnalyzer:
                         ])
                 except:
                     pass
-        except Exception as e:
+        except Exception:
             pass  # Silent fail, use default sentiment
         
+        # Cache the result
+        self.news_cache[ticker] = (sentiment, now)
         return sentiment
     
     def analyze_holding(self, ticker: str, quantity: float, current_price: float) -> Dict:
@@ -385,9 +418,8 @@ class PortfolioAnalyzer:
             if etf not in current_holdings and etf not in exclude_tickers
         ]
         
-        # Analyze top candidates
-        recommendations = []
-        for etf in candidate_etfs[:10]:  # Analyze top 10
+        # Analyze top candidates in parallel
+        def analyze_etf_candidate(etf):
             try:
                 stock = yf.Ticker(etf)
                 hist = stock.history(period="1d")
@@ -401,7 +433,7 @@ class PortfolioAnalyzer:
                         if info.get('annualReportExpenseRatio', 1) < 0.001:
                             score += 10
                         
-                        recommendations.append({
+                        return {
                             "ticker": etf,
                             "name": info.get('longName', etf),
                             "shares": shares,
@@ -410,9 +442,18 @@ class PortfolioAnalyzer:
                             "score": score,
                             "recommendation": "BUY",
                             "reasons": ["Diversification", "Low expense ratio" if info.get('annualReportExpenseRatio', 1) < 0.001 else "Good diversification"]
-                        })
-            except:
-                continue
+                        }
+            except Exception:
+                pass
+            return None
+        
+        recommendations = []
+        with ThreadPoolExecutor(max_workers=min(5, len(candidate_etfs[:10]))) as executor:
+            futures = [executor.submit(analyze_etf_candidate, etf) for etf in candidate_etfs[:10]]
+            for future in as_completed(futures):
+                result = future.result()
+                if result:
+                    recommendations.append(result)
         
         # Sort by score and return top 3
         recommendations.sort(key=lambda x: x['score'], reverse=True)
@@ -519,16 +560,28 @@ class PortfolioAnalyzer:
         tickers = [h["ticker"] for h in portfolio["holdings"]]
         prices = self.get_current_prices(tickers)
         
-        # Analyze each holding
+        # Analyze each holding in parallel for better performance
         analyses = []
-        for holding in portfolio["holdings"]:
-            ticker = holding["ticker"]
-            quantity = holding["quantity"]
-            current_price = prices.get(ticker, holding.get("last_price", 0))
-            
-            if current_price > 0:
-                analysis = self.analyze_holding(ticker, quantity, current_price)
-                analyses.append(analysis)
+        holdings_to_analyze = [
+            (h["ticker"], h["quantity"], prices.get(h["ticker"], h.get("last_price", 0)))
+            for h in portfolio["holdings"]
+            if prices.get(h["ticker"], h.get("last_price", 0)) > 0
+        ]
+        
+        if holdings_to_analyze:
+            with ThreadPoolExecutor(max_workers=min(5, len(holdings_to_analyze))) as executor:
+                futures = {
+                    executor.submit(self.analyze_holding, ticker, quantity, price): (ticker, quantity, price)
+                    for ticker, quantity, price in holdings_to_analyze
+                }
+                
+                for future in as_completed(futures):
+                    try:
+                        analysis = future.result()
+                        analyses.append(analysis)
+                    except Exception as e:
+                        ticker, _, _ = futures[future]
+                        print(f"Error analyzing {ticker}: {e}")
         
         # Calculate portfolio metrics
         portfolio_metrics = self.calculate_portfolio_metrics(portfolio, analyses)
