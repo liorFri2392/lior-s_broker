@@ -378,9 +378,10 @@ class PortfolioAnalyzer:
         self.news_cache[ticker] = (sentiment, now)
         return sentiment
     
-    def analyze_holding(self, ticker: str, quantity: float, current_price: float) -> Dict:
+    def analyze_holding(self, ticker: str, quantity: float, current_price: float, verbose: bool = True) -> Dict:
         """Comprehensive analysis of a single holding."""
-        print(f"Analyzing {ticker}...")
+        if verbose:
+            print(f"Analyzing {ticker}...")
         
         analysis = {
             "ticker": ticker,
@@ -692,7 +693,7 @@ class PortfolioAnalyzer:
         if holdings_to_analyze:
             with ThreadPoolExecutor(max_workers=min(5, len(holdings_to_analyze))) as executor:
                 futures = {
-                    executor.submit(self.analyze_holding, ticker, quantity, price): (ticker, quantity, price)
+                    executor.submit(self.analyze_holding, ticker, quantity, price, verbose=True): (ticker, quantity, price)
                     for ticker, quantity, price in holdings_to_analyze
                 }
                 

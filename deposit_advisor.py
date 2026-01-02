@@ -165,9 +165,10 @@ class DepositAdvisor:
             "avg_momentum": avg_momentum
         }
     
-    def analyze_etf(self, ticker: str) -> Dict:
+    def analyze_etf(self, ticker: str, verbose: bool = False) -> Dict:
         """Analyze an ETF for investment potential with industry trend analysis."""
-        print(f"Analyzing ETF: {ticker}...")
+        if verbose:
+            print(f"Analyzing ETF: {ticker}...")
         
         analysis = {
             "ticker": ticker,
@@ -405,23 +406,31 @@ class DepositAdvisor:
         deposit_amount_usd = deposit_amount_ils / exchange_rate
         
         print(f"Deposit amount in USD: ${deposit_amount_usd:,.2f}")
+        print(f"🔍 Analyzing {len([etf for category in self.ETF_CATEGORIES.values() for etf in category])} potential ETFs across all categories...")
+        print("   (This may take a moment - analyzing with advanced statistical models)")
         
         # Analyze current portfolio
         diversification = self.get_portfolio_diversification(portfolio)
         current_holdings = [h["ticker"] for h in portfolio.get("holdings", [])]
         
-        # Analyze all potential ETFs
+        # Analyze all potential ETFs (silently)
         all_etfs = []
         for category, etfs in self.ETF_CATEGORIES.items():
             for etf in etfs:
                 if etf not in all_etfs:
                     all_etfs.append(etf)
         
-        print(f"\nAnalyzing {len(all_etfs)} potential ETFs...")
         etf_analyses = []
         
+        # Use progress indicator instead of printing each ETF
+        total_etfs = len(all_etfs)
+        analyzed_count = 0
+        
         for etf in all_etfs:
-            analysis = self.analyze_etf(etf)
+            analysis = self.analyze_etf(etf, verbose=False)  # Silent analysis
+            analyzed_count += 1
+            if analyzed_count % 20 == 0:  # Progress every 20 ETFs
+                print(f"   Progress: {analyzed_count}/{total_etfs} ETFs analyzed...")
             if analysis["current_price"] > 0:  # Only include if we got valid data
                 # Bonus for diversification
                 etf_category = None
@@ -442,8 +451,9 @@ class DepositAdvisor:
                 etf_analyses.append(analysis)
         
         # Optimize for mid-term yield (3-5 years) - ULTIMATE BROKER FEATURE
-        print("\n🔬 Optimizing for mid-term yield (3-5 years) using statistical models...")
+        print("🔬 Optimizing for mid-term yield (3-5 years) using statistical models...")
         optimized_etfs = self.advanced_analyzer.optimize_mid_term_yield(etf_analyses, target_years=3)
+        print("✅ Analysis complete! Generating recommendations...\n")
         
         # Combine score with mid-term yield optimization
         for etf in etf_analyses:
