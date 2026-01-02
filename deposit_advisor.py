@@ -48,11 +48,19 @@ class DepositAdvisor:
     def get_exchange_rate(self) -> float:
         """Get current USD/ILS exchange rate."""
         try:
-            # Try to get from API or use default
-            # For now, using approximate rate
+            # Try to get real-time exchange rate from yfinance
+            usd_ils = yf.Ticker("USDILS=X")
+            hist = usd_ils.history(period="1d")
+            if not hist.empty:
+                rate = float(hist['Close'].iloc[-1])
+                self.exchange_rate_usd_ils = rate
+                return rate
+            else:
+                # Fallback to approximate rate
+                return self.exchange_rate_usd_ils
+        except Exception as e:
+            print(f"Warning: Could not fetch exchange rate, using default: {e}")
             return self.exchange_rate_usd_ils
-        except:
-            return 3.7
     
     def analyze_etf(self, ticker: str) -> Dict:
         """Analyze an ETF for investment potential."""
@@ -351,28 +359,34 @@ class DepositAdvisor:
             return
         
         print("\n" + "-" * 60)
-        print("RECOMMENDED PURCHASES")
+        print("RECOMMENDED PURCHASES (All prices and amounts in USD)")
         print("-" * 60)
+        print("\n⚠️  NOTE: All purchases are executed in USD. Amounts shown in ILS are for reference only.")
         
         total_allocated = 0
         for i, rec in enumerate(recommendations, 1):
+            allocation_ils = rec['allocation_amount'] * exchange_rate
             print(f"\n{i}. {rec['ticker']} - {rec['name']}")
             print(f"   Action: {rec['action']}")
             print(f"   Recommendation: {rec['recommendation']} (Score: {rec['score']:.1f}/100)")
-            print(f"   Shares: {rec['shares']}")
+            print(f"   BUY: {rec['shares']} shares")
             print(f"   Price per share: ${rec['price']:.2f}")
-            print(f"   Allocation: ${rec['allocation_amount']:,.2f} ({rec['allocation_percent']:.1f}%)")
+            print(f"   Total cost: ${rec['allocation_amount']:,.2f} (₪{allocation_ils:,.2f})")
+            print(f"   Allocation: {rec['allocation_percent']:.1f}% of deposit")
             print(f"   Reasons:")
             for reason in rec['reasons'][:3]:  # Show top 3 reasons
                 print(f"     • {reason}")
             
             total_allocated += rec['allocation_amount']
         
+        total_allocated_ils = total_allocated * exchange_rate
+        remaining_ils = (deposit_amount_usd - total_allocated) * exchange_rate
+        
         print("\n" + "-" * 60)
         print("SUMMARY")
         print("-" * 60)
-        print(f"Total Allocated: ${total_allocated:,.2f}")
-        print(f"Remaining: ${deposit_amount_usd - total_allocated:,.2f}")
+        print(f"Total Allocated: ${total_allocated:,.2f} (₪{total_allocated_ils:,.2f})")
+        print(f"Remaining: ${deposit_amount_usd - total_allocated:,.2f} (₪{remaining_ils:,.2f})")
         
         print("\n" + "=" * 60)
         print("Recommendations completed!")

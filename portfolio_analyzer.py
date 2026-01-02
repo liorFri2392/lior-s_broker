@@ -25,6 +25,20 @@ class PortfolioAnalyzer:
         self.portfolio_file = portfolio_file
         self.news_api_key = os.getenv("NEWS_API_KEY", "")
         self.alpha_vantage_key = os.getenv("ALPHA_VANTAGE_KEY", "")
+        self.exchange_rate_usd_ils = 3.7  # Default, will be updated
+    
+    def get_exchange_rate(self) -> float:
+        """Get current USD/ILS exchange rate."""
+        try:
+            usd_ils = yf.Ticker("USDILS=X")
+            hist = usd_ils.history(period="1d")
+            if not hist.empty:
+                rate = float(hist['Close'].iloc[-1])
+                self.exchange_rate_usd_ils = rate
+                return rate
+            return self.exchange_rate_usd_ils
+        except Exception as e:
+            return self.exchange_rate_usd_ils
         
     def load_portfolio(self) -> Dict:
         """Load portfolio from JSON file."""
@@ -256,20 +270,41 @@ class PortfolioAnalyzer:
         
         weights = portfolio_metrics["weights"]
         total_holdings = len(weights)
+        total_value_usd = portfolio_metrics["holdings_value"]
         
         # Check for over-concentration
         max_weight = max(weights.values()) if weights else 0
         if max_weight > 0.4:  # More than 40% in one holding
             rebalancing["needed"] = True
-            rebalancing["reason"] = f"Over-concentration: {max(weights, key=weights.get)} is {max_weight*100:.1f}% of portfolio"
             ticker = max(weights, key=weights.get)
-            rebalancing["recommendations"].append({
-                "action": "REDUCE",
-                "ticker": ticker,
-                "current_weight": max_weight,
-                "target_weight": 0.25,
-                "reason": "Diversification"
-            })
+            current_value_usd = total_value_usd * max_weight
+            target_value_usd = total_value_usd * 0.25
+            reduce_amount_usd = current_value_usd - target_value_usd
+            
+            # Find the analysis for this ticker to get current price
+            ticker_analysis = next((a for a in analyses if a["ticker"] == ticker), None)
+            if ticker_analysis and ticker_analysis["current_price"] > 0:
+                reduce_shares = int(reduce_amount_usd / ticker_analysis["current_price"])
+                rebalancing["reason"] = f"Over-concentration: {ticker} is {max_weight*100:.1f}% of portfolio"
+                rebalancing["recommendations"].append({
+                    "action": "REDUCE",
+                    "ticker": ticker,
+                    "current_weight": max_weight,
+                    "target_weight": 0.25,
+                    "reduce_amount_usd": reduce_amount_usd,
+                    "reduce_shares": reduce_shares,
+                    "current_price_usd": ticker_analysis["current_price"],
+                    "reason": f"Diversification - reduce by ${reduce_amount_usd:,.2f} ({reduce_shares} shares)"
+                })
+            else:
+                rebalancing["reason"] = f"Over-concentration: {ticker} is {max_weight*100:.1f}% of portfolio"
+                rebalancing["recommendations"].append({
+                    "action": "REDUCE",
+                    "ticker": ticker,
+                    "current_weight": max_weight,
+                    "target_weight": 0.25,
+                    "reason": "Diversification"
+                })
         
         # Check for poor diversification
         if portfolio_metrics["diversification_score"] < 0.5 and total_holdings < 5:
@@ -283,10 +318,17 @@ class PortfolioAnalyzer:
                 rebalancing["needed"] = True
                 if not rebalancing["reason"]:
                     rebalancing["reason"] = f"Underperforming holding: {analysis['ticker']}"
+                
+                # Calculate sell amount
+                sell_value_usd = analysis["current_value"]
+                sell_shares = analysis["quantity"]
                 rebalancing["recommendations"].append({
                     "action": "CONSIDER_SELL",
                     "ticker": analysis["ticker"],
-                    "reason": f"Low recommendation score: {analysis['recommendation_score']:.1f}"
+                    "sell_amount_usd": sell_value_usd,
+                    "sell_shares": sell_shares,
+                    "current_price_usd": analysis["current_price"],
+                    "reason": f"Low recommendation score: {analysis['recommendation_score']:.1f} - Consider selling {sell_shares} shares (${sell_value_usd:,.2f})"
                 })
         
         return rebalancing
@@ -350,25 +392,32 @@ class PortfolioAnalyzer:
     
     def print_analysis_results(self, results: Dict):
         """Print analysis results in a formatted way."""
+        exchange_rate = self.get_exchange_rate()
+        
         print("\n" + "=" * 60)
         print("PORTFOLIO ANALYSIS RESULTS")
         print("=" * 60)
         
         metrics = results["portfolio_metrics"]
-        print(f"\nTotal Portfolio Value: ₪{metrics['total_value']:,.2f}")
-        print(f"Cash: ₪{metrics['cash']:,.2f}")
-        print(f"Holdings Value: ₪{metrics['holdings_value']:,.2f}")
+        total_value_ils = metrics['total_value'] * exchange_rate
+        cash_ils = metrics['cash'] * exchange_rate
+        holdings_value_ils = metrics['holdings_value'] * exchange_rate
+        
+        print(f"\nTotal Portfolio Value: ₪{total_value_ils:,.2f} (${metrics['total_value']:,.2f})")
+        print(f"Cash: ₪{cash_ils:,.2f} (${metrics['cash']:,.2f})")
+        print(f"Holdings Value: ₪{holdings_value_ils:,.2f} (${metrics['holdings_value']:,.2f})")
+        print(f"Exchange Rate: {exchange_rate} ILS/USD")
         print(f"Diversification Score: {metrics['diversification_score']:.2f} (1.0 = perfect diversification)")
         print(f"Average Recommendation Score: {metrics['average_recommendation_score']:.1f}/100")
         
         print("\n" + "-" * 60)
-        print("HOLDINGS ANALYSIS")
+        print("HOLDINGS ANALYSIS (All prices and values in USD)")
         print("-" * 60)
         
         for analysis in results["holdings_analysis"]:
             print(f"\n{analysis['ticker']}:")
-            print(f"  Quantity: {analysis['quantity']}")
-            print(f"  Current Price: ${analysis['current_price']:.2f}")
+            print(f"  Quantity: {analysis['quantity']} shares")
+            print(f"  Current Price: ${analysis['current_price']:.2f} per share")
             print(f"  Current Value: ${analysis['current_value']:,.2f}")
             print(f"  Weight: {results['portfolio_metrics']['weights'].get(analysis['ticker'], 0)*100:.1f}%")
             print(f"  Recommendation: {analysis['recommendation']} (Score: {analysis['recommendation_score']:.1f}/100)")
@@ -388,10 +437,14 @@ class PortfolioAnalyzer:
             print("⚠️  REBALANCING IS RECOMMENDED")
             print(f"Reason: {rebalancing['reason']}")
             if rebalancing["recommendations"]:
-                print("\nSpecific Recommendations:")
+                print("\nSpecific Recommendations (All amounts in USD):")
                 for rec in rebalancing["recommendations"]:
-                    print(f"  - {rec['action']}: {rec['ticker']}")
-                    print(f"    {rec['reason']}")
+                    print(f"\n  {rec['action']}: {rec['ticker']}")
+                    if 'reduce_amount_usd' in rec:
+                        print(f"    Sell: {rec['reduce_shares']} shares at ${rec['current_price_usd']:.2f} = ${rec['reduce_amount_usd']:,.2f}")
+                    elif 'sell_amount_usd' in rec:
+                        print(f"    Sell: {rec['sell_shares']} shares at ${rec['current_price_usd']:.2f} = ${rec['sell_amount_usd']:,.2f}")
+                    print(f"    Reason: {rec['reason']}")
         else:
             print("✅ Portfolio is well-balanced. No rebalancing needed at this time.")
         

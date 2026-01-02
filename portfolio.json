@@ -1,5 +1,7 @@
 {
-  "cash": 172.74,
+  "currency": "USD",
+  "note": "All prices and values are in USD. Cash and portfolio values shown in ILS in the app are converted from USD.",
+  "cash": 46.7,
   "holdings": [
     {
       "ticker": "XLV",
