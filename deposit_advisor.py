@@ -30,7 +30,7 @@ class DepositAdvisor:
         
         # Technology & Innovation (High Growth Trends)
         "TECHNOLOGY": ["XLK", "VGT", "FTEC", "QQQ"],
-        "AI_AND_ROBOTICS": ["BOTZ", "ROBO", "AIQ", "IRBO", "CHAT"],
+        "AI_AND_ROBOTICS": ["BOTZ", "ROBO", "AIQ", "CHAT"],  # IRBO removed - possibly delisted
         "SEMICONDUCTORS": ["SOXX", "SMH", "XSD"],
         "CLOUD_COMPUTING": ["WCLD", "SKYY", "CLOU"],
         "CYBERSECURITY": ["HACK", "CIBR", "BUG"],
@@ -220,8 +220,16 @@ class DepositAdvisor:
                         return analysis
             
             # Get historical data for analysis
-            data = stock.history(period="1y")
-            if data.empty:
+            try:
+                data = stock.history(period="1y")
+                if data.empty:
+                    # Try shorter period if 1y fails
+                    data = stock.history(period="6mo")
+                    if data.empty:
+                        logger.warning(f"{ticker}: No historical data available - possibly delisted")
+                        return analysis
+            except Exception as e:
+                logger.warning(f"{ticker}: Failed to get historical data - possibly delisted: {e}")
                 return analysis
             
             # Calculate metrics
