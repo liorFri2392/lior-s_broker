@@ -1,0 +1,20 @@
+{
+  "cash": 172.74,
+  "holdings": [
+    {
+      "ticker": "XLV",
+      "quantity": 6,
+      "last_price": 154.8,
+      "current_value": 928.8
+    },
+    {
+      "ticker": "SPY",
+      "quantity": 9,
+      "last_price": 681.92,
+      "current_value": 6137.28
+    }
+  ],
+  "last_updated": null,
+  "total_value": 0
+}
+
