@@ -87,23 +87,26 @@ class DepositAdvisor:
             market_status, market_message = self.analyzer.is_market_open()
             
             # Try to get real-time price if market is open
+            price_found = False
             if market_status:
                 try:
-                    analysis["current_price"] = float(stock.fast_info.get('lastPrice', 0))
-                    if analysis["current_price"] > 0:
-                        return analysis  # Got real-time price, continue with analysis
+                    price = float(stock.fast_info.get('lastPrice', 0))
+                    if price > 0:
+                        analysis["current_price"] = price
+                        price_found = True
                 except Exception:
                     pass  # Fall through to historical data
             
-            # Fallback to historical data (last close)
-            hist = stock.history(period="1d")
-            if not hist.empty:
-                analysis["current_price"] = float(hist['Close'].iloc[-1])
-            else:
-                try:
-                    analysis["current_price"] = float(stock.fast_info.get('lastPrice', 0))
-                except Exception:
-                    return analysis
+            # Fallback to historical data (last close) if real-time price not found
+            if not price_found:
+                hist = stock.history(period="1d")
+                if not hist.empty:
+                    analysis["current_price"] = float(hist['Close'].iloc[-1])
+                else:
+                    try:
+                        analysis["current_price"] = float(stock.fast_info.get('lastPrice', 0))
+                    except Exception:
+                        return analysis
             
             # Get historical data for analysis
             data = stock.history(period="1y")
