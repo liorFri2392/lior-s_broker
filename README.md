@@ -42,6 +42,53 @@ make setup
 pip install -r requirements.txt
 ```
 
+## הגדרה ראשונית - חשוב! ⚠️
+
+**בפעם הראשונה, אתה חייב להגדיר את `portfolio.json` עם התיק שלך!**
+
+### איך להגדיר את portfolio.json:
+
+1. **צור את הקובץ `portfolio.json`** (או השתמש ב-`make setup` שיוצר אותו אוטומטית)
+
+2. **עדכן את התיק שלך** - הוסף את כל ההחזקות שלך:
+
+```json
+{
+  "currency": "USD",
+  "note": "All prices and values are in USD. Cash and portfolio values shown in ILS in the app are converted from USD.",
+  "cash": 46.7,
+  "holdings": [
+    {
+      "ticker": "XLV",
+      "quantity": 6,
+      "last_price": 154.8,
+      "current_value": 928.8
+    },
+    {
+      "ticker": "SPY",
+      "quantity": 9,
+      "last_price": 681.92,
+      "current_value": 6137.28
+    }
+  ],
+  "last_updated": null,
+  "total_value": 0
+}
+```
+
+3. **פורמט:**
+   - `cash`: מזומן בדולרים (USD)
+   - `holdings`: רשימת החזקות
+     - `ticker`: סמל המניה/ETF (לדוגמה: "SPY", "XLV")
+     - `quantity`: כמות מניות
+     - `last_price`: מחיר אחרון (יועדכן אוטומטית)
+     - `current_value`: שווי נוכחי (יועדכן אוטומטית)
+
+4. **הערות:**
+   - כל המחירים והערכים ב-USD
+   - המערכת תעדכן אוטומטית את המחירים והערכים כשתהריץ `make analyze`
+   - אם אין לך החזקות עדיין, השאר `holdings` כרשימה ריקה: `[]`
+
 ## שימוש
 
 ### ניתוח תיק נוכחי
