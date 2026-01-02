@@ -209,15 +209,27 @@ class DepositAdvisor:
             
             # Fallback to historical data (last close) if real-time price not found
             if not price_found:
-                hist = stock.history(period="1d")
-                if not hist.empty:
-                    analysis["current_price"] = float(hist['Close'].iloc[-1])
-                else:
-                    try:
-                        analysis["current_price"] = float(stock.fast_info.get('lastPrice', 0))
-                    except Exception as e:
-                        logger.debug(f"Failed to get fallback price for {ticker}: {e}")
-                        return analysis
+                try:
+                    hist = stock.history(period="1d")
+                    if not hist.empty:
+                        analysis["current_price"] = float(hist['Close'].iloc[-1])
+                    else:
+                        # Try longer period if 1d fails (for delisted ETFs)
+                        hist = stock.history(period="5d")
+                        if not hist.empty:
+                            analysis["current_price"] = float(hist['Close'].iloc[-1])
+                        else:
+                            try:
+                                analysis["current_price"] = float(stock.fast_info.get('lastPrice', 0))
+                                if analysis["current_price"] == 0:
+                                    logger.warning(f"{ticker}: Possibly delisted - no price data found")
+                                    return analysis
+                            except Exception:
+                                logger.warning(f"{ticker}: Possibly delisted - no price data available")
+                                return analysis  # Return early if no price data
+                except Exception as e:
+                    logger.warning(f"{ticker}: Failed to get price data - possibly delisted: {e}")
+                    return analysis  # Return early if can't get price
             
             # Get historical data for analysis
             try:
