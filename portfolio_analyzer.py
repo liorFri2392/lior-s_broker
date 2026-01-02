@@ -7,8 +7,10 @@ Analyzes portfolio holdings, provides recommendations, and suggests rebalancing.
 import json
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
+from functools import lru_cache
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -26,6 +28,8 @@ class PortfolioAnalyzer:
         self.news_api_key = os.getenv("NEWS_API_KEY", "")
         self.alpha_vantage_key = os.getenv("ALPHA_VANTAGE_KEY", "")
         self.exchange_rate_usd_ils = 3.7  # Default, will be updated
+        self.price_cache = {}  # Cache for prices
+        self.cache_timeout = timedelta(minutes=5)  # Cache timeout
     
     def get_exchange_rate(self) -> float:
         """Get current USD/ILS exchange rate."""
@@ -59,22 +63,50 @@ class PortfolioAnalyzer:
             json.dump(portfolio, f, indent=2, ensure_ascii=False)
     
     def get_current_prices(self, tickers: List[str]) -> Dict[str, float]:
-        """Get current prices for tickers."""
+        """Get current prices for tickers with caching and parallel fetching."""
         prices = {}
-        try:
-            for ticker in tickers:
-                stock = yf.Ticker(ticker)
-                info = stock.history(period="1d")
-                if not info.empty:
-                    prices[ticker] = float(info['Close'].iloc[-1])
+        uncached_tickers = []
+        
+        # Check cache first
+        now = datetime.now()
+        for ticker in tickers:
+            if ticker in self.price_cache:
+                cached_data, cached_time = self.price_cache[ticker]
+                if now - cached_time < self.cache_timeout:
+                    prices[ticker] = cached_data
                 else:
-                    # Try to get info from fast_info
-                    try:
-                        prices[ticker] = float(stock.fast_info['lastPrice'])
-                    except:
-                        print(f"Warning: Could not fetch price for {ticker}")
-        except Exception as e:
-            print(f"Error fetching prices: {e}")
+                    uncached_tickers.append(ticker)
+            else:
+                uncached_tickers.append(ticker)
+        
+        # Fetch uncached prices in parallel
+        if uncached_tickers:
+            def fetch_price(ticker):
+                try:
+                    stock = yf.Ticker(ticker)
+                    info = stock.history(period="1d")
+                    if not info.empty:
+                        price = float(info['Close'].iloc[-1])
+                        self.price_cache[ticker] = (price, now)
+                        return ticker, price
+                    else:
+                        try:
+                            price = float(stock.fast_info['lastPrice'])
+                            self.price_cache[ticker] = (price, now)
+                            return ticker, price
+                        except:
+                            return ticker, None
+                except Exception as e:
+                    print(f"Warning: Could not fetch price for {ticker}: {e}")
+                    return ticker, None
+            
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                futures = [executor.submit(fetch_price, ticker) for ticker in uncached_tickers]
+                for future in as_completed(futures):
+                    ticker, price = future.result()
+                    if price is not None:
+                        prices[ticker] = price
+        
         return prices
     
     def get_market_data(self, ticker: str, period: str = "1y") -> pd.DataFrame:
@@ -260,17 +292,75 @@ class PortfolioAnalyzer:
             "weights": weights
         }
     
+    def find_best_etfs_to_buy(self, amount_usd: float, current_holdings: List[str], exclude_tickers: List[str] = None) -> List[Dict]:
+        """Find best ETFs to buy for diversification."""
+        exclude_tickers = exclude_tickers or []
+        
+        # Popular ETF categories for diversification
+        diversification_etfs = [
+            "VEA", "VXUS", "VWO", "IEMG",  # International
+            "IWM", "VB", "IJR",  # Small cap
+            "VNQ", "SCHH",  # Real estate
+            "XLK", "VGT",  # Tech
+            "XLE", "VDE",  # Energy
+            "XLF", "VFH",  # Financial
+            "VYM", "SCHD",  # Dividend
+            "VUG", "VTV",  # Growth/Value
+        ]
+        
+        # Filter out current holdings and excluded
+        candidate_etfs = [
+            etf for etf in diversification_etfs 
+            if etf not in current_holdings and etf not in exclude_tickers
+        ]
+        
+        # Analyze top candidates
+        recommendations = []
+        for etf in candidate_etfs[:10]:  # Analyze top 10
+            try:
+                stock = yf.Ticker(etf)
+                hist = stock.history(period="1d")
+                if not hist.empty:
+                    price = float(hist['Close'].iloc[-1])
+                    shares = int(amount_usd / price / 3)  # Divide by 3 for 3 recommendations
+                    if shares > 0:
+                        # Simple scoring
+                        score = 60  # Base score for diversification
+                        info = stock.info
+                        if info.get('annualReportExpenseRatio', 1) < 0.001:
+                            score += 10
+                        
+                        recommendations.append({
+                            "ticker": etf,
+                            "name": info.get('longName', etf),
+                            "shares": shares,
+                            "price": price,
+                            "allocation_amount": shares * price,
+                            "score": score,
+                            "recommendation": "BUY",
+                            "reasons": ["Diversification", "Low expense ratio" if info.get('annualReportExpenseRatio', 1) < 0.001 else "Good diversification"]
+                        })
+            except:
+                continue
+        
+        # Sort by score and return top 3
+        recommendations.sort(key=lambda x: x['score'], reverse=True)
+        return recommendations[:3]
+    
     def check_rebalancing(self, portfolio_metrics: Dict, analyses: List[Dict]) -> Dict:
         """Determine if rebalancing is needed."""
         rebalancing = {
             "needed": False,
             "reason": "",
-            "recommendations": []
+            "recommendations": [],
+            "buy_recommendations": []
         }
         
         weights = portfolio_metrics["weights"]
         total_holdings = len(weights)
         total_value_usd = portfolio_metrics["holdings_value"]
+        current_tickers = [a["ticker"] for a in analyses]
+        total_sell_amount = 0
         
         # Check for over-concentration
         max_weight = max(weights.values()) if weights else 0
@@ -280,6 +370,7 @@ class PortfolioAnalyzer:
             current_value_usd = total_value_usd * max_weight
             target_value_usd = total_value_usd * 0.25
             reduce_amount_usd = current_value_usd - target_value_usd
+            total_sell_amount += reduce_amount_usd
             
             # Find the analysis for this ticker to get current price
             ticker_analysis = next((a for a in analyses if a["ticker"] == ticker), None)
@@ -287,7 +378,7 @@ class PortfolioAnalyzer:
                 reduce_shares = int(reduce_amount_usd / ticker_analysis["current_price"])
                 rebalancing["reason"] = f"Over-concentration: {ticker} is {max_weight*100:.1f}% of portfolio"
                 rebalancing["recommendations"].append({
-                    "action": "REDUCE",
+                    "action": "SELL",
                     "ticker": ticker,
                     "current_weight": max_weight,
                     "target_weight": 0.25,
@@ -299,7 +390,7 @@ class PortfolioAnalyzer:
             else:
                 rebalancing["reason"] = f"Over-concentration: {ticker} is {max_weight*100:.1f}% of portfolio"
                 rebalancing["recommendations"].append({
-                    "action": "REDUCE",
+                    "action": "SELL",
                     "ticker": ticker,
                     "current_weight": max_weight,
                     "target_weight": 0.25,
@@ -322,14 +413,21 @@ class PortfolioAnalyzer:
                 # Calculate sell amount
                 sell_value_usd = analysis["current_value"]
                 sell_shares = analysis["quantity"]
+                total_sell_amount += sell_value_usd
                 rebalancing["recommendations"].append({
-                    "action": "CONSIDER_SELL",
+                    "action": "SELL",
                     "ticker": analysis["ticker"],
                     "sell_amount_usd": sell_value_usd,
                     "sell_shares": sell_shares,
                     "current_price_usd": analysis["current_price"],
                     "reason": f"Low recommendation score: {analysis['recommendation_score']:.1f} - Consider selling {sell_shares} shares (${sell_value_usd:,.2f})"
                 })
+        
+        # If we're selling, recommend what to buy instead
+        if total_sell_amount > 0 and rebalancing["recommendations"]:
+            sell_tickers = [r["ticker"] for r in rebalancing["recommendations"] if r["action"] == "SELL"]
+            buy_recs = self.find_best_etfs_to_buy(total_sell_amount, current_tickers, exclude_tickers=sell_tickers)
+            rebalancing["buy_recommendations"] = buy_recs
         
         return rebalancing
     
@@ -428,23 +526,81 @@ class PortfolioAnalyzer:
                 print(f"  Momentum: {ti.get('momentum', 0):.2f}%")
                 print(f"  Volatility: {ti.get('volatility', 0):.2f}%")
         
-        print("\n" + "-" * 60)
-        print("REBALANCING RECOMMENDATION")
-        print("-" * 60)
+        print("\n" + "=" * 60)
+        print("REBALANCING SUMMARY")
+        print("=" * 60)
         
         rebalancing = results["rebalancing"]
+        exchange_rate = self.get_exchange_rate()
+        
         if rebalancing["needed"]:
             print("⚠️  REBALANCING IS RECOMMENDED")
-            print(f"Reason: {rebalancing['reason']}")
+            print(f"Reason: {rebalancing['reason']}\n")
+            
+            # Create summary table
+            print("┌" + "─" * 78 + "┐")
+            print("│" + " " * 20 + "ACTION SUMMARY" + " " * 43 + "│")
+            print("├" + "─" * 78 + "┤")
+            
+            # HOLD section
+            hold_items = [a for a in results["holdings_analysis"] 
+                         if a["ticker"] not in [r["ticker"] for r in rebalancing["recommendations"]]]
+            if hold_items:
+                print("│ ✅ HOLD (Keep as is):" + " " * 57 + "│")
+                for item in hold_items:
+                    value_ils = item["current_value"] * exchange_rate
+                    print(f"│   • {item['ticker']:6s} - {item['quantity']:3d} shares × ${item['current_price']:7.2f} = ${item['current_value']:8,.2f} (₪{value_ils:8,.2f})" + " " * 5 + "│")
+            
+            # SELL section
             if rebalancing["recommendations"]:
-                print("\nSpecific Recommendations (All amounts in USD):")
+                print("│" + "─" * 78 + "│")
+                print("│ 🔴 SELL:" + " " * 70 + "│")
+                total_sell = 0
                 for rec in rebalancing["recommendations"]:
-                    print(f"\n  {rec['action']}: {rec['ticker']}")
                     if 'reduce_amount_usd' in rec:
-                        print(f"    Sell: {rec['reduce_shares']} shares at ${rec['current_price_usd']:.2f} = ${rec['reduce_amount_usd']:,.2f}")
+                        amount = rec['reduce_amount_usd']
+                        shares = rec['reduce_shares']
+                        price = rec['current_price_usd']
                     elif 'sell_amount_usd' in rec:
-                        print(f"    Sell: {rec['sell_shares']} shares at ${rec['current_price_usd']:.2f} = ${rec['sell_amount_usd']:,.2f}")
-                    print(f"    Reason: {rec['reason']}")
+                        amount = rec['sell_amount_usd']
+                        shares = rec['sell_shares']
+                        price = rec['current_price_usd']
+                    else:
+                        continue
+                    total_sell += amount
+                    amount_ils = amount * exchange_rate
+                    print(f"│   • {rec['ticker']:6s} - Sell {shares:3d} shares × ${price:7.2f} = ${amount:8,.2f} (₪{amount_ils:8,.2f})" + " " * 5 + "│")
+                
+                if total_sell > 0:
+                    total_sell_ils = total_sell * exchange_rate
+                    print("│" + "─" * 78 + "│")
+                    print(f"│   Total to sell: ${total_sell:10,.2f} (₪{total_sell_ils:10,.2f})" + " " * 44 + "│")
+            
+            # BUY section
+            if rebalancing["buy_recommendations"]:
+                print("│" + "─" * 78 + "│")
+                print("│ 🟢 BUY (Recommended replacements):" + " " * 42 + "│")
+                total_buy = 0
+                for rec in rebalancing["buy_recommendations"]:
+                    amount = rec.get('allocation_amount', 0)
+                    shares = rec.get('shares', 0)
+                    price = rec.get('price', 0)
+                    if amount > 0 and shares > 0:
+                        total_buy += amount
+                        amount_ils = amount * exchange_rate
+                        name = rec.get('name', rec['ticker'])[:30]
+                        print(f"│   • {rec['ticker']:6s} - Buy {shares:3d} shares × ${price:7.2f} = ${amount:8,.2f} (₪{amount_ils:8,.2f})" + " " * 5 + "│")
+                        print(f"│     {name}" + " " * (78 - len(name) - 5) + "│")
+                        if rec.get('reasons'):
+                            top_reason = rec['reasons'][0][:65]
+                            print(f"│     Reason: {top_reason}" + " " * (78 - len(top_reason) - 12) + "│")
+                
+                if total_buy > 0:
+                    total_buy_ils = total_buy * exchange_rate
+                    print("│" + "─" * 78 + "│")
+                    print(f"│   Total to buy:  ${total_buy:10,.2f} (₪{total_buy_ils:10,.2f})" + " " * 44 + "│")
+            
+            print("└" + "─" * 78 + "┘")
         else:
             print("✅ Portfolio is well-balanced. No rebalancing needed at this time.")
         
