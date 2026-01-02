@@ -349,8 +349,8 @@ class PortfolioAnalyzer:
         # Statistical forecast (mid-term yield optimization)
         try:
             forecast = self.advanced_analyzer.calculate_statistical_forecast(data, periods=252*3)  # 3 years
-                if forecast:
-                    indicators['forecast'] = forecast
+            if forecast:
+                indicators['forecast'] = forecast
         except Exception as e:
             logger.debug(f"Failed to calculate statistical forecast: {e}")
             pass
