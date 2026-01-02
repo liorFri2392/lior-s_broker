@@ -12,12 +12,12 @@ help:
 
 install:
 	@echo "Installing required packages..."
-	pip install -r requirements.txt
+	pip3 install -r requirements.txt
 
 setup: install
 	@echo "Setting up initial portfolio structure..."
 	@if [ ! -f portfolio.json ]; then \
-		echo '{"cash": 172.74, "holdings": [{"ticker": "XLV", "quantity": 6, "last_price": 154.8, "current_value": 928.8}, {"ticker": "SPY", "quantity": 9, "last_price": 681.92, "current_value": 6137.28}], "last_updated": null, "total_value": 0}' > portfolio.json; \
+		echo '{"currency": "USD", "note": "All prices and values are in USD. Cash and portfolio values shown in ILS in the app are converted from USD.", "cash": 46.7, "holdings": [{"ticker": "XLV", "quantity": 6, "last_price": 154.8, "current_value": 928.8}, {"ticker": "SPY", "quantity": 9, "last_price": 681.92, "current_value": 6137.28}], "last_updated": null, "total_value": 0}' > portfolio.json; \
 		echo "Created portfolio.json with initial holdings"; \
 	else \
 		echo "portfolio.json already exists"; \
