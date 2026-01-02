@@ -402,6 +402,32 @@ class PortfolioAnalyzer:
         elif news_sentiment["score"] < 40:
             score -= 5
         
+        # Industry trend analysis (if available from deposit_advisor)
+        try:
+            from deposit_advisor import DepositAdvisor
+            advisor = DepositAdvisor(self.portfolio_file)
+            
+            # Find category for this ticker
+            etf_category = None
+            for cat, etfs in advisor.ETF_CATEGORIES.items():
+                if ticker in etfs:
+                    etf_category = cat
+                    break
+            
+            if etf_category:
+                industry_trend = advisor.analyze_industry_trends(etf_category)
+                analysis["industry_trend"] = industry_trend
+                
+                # Add industry trend to score
+                if industry_trend.get("trend") == "STRONG_UPTREND":
+                    score += 10
+                elif industry_trend.get("trend") == "UPTREND":
+                    score += 5
+                elif industry_trend.get("trend") == "DOWNTREND":
+                    score -= 5
+        except Exception:
+            pass  # Industry trend analysis is optional
+        
         analysis["recommendation_score"] = max(0, min(100, score))
         
         if score >= 70:
