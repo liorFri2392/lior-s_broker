@@ -7,7 +7,7 @@ Analyzes portfolio holdings, provides recommendations, and suggests rebalancing.
 import json
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -75,17 +75,51 @@ class PortfolioAnalyzer:
         with open(portfolio_path, 'w', encoding='utf-8') as f:
             json.dump(portfolio, f, indent=2, ensure_ascii=False)
     
-    def get_current_prices(self, tickers: List[str]) -> Dict[str, float]:
-        """Get current prices for tickers with caching and parallel fetching."""
+    def is_market_open(self) -> Tuple[bool, str]:
+        """Check if US stock market (NYSE/NASDAQ) is currently open."""
+        try:
+            # Get current time in Eastern Time (ET)
+            now_utc = datetime.now(timezone.utc)
+            # Convert to ET (UTC-5 or UTC-4 depending on DST)
+            # Simple approximation: ET is UTC-5
+            et_offset = timedelta(hours=5)
+            now_et = now_utc - et_offset
+            
+            # Market hours: 9:30 AM - 4:00 PM ET, Monday-Friday
+            market_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+            market_close = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+            
+            # Check if it's a weekday (Monday=0, Sunday=6)
+            is_weekday = now_et.weekday() < 5
+            
+            if is_weekday and market_open <= now_et <= market_close:
+                return True, "Market is OPEN - Prices are real-time"
+            else:
+                if not is_weekday:
+                    return False, "Market is CLOSED - Weekend (Prices from last close)"
+                else:
+                    return False, "Market is CLOSED - After hours (Prices from last close)"
+        except Exception:
+            return None, "Unable to determine market status"
+    
+    def get_current_prices(self, tickers: List[str]) -> Tuple[Dict[str, float], Optional[bool], str]:
+        """Get current prices for tickers with caching and parallel fetching.
+        Returns: (prices_dict, market_status, market_message)
+        - prices_dict: Dictionary of ticker -> price
+        - market_status: True if market is open, False if closed, None if unknown
+        - market_message: Human-readable market status message"""
         prices = {}
         uncached_tickers = []
+        market_status, market_message = self.is_market_open()
         
         # Check cache first
         now = datetime.now()
         for ticker in tickers:
             if ticker in self.price_cache:
                 cached_data, cached_time = self.price_cache[ticker]
-                if now - cached_time < self.cache_timeout:
+                # If market is open, use shorter cache (1 minute), otherwise 5 minutes
+                cache_timeout = timedelta(minutes=1) if market_status else self.cache_timeout
+                if now - cached_time < cache_timeout:
                     prices[ticker] = cached_data
                 else:
                     uncached_tickers.append(ticker)
@@ -97,30 +131,44 @@ class PortfolioAnalyzer:
             def fetch_price(ticker):
                 try:
                     stock = yf.Ticker(ticker)
+                    
+                    # Try to get real-time price first (if market is open)
+                    if market_status:
+                        try:
+                            # Use fast_info for real-time data
+                            price = float(stock.fast_info.get('lastPrice', 0))
+                            if price > 0:
+                                self.price_cache[ticker] = (price, now)
+                                return ticker, price, True  # True = real-time
+                        except Exception:
+                            pass
+                    
+                    # Fallback to historical data (last close)
                     info = stock.history(period="1d")
                     if not info.empty:
                         price = float(info['Close'].iloc[-1])
                         self.price_cache[ticker] = (price, now)
-                        return ticker, price
+                        return ticker, price, False  # False = last close
                     else:
                         try:
-                            price = float(stock.fast_info['lastPrice'])
-                            self.price_cache[ticker] = (price, now)
-                            return ticker, price
+                            price = float(stock.fast_info.get('lastPrice', 0))
+                            if price > 0:
+                                self.price_cache[ticker] = (price, now)
+                                return ticker, price, False
                         except Exception:
-                            return ticker, None
+                            return ticker, None, False
                 except Exception as e:
                     print(f"Warning: Could not fetch price for {ticker}: {e}")
-                    return ticker, None
+                    return ticker, None, False
             
             with ThreadPoolExecutor(max_workers=5) as executor:
                 futures = [executor.submit(fetch_price, ticker) for ticker in uncached_tickers]
                 for future in as_completed(futures):
-                    ticker, price = future.result()
+                    ticker, price, is_realtime = future.result()
                     if price is not None:
                         prices[ticker] = price
         
-        return prices
+        return prices, market_status, market_message
     
     def get_market_data(self, ticker: str, period: str = "1y") -> pd.DataFrame:
         """Get historical market data for analysis with caching."""
@@ -556,9 +604,17 @@ class PortfolioAnalyzer:
             print("No holdings found in portfolio. Please add holdings first.")
             return {}
         
-        # Get current prices
+        # Get current prices and market status
         tickers = [h["ticker"] for h in portfolio["holdings"]]
-        prices = self.get_current_prices(tickers)
+        prices, market_status, market_message = self.get_current_prices(tickers)
+        
+        # Display market status
+        print(f"\n📊 Market Status: {market_message}")
+        if market_status:
+            print("   ⚡ Using REAL-TIME prices")
+        else:
+            print("   📅 Using LAST CLOSE prices")
+        print()
         
         # Analyze each holding in parallel for better performance
         analyses = []
