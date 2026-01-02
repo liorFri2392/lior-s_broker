@@ -5,6 +5,7 @@ Deposit Advisor - Recommends ETF purchases based on deposit amount and current p
 
 import json
 import os
+import sys
 import logging
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
