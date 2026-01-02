@@ -775,10 +775,34 @@ class DepositAdvisor:
         print("-" * 60)
         print("\n⚠️  NOTE: All purchases are executed in USD. Amounts shown in ILS are for reference only.")
         
+        # Check for leveraged ETFs in recommendations
+        leveraged_count = sum(1 for rec in recommendations if any(lev in rec.get('ticker', '').upper() 
+            for lev in ['TQQQ', 'SPXL', 'UPRO', 'TNA', 'FAS', 'CURE', 'SOXL', 'LABU', 'TECL', 
+                       'SQQQ', 'SPXS', 'SPXU', 'TZA', 'FAZ', 'SOXS', 'LABD', 'TECS', 'SSO', 'QLD', 'UWM', 'EFO']))
+        
+        if leveraged_count > 0:
+            print("\n" + "=" * 60)
+            print("🚨 WARNING: LEVERAGED ETFs DETECTED 🚨")
+            print("=" * 60)
+            print("⚠️  Leveraged ETFs are EXTREMELY RISKY:")
+            print("   • Losses can be 2x-3x the underlying index")
+            print("   • Very high volatility - can lose 50%+ in days")
+            print("   • Not suitable for beginners or long-term holding")
+            print("   • Only for experienced investors who understand the risks")
+            print("   • Consider limiting leveraged ETFs to <5% of portfolio")
+            print("=" * 60 + "\n")
+        
         total_allocated = 0
         for i, rec in enumerate(recommendations, 1):
             allocation_ils = rec['allocation_amount'] * exchange_rate
+            ticker_upper = rec['ticker'].upper()
+            is_leveraged = any(lev in ticker_upper for lev in ['TQQQ', 'SPXL', 'UPRO', 'TNA', 'FAS', 'CURE', 
+                                                               'SOXL', 'LABU', 'TECL', 'SQQQ', 'SPXS', 'SPXU', 
+                                                               'TZA', 'FAZ', 'SOXS', 'LABD', 'TECS', 'SSO', 'QLD', 'UWM', 'EFO'])
+            
             print(f"\n{i}. {rec['ticker']} - {rec['name']}")
+            if is_leveraged:
+                print(f"   🚨 LEVERAGED ETF - EXTREME RISK 🚨")
             print(f"   Action: {rec['action']}")
             print(f"   Recommendation: {rec['recommendation']} (Score: {rec['score']:.1f}/100)")
             print(f"   BUY: {rec['shares']} shares")

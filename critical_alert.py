@@ -194,19 +194,31 @@ class CriticalAlertSystem:
                     # 2. Strong expected return (>15%)
                     # 3. Positive technical indicators
                     if expected_return > 15 or score >= 85:
-                        # Calculate recommended amount based on available cash
-                        recommended_amount = min(1000, cash_available * 0.1) if cash_available > 0 else 1000
+                        # Check if leveraged ETF
+                        is_leveraged = analysis.get("is_leveraged", False)
+                        leverage_mult = analysis.get("leverage_multiplier", 1.0)
+                        
+                        # For leveraged ETFs, be more conservative with recommendations
+                        if is_leveraged:
+                            # Reduce recommended amount for leveraged ETFs (max 5% of cash)
+                            recommended_amount = min(500, cash_available * 0.05) if cash_available > 0 else 500
+                            leverage_warning = f" ⚠️ {abs(leverage_mult)}x LEVERAGED - EXTREME RISK"
+                        else:
+                            recommended_amount = min(1000, cash_available * 0.1) if cash_available > 0 else 1000
+                            leverage_warning = ""
                         
                         critical_buys.append({
                             "type": "BUY",
                             "ticker": etf,
                             "priority": "CRITICAL" if score >= 85 else "HIGH",
-                            "reason": f"Exceptional opportunity - Score: {score}/100. Expected 3yr return: {expected_return:.1f}%. Not in current portfolio.",
+                            "reason": f"Exceptional opportunity - Score: {score}/100. Expected 3yr return: {expected_return:.1f}%. Not in current portfolio.{leverage_warning}",
                             "amount": recommended_amount,
                             "expected_return": expected_return,
                             "score": score,
                             "details": "; ".join(reasons[:3]),  # Top 3 reasons
-                            "diversification": "New holding - adds diversification"
+                            "diversification": "New holding - adds diversification",
+                            "is_leveraged": is_leveraged,
+                            "leverage_multiplier": leverage_mult
                         })
                 
                 # Progress indicator

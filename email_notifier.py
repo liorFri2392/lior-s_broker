@@ -74,9 +74,26 @@ class EmailNotifier:
                 priority = item.get("priority", "HIGH")
                 
                 if action_type == "BUY":
+                    is_leveraged = item.get('is_leveraged', False)
+                    leverage_warning = ""
+                    if is_leveraged:
+                        leverage = abs(item.get('leverage_multiplier', 1.0))
+                        leverage_warning = f"""
+                        <div style="background-color: #ffebee; padding: 15px; margin: 10px 0; border-left: 5px solid #f44336;">
+                            <h4 style="color: #c62828; margin-top: 0;">🚨 LEVERAGED ETF WARNING 🚨</h4>
+                            <p style="color: #c62828; font-weight: bold;">This is a {leverage}x leveraged ETF - EXTREMELY HIGH RISK!</p>
+                            <ul style="color: #c62828;">
+                                <li>Losses can be {leverage}x the underlying index</li>
+                                <li>Very high volatility - can lose 50%+ in days</li>
+                                <li>Not suitable for beginners</li>
+                                <li>Consider limiting to &lt;5% of portfolio</li>
+                            </ul>
+                        </div>
+                        """
                     body += f"""
                     <div class="buy">
                         <h3>🟢 BUY NOW: {item.get('ticker', 'N/A')}</h3>
+                        {leverage_warning}
                         <p><strong>Reason:</strong> {item.get('reason', 'N/A')}</p>
                         <p><strong>Priority:</strong> {priority}</p>
                         <p><strong>Recommended Amount:</strong> ${item.get('amount', 0):,.2f}</p>
