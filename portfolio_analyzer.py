@@ -188,7 +188,7 @@ class PortfolioAnalyzer:
                     spy_variance = np.var(spy_returns)
                     if spy_variance > 0:
                         indicators['beta'] = covariance / spy_variance
-        except:
+        except Exception:
             indicators['beta'] = 1.0  # Default beta
         
         # Maximum Drawdown
@@ -286,7 +286,7 @@ class PortfolioAnalyzer:
                             }
                             for article in articles['articles'][:3]
                         ])
-                except:
+                except Exception:
                     pass
         except Exception:
             pass  # Silent fail, use default sentiment
