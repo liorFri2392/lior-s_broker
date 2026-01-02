@@ -316,6 +316,77 @@ class DepositAdvisor:
         
         return allocations
     
+    def update_portfolio_with_purchases(self, portfolio: Dict, recommendations: List[Dict], deposit_amount_usd: float):
+        """Update portfolio.json with new purchases."""
+        exchange_rate = self.get_exchange_rate()
+        total_spent_usd = sum(rec['allocation_amount'] for rec in recommendations)
+        
+        # Ensure portfolio has required fields
+        if "currency" not in portfolio:
+            portfolio["currency"] = "USD"
+        if "note" not in portfolio:
+            portfolio["note"] = "All prices and values are in USD. Cash and portfolio values shown in ILS in the app are converted from USD."
+        
+        # Update cash (add deposit, subtract what was spent)
+        current_cash_usd = portfolio.get("cash", 0)
+        new_cash_usd = current_cash_usd + deposit_amount_usd - total_spent_usd
+        portfolio["cash"] = round(new_cash_usd, 2)
+        
+        # Initialize holdings if not exists
+        if "holdings" not in portfolio:
+            portfolio["holdings"] = []
+        
+        # Update or add holdings
+        for rec in recommendations:
+            ticker = rec['ticker']
+            shares_to_add = rec['shares']
+            current_price = rec['price']
+            
+            # Check if holding already exists
+            existing_holding = None
+            for i, holding in enumerate(portfolio["holdings"]):
+                if holding.get("ticker") == ticker:
+                    existing_holding = i
+                    break
+            
+            if existing_holding is not None:
+                # Update existing holding
+                portfolio["holdings"][existing_holding]["quantity"] += shares_to_add
+                portfolio["holdings"][existing_holding]["last_price"] = current_price
+                portfolio["holdings"][existing_holding]["current_value"] = (
+                    portfolio["holdings"][existing_holding]["quantity"] * current_price
+                )
+            else:
+                # Add new holding
+                new_holding = {
+                    "ticker": ticker,
+                    "quantity": shares_to_add,
+                    "last_price": current_price,
+                    "current_value": shares_to_add * current_price
+                }
+                portfolio["holdings"].append(new_holding)
+        
+        # Save updated portfolio
+        portfolio["last_updated"] = datetime.now().isoformat()
+        with open(self.portfolio_file, 'w', encoding='utf-8') as f:
+            json.dump(portfolio, f, indent=2, ensure_ascii=False)
+        
+        print(f"\n✅ Portfolio updated successfully!")
+        print(f"   Total spent: ${total_spent_usd:,.2f} (₪{total_spent_usd * exchange_rate:,.2f})")
+        print(f"   Remaining cash: ${new_cash_usd:,.2f} (₪{new_cash_usd * exchange_rate:,.2f})")
+        print(f"   Portfolio saved to {self.portfolio_file}\n")
+    
+    def ask_confirmation(self) -> bool:
+        """Ask user for confirmation."""
+        while True:
+            response = input("\nDid you execute these purchases? (yes/no): ").strip().lower()
+            if response in ['yes', 'y', 'כן', 'י']:
+                return True
+            elif response in ['no', 'n', 'לא', 'ל']:
+                return False
+            else:
+                print("Please enter 'yes' or 'no' (כן/לא)")
+    
     def advise(self, deposit_amount_ils: float):
         """Main advisory function."""
         print("=" * 60)
@@ -328,6 +399,7 @@ class DepositAdvisor:
         if not os.path.exists(self.portfolio_file):
             print("Warning: Portfolio file not found. Creating new portfolio structure.")
             portfolio = {
+                "currency": "USD",
                 "cash": 0,
                 "holdings": [],
                 "last_updated": None,
@@ -338,7 +410,21 @@ class DepositAdvisor:
         recommendations = self.recommend_etfs(deposit_amount_ils, portfolio)
         
         # Print recommendations
+        exchange_rate = self.get_exchange_rate()
+        deposit_amount_usd = deposit_amount_ils / exchange_rate
         self.print_recommendations(deposit_amount_ils, recommendations, portfolio)
+        
+        # Ask for confirmation
+        if recommendations:
+            confirmed = self.ask_confirmation()
+            
+            if confirmed:
+                # Update portfolio with purchases
+                self.update_portfolio_with_purchases(portfolio, recommendations, deposit_amount_usd)
+            else:
+                print("\n❌ Portfolio not updated. No changes were made.\n")
+        else:
+            print("\nNo recommendations to execute.\n")
         
         return recommendations
     
@@ -390,7 +476,9 @@ class DepositAdvisor:
         
         print("\n" + "=" * 60)
         print("Recommendations completed!")
-        print("=" * 60 + "\n")
+        print("=" * 60)
+        print("\n⚠️  After executing the purchases, you will be asked to confirm.")
+        print("   If you confirm, the portfolio will be updated automatically.\n")
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
