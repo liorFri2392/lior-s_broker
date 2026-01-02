@@ -304,31 +304,24 @@ class DepositAdvisor:
                     score -= 10
                     analysis["reasons"].append(f"📉 Declining industry: {industry_trend['reason']}")
             
-            # 8. Mid-term yield optimization (20 points) - ULTIMATE BROKER FEATURE
+            # 8. Statistical forecast for mid-term yield (will be optimized later in batch)
+            # Note: Full optimization happens in recommend_etfs() for efficiency
             try:
-                mid_term_analysis = self.advanced_analyzer.optimize_mid_term_yield([{"ticker": ticker}], target_years=3)
-                if mid_term_analysis and len(mid_term_analysis) > 0:
-                    mt_analysis = mid_term_analysis[0].get("mid_term_analysis", {})
-                    expected_return = mt_analysis.get("expected_return", 0)
-                    optimization_score = mt_analysis.get("optimization_score", 0)
-                    
-                    analysis["mid_term_yield"] = {
+                forecast = self.advanced_analyzer.calculate_statistical_forecast(data, periods=252*3)
+                if forecast and forecast.get("expected_return_polynomial") is not None:
+                    expected_return = forecast.get("expected_return_polynomial", 0)
+                    analysis["mid_term_forecast"] = {
                         "expected_3yr_return": expected_return,
-                        "optimization_score": optimization_score,
-                        "sharpe_ratio": mt_analysis.get("sharpe_ratio", 0),
-                        "win_rate": mt_analysis.get("win_rate", 50)
+                        "forecast_price": forecast.get("forecast_polynomial", 0)
                     }
                     
-                    # Add to score based on mid-term yield potential
+                    # Preliminary score boost (full optimization in batch later)
                     if expected_return > 15:
-                        score += 20
+                        score += 15
                         analysis["reasons"].append(f"🎯 Excellent mid-term yield potential: {expected_return:.1f}% (3yr forecast)")
                     elif expected_return > 10:
-                        score += 15
-                        analysis["reasons"].append(f"📊 Strong mid-term yield potential: {expected_return:.1f}% (3yr forecast)")
-                    elif expected_return > 5:
                         score += 10
-                        analysis["reasons"].append(f"✅ Good mid-term yield potential: {expected_return:.1f}% (3yr forecast)")
+                        analysis["reasons"].append(f"📊 Strong mid-term yield potential: {expected_return:.1f}% (3yr forecast)")
             except Exception:
                 pass
             
