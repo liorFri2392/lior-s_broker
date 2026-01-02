@@ -10,9 +10,14 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import List, Dict
 from datetime import datetime
-from dotenv import load_dotenv
 
-load_dotenv()
+# Try to load .env file if available (optional - works with environment variables too)
+try:
+    from dotenv import load_dotenv  # type: ignore
+    load_dotenv()
+except ImportError:
+    # dotenv not installed - will use environment variables directly
+    pass
 
 logger = logging.getLogger(__name__)
 
