@@ -439,12 +439,12 @@ class PortfolioAnalyzer:
             score -= 5
         
         # Industry trend analysis (if available from deposit_advisor)
+        etf_category = None
         try:
             from deposit_advisor import DepositAdvisor
             advisor = DepositAdvisor(self.portfolio_file)
             
             # Find category for this ticker
-            etf_category = None
             for cat, etfs in advisor.ETF_CATEGORIES.items():
                 if ticker in etfs:
                     etf_category = cat
@@ -456,13 +456,63 @@ class PortfolioAnalyzer:
                 
                 # Add industry trend to score
                 if industry_trend.get("trend") == "STRONG_UPTREND":
-                    score += 10
+                    score += 15
                 elif industry_trend.get("trend") == "UPTREND":
-                    score += 5
+                    score += 10
                 elif industry_trend.get("trend") == "DOWNTREND":
-                    score -= 5
+                    score -= 10
         except Exception:
             pass  # Industry trend analysis is optional
+        
+        # Statistical forecast (mid-term yield) - from technical indicators
+        if analysis["technical_indicators"] and "forecast" in analysis["technical_indicators"]:
+            forecast = analysis["technical_indicators"]["forecast"]
+            if forecast and forecast.get("expected_return_polynomial") is not None:
+                expected_return = forecast.get("expected_return_polynomial", 0)
+                analysis["mid_term_forecast"] = {
+                    "expected_3yr_return": expected_return,
+                    "forecast_price": forecast.get("forecast_polynomial", 0)
+                }
+                
+                # Add forecast to score
+                if expected_return > 15:
+                    score += 15
+                elif expected_return > 10:
+                    score += 10
+                elif expected_return < -10:
+                    score -= 10
+        
+        # Candlestick patterns - from technical indicators
+        if analysis["technical_indicators"] and "candlestick_patterns" in analysis["technical_indicators"]:
+            patterns = analysis["technical_indicators"]["candlestick_patterns"]
+            if patterns:
+                bullish = [p for p in patterns if p.get('signal') == 'BULLISH']
+                bearish = [p for p in patterns if p.get('signal') == 'BEARISH']
+                if bullish:
+                    score += 5
+                elif bearish:
+                    score -= 5
+        
+        # Bond analysis (if applicable)
+        if etf_category in ["BONDS", "HIGH_YIELD", "TIPS"]:
+            try:
+                bond_analysis = self.advanced_analyzer.analyze_bonds(ticker)
+                if bond_analysis and "yield_analysis" in bond_analysis:
+                    analysis["bond_analysis"] = bond_analysis
+                    current_yield = bond_analysis["yield_analysis"].get("current_yield", 0)
+                    yield_volatility = bond_analysis["yield_analysis"].get("yield_volatility", 0)
+                    
+                    # Risk-adjusted yield (simplified)
+                    risk_adj_yield = current_yield - (yield_volatility / 2) if yield_volatility > 0 else current_yield
+                    
+                    if risk_adj_yield > 2:
+                        score += 15
+                    elif risk_adj_yield > 1:
+                        score += 10
+                    elif risk_adj_yield < 0.5:
+                        score -= 10
+            except Exception:
+                pass
         
         analysis["recommendation_score"] = max(0, min(100, score))
         
