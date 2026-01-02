@@ -715,40 +715,60 @@ class PortfolioAnalyzer:
         current_tickers = [a["ticker"] for a in analyses]
         total_sell_amount = 0
         
-        # Check for over-concentration
+        # Check for over-concentration - BUT only if performance is poor
+        # Logic: Performance first, concentration is only an upper limit
         max_weight = max(weights.values()) if weights else 0
         if max_weight > 0.4:  # More than 40% in one holding
-            rebalancing["needed"] = True
             ticker = max(weights, key=weights.get)
-            current_value_usd = total_value_usd * max_weight
-            target_value_usd = total_value_usd * 0.25
-            reduce_amount_usd = current_value_usd - target_value_usd
-            total_sell_amount += reduce_amount_usd
-            
-            # Find the analysis for this ticker to get current price
             ticker_analysis = next((a for a in analyses if a["ticker"] == ticker), None)
-            if ticker_analysis and ticker_analysis["current_price"] > 0:
-                reduce_shares = int(reduce_amount_usd / ticker_analysis["current_price"])
-                rebalancing["reason"] = f"Over-concentration: {ticker} is {max_weight*100:.1f}% of portfolio"
-                rebalancing["recommendations"].append({
-                    "action": "SELL",
-                    "ticker": ticker,
-                    "current_weight": max_weight,
-                    "target_weight": 0.25,
-                    "reduce_amount_usd": reduce_amount_usd,
-                    "reduce_shares": reduce_shares,
-                    "current_price_usd": ticker_analysis["current_price"],
-                    "reason": f"Diversification - reduce by ${reduce_amount_usd:,.2f} ({reduce_shares} shares)"
-                })
-            else:
-                rebalancing["reason"] = f"Over-concentration: {ticker} is {max_weight*100:.1f}% of portfolio"
-                rebalancing["recommendations"].append({
-                    "action": "SELL",
-                    "ticker": ticker,
-                    "current_weight": max_weight,
-                    "target_weight": 0.25,
-                    "reason": "Diversification"
-                })
+            
+            # Only recommend selling if:
+            # 1. Concentration is VERY high (>50%) OR
+            # 2. Performance is poor (score < 50)
+            should_reduce = False
+            if max_weight > 0.5:  # Very high concentration (>50%)
+                should_reduce = True
+                reason_text = f"Very high concentration: {ticker} is {max_weight*100:.1f}% of portfolio (risk limit)"
+            elif ticker_analysis and ticker_analysis.get("recommendation_score", 50) < 50:
+                # High concentration + poor performance = sell
+                should_reduce = True
+                reason_text = f"Over-concentration + poor performance: {ticker} is {max_weight*100:.1f}% with score {ticker_analysis.get('recommendation_score', 0):.1f}/100"
+            elif ticker_analysis and ticker_analysis.get("recommendation_score", 50) >= 70:
+                # High concentration BUT good performance = keep it (just note it)
+                should_reduce = False
+                rebalancing["reason"] = f"Note: {ticker} is {max_weight*100:.1f}% of portfolio but performing well (Score: {ticker_analysis.get('recommendation_score', 0):.1f}/100) - keeping due to strong performance"
+            
+            if should_reduce:
+                rebalancing["needed"] = True
+                current_value_usd = total_value_usd * max_weight
+                target_value_usd = total_value_usd * 0.30  # Reduce to 30% (not 25%) to be less aggressive
+                reduce_amount_usd = current_value_usd - target_value_usd
+                total_sell_amount += reduce_amount_usd
+                
+                if ticker_analysis and ticker_analysis["current_price"] > 0:
+                    reduce_shares = int(reduce_amount_usd / ticker_analysis["current_price"])
+                    if not rebalancing["reason"]:
+                        rebalancing["reason"] = reason_text
+                    rebalancing["recommendations"].append({
+                        "action": "SELL",
+                        "ticker": ticker,
+                        "current_weight": max_weight,
+                        "target_weight": 0.30,
+                        "reduce_amount_usd": reduce_amount_usd,
+                        "reduce_shares": reduce_shares,
+                        "current_price_usd": ticker_analysis["current_price"],
+                        "reason": f"{reason_text} - reduce by ${reduce_amount_usd:,.2f} ({reduce_shares} shares)"
+                    })
+                else:
+                    if not rebalancing["reason"]:
+                        rebalancing["reason"] = reason_text
+                    rebalancing["recommendations"].append({
+                        "action": "SELL",
+                        "ticker": ticker,
+                        "current_weight": max_weight,
+                        "target_weight": 0.30,
+                        "reason": reason_text
+                    })
         
         # Check for poor diversification
         if portfolio_metrics["diversification_score"] < 0.5 and total_holdings < 5:
@@ -756,25 +776,52 @@ class PortfolioAnalyzer:
             if not rebalancing["reason"]:
                 rebalancing["reason"] = "Low diversification - consider adding more holdings"
         
-        # Check for underperforming holdings (STRONG SELL or SELL recommendations)
+        # PRIORITY 1: Check for underperforming holdings (STRONG SELL or SELL recommendations)
+        # Performance-based selling takes priority over concentration
         for analysis in analyses:
-            if analysis["recommendation"] in ["STRONG SELL", "SELL"] or analysis["recommendation_score"] < 30:
+            score = analysis.get("recommendation_score", 50)
+            recommendation = analysis.get("recommendation", "HOLD")
+            ticker = analysis["ticker"]
+            current_weight = weights.get(ticker, 0)
+            
+            # Sell if performance is poor, regardless of concentration
+            if recommendation == "STRONG SELL" or score < 30:
                 rebalancing["needed"] = True
                 if not rebalancing["reason"]:
-                    rebalancing["reason"] = f"Underperforming holding: {analysis['ticker']} (Score: {analysis['recommendation_score']:.1f}/100)"
+                    rebalancing["reason"] = f"Underperforming holding: {ticker} (Score: {score:.1f}/100) - Performance-based sell"
                 
-                # Calculate sell amount (sell 50% if STRONG SELL, 25% if SELL)
-                sell_percentage = 0.5 if analysis["recommendation"] == "STRONG SELL" else 0.25
+                # More aggressive selling for very poor performance
+                sell_percentage = 0.75 if recommendation == "STRONG SELL" or score < 20 else 0.5
                 sell_value_usd = analysis["current_value"] * sell_percentage
                 sell_shares = int(analysis["quantity"] * sell_percentage)
                 total_sell_amount += sell_value_usd
                 rebalancing["recommendations"].append({
                     "action": "SELL",
-                    "ticker": analysis["ticker"],
+                    "ticker": ticker,
                     "sell_amount_usd": sell_value_usd,
                     "sell_shares": sell_shares,
                     "current_price_usd": analysis["current_price"],
-                    "reason": f"{analysis['recommendation']} - Score: {analysis['recommendation_score']:.1f}/100. Consider selling {sell_shares} shares (${sell_value_usd:,.2f})"
+                    "current_weight": current_weight,
+                    "reason": f"{recommendation} - Score: {score:.1f}/100. Poor performance - selling {sell_percentage*100:.0f}% ({sell_shares} shares, ${sell_value_usd:,.2f})"
+                })
+            elif recommendation == "SELL" or (30 <= score < 40):
+                # Moderate underperformance - sell smaller portion
+                rebalancing["needed"] = True
+                if not rebalancing["reason"]:
+                    rebalancing["reason"] = f"Underperforming holding: {ticker} (Score: {score:.1f}/100)"
+                
+                sell_percentage = 0.25
+                sell_value_usd = analysis["current_value"] * sell_percentage
+                sell_shares = int(analysis["quantity"] * sell_percentage)
+                total_sell_amount += sell_value_usd
+                rebalancing["recommendations"].append({
+                    "action": "SELL",
+                    "ticker": ticker,
+                    "sell_amount_usd": sell_value_usd,
+                    "sell_shares": sell_shares,
+                    "current_price_usd": analysis["current_price"],
+                    "current_weight": current_weight,
+                    "reason": f"{recommendation} - Score: {score:.1f}/100. Moderate underperformance - selling {sell_percentage*100:.0f}% ({sell_shares} shares, ${sell_value_usd:,.2f})"
                 })
         
         # Check for holdings with very low scores but not yet SELL (warning threshold)
