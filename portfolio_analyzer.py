@@ -152,48 +152,112 @@ class PortfolioAnalyzer:
         else:
             indicators['sharpe'] = 0
         
+        # Beta (market correlation) - simplified
+        try:
+            spy = yf.Ticker("SPY")
+            spy_data = spy.history(period=period)
+            if not spy_data.empty and len(spy_data) == len(data):
+                spy_returns = spy_data['Close'].pct_change().dropna()
+                asset_returns = returns.dropna()
+                if len(spy_returns) == len(asset_returns) and len(asset_returns) > 0:
+                    covariance = np.cov(asset_returns, spy_returns)[0][1]
+                    spy_variance = np.var(spy_returns)
+                    if spy_variance > 0:
+                        indicators['beta'] = covariance / spy_variance
+        except:
+            indicators['beta'] = 1.0  # Default beta
+        
+        # Maximum Drawdown
+        cumulative = (1 + returns).cumprod()
+        running_max = cumulative.expanding().max()
+        drawdown = (cumulative - running_max) / running_max
+        indicators['max_drawdown'] = drawdown.min() * 100
+        
+        # Trend analysis
+        if len(closes) >= 50:
+            short_ma = closes.tail(20).mean()
+            long_ma = closes.tail(50).mean()
+            if short_ma > long_ma:
+                indicators['trend'] = 'BULLISH'
+            elif short_ma < long_ma:
+                indicators['trend'] = 'BEARISH'
+            else:
+                indicators['trend'] = 'NEUTRAL'
+        else:
+            indicators['trend'] = 'NEUTRAL'
+        
         return indicators
     
     def get_news_sentiment(self, ticker: str) -> Dict:
-        """Get news sentiment for a ticker."""
+        """Get news sentiment for a ticker with advanced analysis."""
         sentiment = {
-            "score": 0,
+            "score": 50,  # Neutral base
             "articles_count": 0,
-            "recent_news": []
+            "recent_news": [],
+            "sentiment_analysis": "NEUTRAL"
         }
         
-        if not self.news_api_key:
-            return sentiment
-        
         try:
-            newsapi = NewsApiClient(api_key=self.news_api_key)
-            # Get company name from ticker
+            # Try to get news from yfinance (free, no API key needed)
             stock = yf.Ticker(ticker)
-            info = stock.info
-            company_name = info.get('longName', ticker)
+            news = stock.news
             
-            # Search for news
-            articles = newsapi.get_everything(
-                q=f"{company_name} OR {ticker}",
-                language='en',
-                sort_by='relevancy',
-                page_size=10
-            )
-            
-            if articles['status'] == 'ok':
-                sentiment["articles_count"] = len(articles['articles'])
+            if news:
+                sentiment["articles_count"] = len(news)
                 sentiment["recent_news"] = [
                     {
-                        "title": article['title'],
-                        "source": article['source']['name'],
-                        "published": article['publishedAt']
+                        "title": article.get('title', ''),
+                        "source": article.get('publisher', 'Unknown'),
+                        "published": datetime.fromtimestamp(article.get('providerPublishTime', 0)).isoformat() if article.get('providerPublishTime') else 'Unknown'
                     }
-                    for article in articles['articles'][:5]
+                    for article in news[:5]
                 ]
-                # Simple sentiment scoring (can be enhanced with NLP)
-                sentiment["score"] = min(len(articles['articles']) * 10, 100)
+                
+                # Simple sentiment analysis based on titles
+                positive_words = ['gain', 'rise', 'up', 'growth', 'profit', 'beat', 'strong', 'bullish', 'surge']
+                negative_words = ['fall', 'drop', 'down', 'loss', 'miss', 'weak', 'bearish', 'decline', 'crash']
+                
+                positive_count = sum(1 for article in news if any(word in article.get('title', '').lower() for word in positive_words))
+                negative_count = sum(1 for article in news if any(word in article.get('title', '').lower() for word in negative_words))
+                
+                if positive_count > negative_count:
+                    sentiment["score"] = 50 + min(positive_count * 5, 30)
+                    sentiment["sentiment_analysis"] = "POSITIVE"
+                elif negative_count > positive_count:
+                    sentiment["score"] = 50 - min(negative_count * 5, 30)
+                    sentiment["sentiment_analysis"] = "NEGATIVE"
+                else:
+                    sentiment["sentiment_analysis"] = "NEUTRAL"
+            
+            # Also try NewsAPI if key is available
+            if self.news_api_key:
+                try:
+                    newsapi = NewsApiClient(api_key=self.news_api_key)
+                    stock = yf.Ticker(ticker)
+                    info = stock.info
+                    company_name = info.get('longName', ticker)
+                    
+                    articles = newsapi.get_everything(
+                        q=f"{company_name} OR {ticker}",
+                        language='en',
+                        sort_by='relevancy',
+                        page_size=10
+                    )
+                    
+                    if articles['status'] == 'ok' and articles['articles']:
+                        sentiment["articles_count"] += len(articles['articles'])
+                        sentiment["recent_news"].extend([
+                            {
+                                "title": article['title'],
+                                "source": article['source']['name'],
+                                "published": article['publishedAt']
+                            }
+                            for article in articles['articles'][:3]
+                        ])
+                except:
+                    pass
         except Exception as e:
-            print(f"Error fetching news for {ticker}: {e}")
+            pass  # Silent fail, use default sentiment
         
         return sentiment
     
@@ -244,11 +308,17 @@ class PortfolioAnalyzer:
             elif ti.get('sharpe', 0) < 0:
                 score -= 10
         
-        # News sentiment
-        if analysis["news_sentiment"]["score"] > 50:
-            score += 10
-        elif analysis["news_sentiment"]["score"] < 20:
-            score -= 10
+        # News sentiment (enhanced)
+        news_sentiment = analysis["news_sentiment"]
+        if news_sentiment.get("sentiment_analysis") == "POSITIVE":
+            score += 15
+        elif news_sentiment.get("sentiment_analysis") == "NEGATIVE":
+            score -= 15
+        
+        if news_sentiment["score"] > 60:
+            score += 5
+        elif news_sentiment["score"] < 40:
+            score -= 5
         
         analysis["recommendation_score"] = max(0, min(100, score))
         
@@ -525,6 +595,11 @@ class PortfolioAnalyzer:
                 print(f"  RSI: {ti.get('rsi', 0):.1f}")
                 print(f"  Momentum: {ti.get('momentum', 0):.2f}%")
                 print(f"  Volatility: {ti.get('volatility', 0):.2f}%")
+                print(f"  Trend: {ti.get('trend', 'NEUTRAL')}")
+                if 'beta' in ti:
+                    print(f"  Beta: {ti.get('beta', 1.0):.2f}")
+                if 'max_drawdown' in ti:
+                    print(f"  Max Drawdown: {ti.get('max_drawdown', 0):.2f}%")
         
         print("\n" + "=" * 60)
         print("REBALANCING SUMMARY")
