@@ -452,7 +452,7 @@ class PortfolioAnalyzer:
         self.news_cache[ticker] = (sentiment, now)
         return sentiment
     
-    def analyze_holding(self, ticker: str, quantity: float, current_price: float, verbose: bool = True) -> Dict:
+    def analyze_holding(self, ticker: str, quantity: float, current_price: float, verbose: bool = True, advisor = None) -> Dict:
         """Comprehensive analysis of a single holding."""
         if verbose:
             print(f"Analyzing {ticker}...")
@@ -514,28 +514,26 @@ class PortfolioAnalyzer:
         
         # Industry trend analysis (if available from deposit_advisor)
         etf_category = None
-        try:
-            from deposit_advisor import DepositAdvisor
-            advisor = DepositAdvisor(self.portfolio_file)
-            
-            # Find category for this ticker
-            for cat, etfs in advisor.ETF_CATEGORIES.items():
-                if ticker in etfs:
-                    etf_category = cat
-                    break
-            
-            if etf_category:
-                industry_trend = advisor.analyze_industry_trends(etf_category)
-                analysis["industry_trend"] = industry_trend
+        if advisor:  # Use provided advisor instead of creating new one
+            try:
+                # Find category for this ticker
+                for cat, etfs in advisor.ETF_CATEGORIES.items():
+                    if ticker in etfs:
+                        etf_category = cat
+                        break
                 
-                # Add industry trend to score
-                if industry_trend.get("trend") == "STRONG_UPTREND":
-                    score += 15
-                elif industry_trend.get("trend") == "UPTREND":
-                    score += 10
-                elif industry_trend.get("trend") == "DOWNTREND":
-                    score -= 10
-        except Exception as e:
+                if etf_category:
+                    industry_trend = advisor.analyze_industry_trends(etf_category)
+                    analysis["industry_trend"] = industry_trend
+                    
+                    # Add industry trend to score
+                    if industry_trend.get("trend") == "STRONG_UPTREND":
+                        score += 15
+                    elif industry_trend.get("trend") == "UPTREND":
+                        score += 10
+                    elif industry_trend.get("trend") == "DOWNTREND":
+                        score -= 10
+            except Exception as e:
             logger.debug(f"Failed to analyze industry trend: {e}")
             pass  # Industry trend analysis is optional
         
@@ -869,6 +867,14 @@ class PortfolioAnalyzer:
             print(f"   💾 Using cached prices for {cached_prices}/{len(tickers)} tickers (cache: {'1 min' if market_status else '5 min'})")
         print()
         
+        # Create DepositAdvisor once (to avoid loading cache multiple times)
+        try:
+            from deposit_advisor import DepositAdvisor
+            advisor = DepositAdvisor(self.portfolio_file)
+        except Exception as e:
+            logger.debug(f"Could not create DepositAdvisor: {e}")
+            advisor = None
+        
         # Analyze each holding in parallel for better performance
         analyses = []
         holdings_to_analyze = [
@@ -878,11 +884,11 @@ class PortfolioAnalyzer:
         ]
         
         if holdings_to_analyze:
-            with ThreadPoolExecutor(max_workers=min(5, len(holdings_to_analyze))) as executor:
-                futures = {
-                    executor.submit(self.analyze_holding, ticker, quantity, price, verbose=True): (ticker, quantity, price)
-                    for ticker, quantity, price in holdings_to_analyze
-                }
+                with ThreadPoolExecutor(max_workers=min(5, len(holdings_to_analyze))) as executor:
+                    futures = {
+                        executor.submit(self.analyze_holding, ticker, quantity, price, verbose=True, advisor=advisor): (ticker, quantity, price)
+                        for ticker, quantity, price in holdings_to_analyze
+                    }
                 
                 for future in as_completed(futures):
                     try:
