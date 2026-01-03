@@ -534,8 +534,8 @@ class PortfolioAnalyzer:
                     elif industry_trend.get("trend") == "DOWNTREND":
                         score -= 10
             except Exception as e:
-            logger.debug(f"Failed to analyze industry trend: {e}")
-            pass  # Industry trend analysis is optional
+                logger.debug(f"Failed to analyze industry trend: {e}")
+                pass  # Industry trend analysis is optional
         
         # Statistical forecast (mid-term yield) - from technical indicators
         if analysis["technical_indicators"] and "forecast" in analysis["technical_indicators"]:
