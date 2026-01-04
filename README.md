@@ -20,9 +20,36 @@
 - **אינדיקטורים**: RSI, Moving Averages, Volatility, Momentum, Sharpe Ratio, Beta, Max Drawdown
 - **ניתוח מגמות**: BULLISH/BEARISH/NEUTRAL, זיהוי נקודות כניסה/יציאה
 
+### Machine Learning מתקדם 🚀
+- **LSTM Neural Networks**: תחזיות מחירים מדויקות עם deep learning
+- **תחזיות לטווח ארוך**: מודלים מתקדמים לתחזית 30-90 יום קדימה
+- **אופטימיזציה מבוססת ML**: שימוש ב-machine learning לאופטימיזציה של תיק
+
+### Backtesting 📊
+- **סימולציות היסטוריות**: בדיקת אסטרטגיות על נתונים היסטוריים
+- **אסטרטגיות מרובות**: Buy & Hold, Rebalancing, Momentum
+- **מדדי ביצועים**: Sharpe Ratio, Max Drawdown, Win Rate, Annualized Returns
+
+### ניהול סיכונים אוטומטי 🛡️
+- **Stop-Loss אוטומטי**: התראות על הפסדים מעל סף מסוים
+- **Take-Profit אוטומטי**: המלצות למכירה כשמגיעים ליעד רווח
+- **ניטור ריכוז**: התראות על ריכוז יתר בתיק
+- **מדדי סיכון**: ניתוח תנודתיות, קורלציות, וסיכון כולל
+
+### ניתוח מיסים 💰
+- **חישוב מס רווחי הון**: חישוב מדויק של מס על מכירות
+- **ניתוח דיבידנדים**: חישוב מס על דיבידנדים (מס אמריקאי + ישראלי)
+- **אופטימיזציה מס**: המלצות להפחתת נטל מס
+- **ניתוח תקופות החזקה**: זיהוי החזקות ארוכות טווח להטבות מס
+
+### ניתוח Sentiment משופר 📰
+- **ניתוח חדשות מתקדם**: זיהוי sentiment משופר עם מילות מפתח פיננסיות
+- **ניתוח מרובה מקורות**: אגרגציה של sentiment מכמה מקורות
+- **ניתוח תיק כולל**: sentiment ברמת תיק ולא רק מניה בודדת
+
 ### ייעוץ חכם
 - **המלצות איזון מחדש**: זיהוי אוטומטי + המלצות מה למכור ומה לקנות במקום
-- **ייעוץ הפקדות**: ניתוח מאות ETF מכל המגזרים, המלצות מבוססות על טרנדים
+- **ייעוץ הפקדות**: ניתוח מאות ETF מכל המגזרים, המלצות מבוססות על 75/25 Balanced Growth
 - **ניתוח מגוון**: זיהוי פערים, המלצות על פיזור אופטימלי
 
 ### תכונות נוספות
@@ -114,8 +141,87 @@ make deposit
 - מבקשת ממך להכניס סכום הפקדה בשקלים
 - מנתחת את התיק הנוכחי
 - בודקת מאות ETF פוטנציאליים
-- מספקת המלצות מפורטות על אילו ETF לקנות
+- מספקת המלצות מפורטות על אילו ETF לקנות (75/25 Balanced Growth Strategy)
 - מציינת האם לקנות חדשים או להגדיל החזקות קיימות
+
+### Backtesting - בדיקת אסטרטגיות
+
+```bash
+make backtest
+```
+
+או ישירות ב-Python:
+
+```python
+from backtesting import Backtester
+
+backtester = Backtester(initial_capital=10000)
+results = backtester.backtest_strategy(
+    tickers=["SPY", "VXUS", "BND"],
+    start_date="2020-01-01",
+    end_date="2023-12-31",
+    strategy="buy_and_hold",
+    allocation={"SPY": 0.5, "VXUS": 0.25, "BND": 0.25}
+)
+backtester.print_results(results)
+```
+
+### ניהול סיכונים
+
+```bash
+make risk
+```
+
+או ישירות ב-Python:
+
+```python
+from risk_manager import RiskManager
+
+manager = RiskManager()
+alerts = manager.get_risk_alerts()
+manager.print_risk_report()
+```
+
+### ניתוח מיסים
+
+```bash
+make tax
+```
+
+או ישירות ב-Python:
+
+```python
+from tax_analyzer import TaxAnalyzer
+
+analyzer = TaxAnalyzer()
+tax_calc = analyzer.calculate_capital_gains_tax(
+    purchase_price=100,
+    sale_price=150,
+    quantity=10,
+    purchase_date="2022-01-01T00:00:00"
+)
+analyzer.print_tax_report({"sales_analysis": [tax_calc]})
+```
+
+### Machine Learning - תחזיות LSTM
+
+```python
+from ml_predictor import MLPredictor
+
+predictor = MLPredictor()
+result = predictor.predict_with_lstm("SPY", periods=30)
+print(f"Predicted return: {result['expected_return']:.2f}%")
+```
+
+### ניתוח Sentiment משופר
+
+```python
+from sentiment_analyzer import SentimentAnalyzer
+
+analyzer = SentimentAnalyzer()
+result = analyzer.analyze_news_sentiment("SPY")
+print(f"Sentiment: {result['sentiment']} (Score: {result['score']})")
+```
 
 ## מבנה קבצים
 

@@ -1,4 +1,4 @@
-.PHONY: analyze deposit setup install venv clean
+.PHONY: analyze deposit setup install venv clean backtest risk tax alerts
 
 # Virtual environment directory
 VENV = venv
@@ -16,6 +16,9 @@ help:
 	@echo "  make analyze    - Analyze current portfolio and provide recommendations"
 	@echo "  make deposit    - Get recommendations for depositing funds"
 	@echo "  make alerts     - Check for critical portfolio actions (requires .env with email credentials)"
+	@echo "  make backtest    - Run backtesting on historical data"
+	@echo "  make risk       - Check portfolio risk and get risk management report"
+	@echo "  make tax        - Analyze tax implications for portfolio"
 	@echo "  make clean      - Remove virtual environment"
 
 venv:
@@ -62,6 +65,18 @@ alerts: venv
 		exit 1; \
 	fi
 	@$(PYTHON) critical_alert.py
+
+backtest: venv
+	@echo "Running backtesting analysis..."
+	@$(PYTHON) backtesting.py
+
+risk: venv
+	@echo "Checking portfolio risk..."
+	@$(PYTHON) -c "from risk_manager import RiskManager; rm = RiskManager(); rm.print_risk_report()"
+
+tax: venv
+	@echo "Analyzing tax implications..."
+	@$(PYTHON) -c "from tax_analyzer import TaxAnalyzer; ta = TaxAnalyzer(); print('Tax analyzer ready. Use in Python scripts.')"
 
 clean:
 	@echo "Removing virtual environment..."
