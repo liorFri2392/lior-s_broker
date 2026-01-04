@@ -140,7 +140,10 @@ class CriticalAlertSystem:
         }
     
     def scan_critical_buy_opportunities(self) -> List[Dict]:
-        """Scan for ETFs with exceptional buy opportunities, considering current portfolio."""
+        """
+        Scan for critical buy opportunities following 75/25 Balanced Growth Strategy.
+        Prioritizes Core ETFs and Bonds over high-risk trends.
+        """
         critical_buys = []
         
         # Get current portfolio holdings to avoid recommending what we already have
@@ -152,78 +155,129 @@ class CriticalAlertSystem:
         logger.info(f"Current portfolio has {len(current_holdings)} holdings: {current_holdings}")
         logger.info(f"Portfolio value: ${portfolio_value:,.2f}, Cash available: ${cash_available:,.2f}")
         
-        # Focus on high-potential categories
-        high_potential_categories = [
-            "AI_AND_ROBOTICS", "TECHNOLOGY", "SEMICONDUCTORS", "CRYPTO", "CLEAN_ENERGY",
-            "HEALTHCARE", "FINANCIAL", "GROWTH", "MOMENTUM"
+        # 75/25 Strategy: Focus on Core, Satellite, and Bonds
+        # Exclude high-risk categories (leveraged, crypto)
+        excluded_categories = ["LEVERAGED_2X", "LEVERAGED_3X", "LEVERAGED_INVERSE", "CRYPTO"]
+        
+        # Core ETFs (essential for portfolio stability)
+        core_etfs = ["SPY", "VOO", "IVV", "VXUS", "VEA"]
+        
+        # Satellite ETFs (growth, but not too risky)
+        satellite_categories = [
+            "US_SMALL_CAP", "TECHNOLOGY", "HEALTHCARE", "EMERGING_MARKETS"
         ]
         
-        # Analyze top ETFs from these categories
+        # Bond ETFs (protection)
+        bond_etfs = ["BND", "AGG", "TIP", "SCHP", "VTIP"]
+        
+        # Collect ETFs to analyze
         analyzed_etfs = []
-        for category in high_potential_categories:
+        
+        # Add Core ETFs (highest priority)
+        for etf in core_etfs:
+            if etf.upper() not in analyzed_etfs:
+                analyzed_etfs.append(etf)
+        
+        # Add Satellite ETFs from safe categories
+        for category in satellite_categories:
             if category in self.advisor.ETF_CATEGORIES:
-                etfs = self.advisor.ETF_CATEGORIES[category][:3]  # Top 3 from each category
+                etfs = self.advisor.ETF_CATEGORIES[category][:2]  # Top 2 from each category
                 for etf in etfs:
                     etf_upper = etf.upper()
-                    # Skip if already in portfolio (unless it's a great opportunity to increase)
-                    if etf_upper not in analyzed_etfs:
+                    # Skip excluded categories
+                    is_excluded = any(etf_upper in self.advisor.ETF_CATEGORIES.get(cat, []) 
+                                     for cat in excluded_categories)
+                    if not is_excluded and etf_upper not in analyzed_etfs:
                         analyzed_etfs.append(etf)
         
-        print(f"   Analyzing {len(analyzed_etfs)} high-potential ETFs (excluding current holdings)...")
+        # Add Bond ETFs
+        for etf in bond_etfs:
+            if etf.upper() not in analyzed_etfs:
+                analyzed_etfs.append(etf)
+        
+        print(f"   Analyzing {len(analyzed_etfs)} ETFs (Core, Satellite, Bonds) following 75/25 strategy...")
+        print("   (Excluding leveraged ETFs and crypto for balanced risk)")
         
         # Analyze in batches
-        for i, etf in enumerate(analyzed_etfs[:20]):  # Limit to 20 for performance
+        for i, etf in enumerate(analyzed_etfs[:25]):  # Limit to 25 for performance
             try:
                 etf_upper = etf.upper()
                 
-                # Skip if already in portfolio (focus on diversification)
-                if etf_upper in current_holdings:
+                # Skip if already in portfolio (unless it's Core or Bonds - those we might want to increase)
+                is_core = etf_upper in [e.upper() for e in core_etfs]
+                is_bond = etf_upper in [e.upper() for e in bond_etfs]
+                
+                if etf_upper in current_holdings and not (is_core or is_bond):
                     logger.debug(f"Skipping {etf} - already in portfolio")
                     continue
                 
                 analysis = self.advisor.analyze_etf(etf, verbose=False)
                 score = analysis.get("score", 0)
                 
-                # Check for critical buy signals
-                if score >= self.critical_threshold:
+                # Boost score for Core and Bonds (they're essential)
+                if is_core:
+                    score += 15
+                    analysis["reasons"].append("Core holding - essential for portfolio stability")
+                elif is_bond:
+                    score += 20
+                    analysis["reasons"].append("Bond holding - essential for portfolio protection")
+                
+                # Check for critical buy signals (lower threshold for Core/Bonds)
+                threshold = 70 if (is_core or is_bond) else self.critical_threshold
+                
+                if score >= threshold:
                     expected_return = analysis.get("mid_term_forecast", {}).get("expected_3yr_return", 0)
                     reasons = analysis.get("reasons", [])
                     
+                    # For Core and Bonds, lower the expected return requirement
+                    min_return = 10 if (is_core or is_bond) else 15
+                    
                     # Only flag as critical if:
-                    # 1. Very high score (>=75)
-                    # 2. Strong expected return (>15%)
-                    # 3. Positive technical indicators
-                    if expected_return > 15 or score >= 85:
-                        # Check if leveraged ETF
-                        is_leveraged = analysis.get("is_leveraged", False)
+                    # 1. High score (>=threshold)
+                    # 2. Strong expected return (or Core/Bonds with moderate return)
+                    # 3. Not leveraged (we exclude those)
+                    is_leveraged = analysis.get("is_leveraged", False)
+                    
+                    if is_leveraged:
+                        # Skip leveraged ETFs - not suitable for 75/25 strategy
+                        logger.debug(f"Skipping {etf} - leveraged ETF, not suitable for balanced strategy")
+                        continue
+                    
+                    if expected_return > min_return or score >= 85:
                         leverage_mult = analysis.get("leverage_multiplier", 1.0)
                         
-                        # For leveraged ETFs, be more conservative with recommendations
-                        if is_leveraged:
-                            # Reduce recommended amount for leveraged ETFs (max 5% of cash)
-                            recommended_amount = min(500, cash_available * 0.05) if cash_available > 0 else 500
-                            leverage_warning = f" ⚠️ {abs(leverage_mult)}x LEVERAGED - EXTREME RISK"
-                        else:
+                        # Calculate recommended amount based on category
+                        if is_core:
+                            # Core gets higher allocation
+                            recommended_amount = min(1500, cash_available * 0.15) if cash_available > 0 else 1500
+                            category_note = "Core holding - increase allocation"
+                        elif is_bond:
+                            # Bonds get moderate allocation
                             recommended_amount = min(1000, cash_available * 0.1) if cash_available > 0 else 1000
-                            leverage_warning = ""
+                            category_note = "Bond holding - add protection"
+                        else:
+                            # Satellite gets smaller allocation
+                            recommended_amount = min(800, cash_available * 0.08) if cash_available > 0 else 800
+                            category_note = "Satellite holding - growth opportunity"
                         
                         critical_buys.append({
                             "type": "BUY",
                             "ticker": etf,
-                            "priority": "CRITICAL" if score >= 85 else "HIGH",
-                            "reason": f"Exceptional opportunity - Score: {score}/100. Expected 3yr return: {expected_return:.1f}%. Not in current portfolio.{leverage_warning}",
+                            "priority": "CRITICAL" if (score >= 85 or is_core or is_bond) else "HIGH",
+                            "reason": f"{category_note} - Score: {score}/100. Expected 3yr return: {expected_return:.1f}%.",
                             "amount": recommended_amount,
                             "expected_return": expected_return,
                             "score": score,
                             "details": "; ".join(reasons[:3]),  # Top 3 reasons
-                            "diversification": "New holding - adds diversification",
-                            "is_leveraged": is_leveraged,
-                            "leverage_multiplier": leverage_mult
+                            "diversification": "Balanced 75/25 strategy",
+                            "is_leveraged": False,
+                            "leverage_multiplier": 1.0,
+                            "category": "CORE" if is_core else ("BONDS" if is_bond else "SATELLITE")
                         })
                 
                 # Progress indicator
                 if (i + 1) % 5 == 0:
-                    print(f"   Progress: {i + 1}/{min(len(analyzed_etfs), 20)} ETFs analyzed...")
+                    print(f"   Progress: {i + 1}/{min(len(analyzed_etfs), 25)} ETFs analyzed...")
                     
             except Exception as e:
                 logger.debug(f"Failed to analyze ETF {etf}: {e}")

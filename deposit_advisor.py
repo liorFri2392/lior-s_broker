@@ -493,139 +493,216 @@ class DepositAdvisor:
         return {"categories": categories, "gaps": gaps}
     
     def recommend_etfs(self, deposit_amount_ils: float, portfolio: Dict) -> List[Dict]:
-        """Recommend ETFs to buy based on deposit amount and current portfolio."""
+        """
+        Recommend ETFs based on 75/25 Balanced Growth Strategy:
+        - 75% Stocks (50% Core + 25% Satellite)
+        - 25% Bonds (Protection)
+        Optimized for family with mortgage - balanced risk/return.
+        """
         print(f"\nAnalyzing deposit of ₪{deposit_amount_ils:,.2f}...")
+        print("📊 Strategy: 75/25 Balanced Growth (75% Stocks, 25% Bonds)")
+        print("   Optimized for family stability with growth potential\n")
         
         # Convert to USD
         exchange_rate = self.get_exchange_rate()
         deposit_amount_usd = deposit_amount_ils / exchange_rate
         
         print(f"Deposit amount in USD: ${deposit_amount_usd:,.2f}")
-        print(f"🔍 Analyzing {len([etf for category in self.ETF_CATEGORIES.values() for etf in category])} potential ETFs across all categories...")
-        print("   (This may take a moment - analyzing with advanced statistical models)")
         
-        # Analyze current portfolio
-        diversification = self.get_portfolio_diversification(portfolio)
+        # Calculate target allocations
+        stocks_target = deposit_amount_usd * 0.75  # 75% stocks
+        bonds_target = deposit_amount_usd * 0.25    # 25% bonds
+        
+        # Analyze current portfolio to understand current allocation
         current_holdings = [h["ticker"] for h in portfolio.get("holdings", [])]
+        portfolio_value = sum(h.get("current_value", 0) for h in portfolio.get("holdings", []))
+        portfolio_value += portfolio.get("cash", 0)
         
-        # Analyze all potential ETFs (silently)
-        all_etfs = []
-        for category, etfs in self.ETF_CATEGORIES.items():
-            for etf in etfs:
-                if etf not in all_etfs:
-                    all_etfs.append(etf)
+        # Define Core ETFs (stable, broad market)
+        core_etfs = ["SPY", "VOO", "IVV", "VXUS", "VEA"]  # US Large Cap + International
+        # Define Satellite ETFs (growth, trends - but not too risky)
+        satellite_etfs = ["IWM", "VB", "XLK", "VGT", "VWO", "EEM", "XLV", "VHT"]  # Small Cap, Tech, Emerging, Healthcare
+        # Define Bonds (protection)
+        bond_etfs = ["BND", "AGG", "TIP", "SCHP", "VTIP"]  # US Bonds + Inflation Protection
         
-        etf_analyses = []
+        # Exclude high-risk categories
+        excluded_categories = ["LEVERAGED_2X", "LEVERAGED_3X", "LEVERAGED_INVERSE", "CRYPTO"]
+        excluded_tickers = []
+        for cat in excluded_categories:
+            if cat in self.ETF_CATEGORIES:
+                excluded_tickers.extend(self.ETF_CATEGORIES[cat])
         
-        # Use progress indicator instead of printing each ETF
-        total_etfs = len(all_etfs)
-        analyzed_count = 0
+        print(f"🔍 Analyzing Core, Satellite, and Bond ETFs...")
+        print("   (Excluding leveraged ETFs and crypto for balanced risk)\n")
         
-        for etf in all_etfs:
-            analysis = self.analyze_etf(etf, verbose=False)  # Silent analysis
-            analyzed_count += 1
-            if analyzed_count % 20 == 0:  # Progress every 20 ETFs
-                print(f"   Progress: {analyzed_count}/{total_etfs} ETFs analyzed...")
-            if analysis["current_price"] > 0:  # Only include if we got valid data
-                # Bonus for diversification
-                etf_category = None
-                for cat, etfs in self.ETF_CATEGORIES.items():
-                    if etf in etfs:
-                        etf_category = cat
-                        break
-                
-                if etf_category in diversification["gaps"]:
-                    analysis["score"] += 15  # Bonus for filling gaps
-                    analysis["reasons"].append("Fills diversification gap")
-                
-                # Small penalty if already holding
-                if etf in current_holdings:
-                    analysis["score"] -= 5
-                    analysis["reasons"].append("Already in portfolio (consider increasing)")
-                
-                etf_analyses.append(analysis)
+        # Analyze Core ETFs
+        core_analyses = []
+        for etf in core_etfs:
+            if etf not in excluded_tickers:
+                analysis = self.analyze_etf(etf, verbose=False)
+                if analysis["current_price"] > 0:
+                    # Boost score for Core ETFs (they're essential)
+                    analysis["score"] += 20
+                    analysis["reasons"].append("Core holding - essential for portfolio stability")
+                    if etf in current_holdings:
+                        analysis["reasons"].append("Already in portfolio - consider increasing")
+                    core_analyses.append(analysis)
         
-        # Optimize for mid-term yield (3-5 years) - ULTIMATE BROKER FEATURE
+        # Analyze Satellite ETFs
+        satellite_analyses = []
+        for etf in satellite_etfs:
+            if etf not in excluded_tickers:
+                analysis = self.analyze_etf(etf, verbose=False)
+                if analysis["current_price"] > 0:
+                    # Small boost for diversification
+                    if etf not in current_holdings:
+                        analysis["score"] += 10
+                        analysis["reasons"].append("Satellite holding - adds growth potential")
+                    satellite_analyses.append(analysis)
+        
+        # Analyze Bond ETFs
+        bond_analyses = []
+        for etf in bond_etfs:
+            if etf not in excluded_tickers:
+                analysis = self.analyze_etf(etf, verbose=False)
+                if analysis["current_price"] > 0:
+                    # Boost score for Bonds (essential for protection)
+                    analysis["score"] += 25
+                    analysis["reasons"].append("Bond holding - essential for portfolio protection")
+                    if etf in current_holdings:
+                        analysis["reasons"].append("Already in portfolio - consider increasing")
+                    bond_analyses.append(analysis)
+        
+        # Optimize for mid-term yield
         print("🔬 Optimizing for mid-term yield (3-5 years) using statistical models...")
-        optimized_etfs = self.advanced_analyzer.optimize_mid_term_yield(etf_analyses, target_years=3)
-        print("✅ Analysis complete! Generating recommendations...\n")
+        all_analyses = core_analyses + satellite_analyses + bond_analyses
+        optimized_etfs = self.advanced_analyzer.optimize_mid_term_yield(all_analyses, target_years=3)
         
-        # Combine score with mid-term yield optimization
-        for etf in etf_analyses:
+        # Apply optimization boost
+        for etf in all_analyses:
             ticker = etf["ticker"]
-            # Find matching optimized analysis
             optimized = next((o for o in optimized_etfs if o.get("ticker") == ticker), None)
             if optimized and "mid_term_analysis" in optimized:
                 opt_score = optimized["mid_term_analysis"].get("optimization_score", 0)
-                # Boost score by 30% if mid-term yield is excellent
                 if opt_score > 20:
                     etf["score"] = min(100, etf["score"] + 10)
                     etf["mid_term_boost"] = True
         
-        # Sort by score (now includes mid-term optimization)
-        etf_analyses.sort(key=lambda x: x["score"], reverse=True)
+        # Sort by score
+        core_analyses.sort(key=lambda x: x["score"], reverse=True)
+        satellite_analyses.sort(key=lambda x: x["score"], reverse=True)
+        bond_analyses.sort(key=lambda x: x["score"], reverse=True)
         
-        # Select top recommendations
-        recommendations = []
-        remaining_amount = deposit_amount_usd
+        print("✅ Analysis complete! Generating 75/25 balanced recommendations...\n")
         
-        # Strategy: Mix of top performers and diversification
-        top_etfs = etf_analyses[:10]  # Top 10 by score
-        
-        # Allocate funds
+        # Build allocations following 75/25 strategy
         allocations = []
+        remaining_stocks = stocks_target
+        remaining_bonds = bonds_target
         
-        # 1. Top 3 ETFs get 60% of funds
-        top_3 = top_etfs[:3]
-        for i, etf in enumerate(top_3):
-            allocation_pct = 0.25 if i == 0 else 0.175  # 25% + 17.5% + 17.5% = 60%
-            amount = deposit_amount_usd * allocation_pct
-            shares = int(amount / etf["current_price"]) if etf["current_price"] > 0 else 0
-            if shares > 0:
-                allocations.append({
-                    "ticker": etf["ticker"],
-                    "name": etf.get("name", etf["ticker"]),
-                    "allocation_amount": amount,
-                    "allocation_percent": allocation_pct * 100,
-                    "shares": shares,
-                    "price": etf["current_price"],
-                    "score": etf["score"],
-                    "recommendation": etf["recommendation"],
-                    "reasons": etf["reasons"],
-                    "action": "NEW" if etf["ticker"] not in current_holdings else "INCREASE"
-                })
-                remaining_amount -= shares * etf["current_price"]
-        
-        # 2. Diversification picks get 30% of funds
-        diversification_picks = [e for e in etf_analyses if e["ticker"] not in [a["ticker"] for a in allocations]][:3]
-        for i, etf in enumerate(diversification_picks[:2]):
-            if remaining_amount > 100:  # Only if enough left
-                allocation_pct = 0.15
-                amount = min(deposit_amount_usd * allocation_pct, remaining_amount)
+        # 1. Core Stocks (50% of total = 66.7% of stocks allocation)
+        core_target = stocks_target * 0.667  # 50% of total portfolio
+        core_allocated = 0
+        for etf in core_analyses[:2]:  # Top 2 Core ETFs
+            if core_allocated < core_target:
+                amount = min(core_target * 0.5, core_target - core_allocated)  # Split between top 2
                 shares = int(amount / etf["current_price"]) if etf["current_price"] > 0 else 0
                 if shares > 0:
+                    actual_amount = shares * etf["current_price"]
                     allocations.append({
                         "ticker": etf["ticker"],
                         "name": etf.get("name", etf["ticker"]),
-                        "allocation_amount": amount,
-                        "allocation_percent": (amount / deposit_amount_usd) * 100,
+                        "allocation_amount": actual_amount,
+                        "allocation_percent": (actual_amount / deposit_amount_usd) * 100,
                         "shares": shares,
                         "price": etf["current_price"],
                         "score": etf["score"],
                         "recommendation": etf["recommendation"],
                         "reasons": etf["reasons"],
-                        "action": "NEW" if etf["ticker"] not in current_holdings else "INCREASE"
+                        "action": "NEW" if etf["ticker"] not in current_holdings else "INCREASE",
+                        "category": "CORE"
                     })
-                    remaining_amount -= shares * etf["current_price"]
+                    core_allocated += actual_amount
+                    remaining_stocks -= actual_amount
         
-        # 3. Remaining goes to top pick
-        if remaining_amount > 50 and allocations:
-            top_pick = allocations[0]
-            additional_shares = int(remaining_amount / top_pick["price"])
-            if additional_shares > 0:
-                allocations[0]["shares"] += additional_shares
-                allocations[0]["allocation_amount"] += additional_shares * top_pick["price"]
-                allocations[0]["allocation_percent"] = (allocations[0]["allocation_amount"] / deposit_amount_usd) * 100
+        # 2. Satellite Stocks (25% of total = 33.3% of stocks allocation)
+        satellite_target = stocks_target * 0.333  # 25% of total portfolio
+        satellite_allocated = 0
+        for etf in satellite_analyses[:3]:  # Top 3 Satellite ETFs
+            if satellite_allocated < satellite_target:
+                amount = min(satellite_target / 3, satellite_target - satellite_allocated)
+                shares = int(amount / etf["current_price"]) if etf["current_price"] > 0 else 0
+                if shares > 0:
+                    actual_amount = shares * etf["current_price"]
+                    allocations.append({
+                        "ticker": etf["ticker"],
+                        "name": etf.get("name", etf["ticker"]),
+                        "allocation_amount": actual_amount,
+                        "allocation_percent": (actual_amount / deposit_amount_usd) * 100,
+                        "shares": shares,
+                        "price": etf["current_price"],
+                        "score": etf["score"],
+                        "recommendation": etf["recommendation"],
+                        "reasons": etf["reasons"],
+                        "action": "NEW" if etf["ticker"] not in current_holdings else "INCREASE",
+                        "category": "SATELLITE"
+                    })
+                    satellite_allocated += actual_amount
+                    remaining_stocks -= actual_amount
+        
+        # 3. Bonds (25% of total)
+        bond_allocated = 0
+        for etf in bond_analyses[:2]:  # Top 2 Bond ETFs
+            if bond_allocated < bonds_target:
+                amount = min(bonds_target * 0.6, bonds_target - bond_allocated)  # 60% to first, 40% to second
+                if bond_allocated > 0:
+                    amount = bonds_target - bond_allocated  # Remaining to second
+                shares = int(amount / etf["current_price"]) if etf["current_price"] > 0 else 0
+                if shares > 0:
+                    actual_amount = shares * etf["current_price"]
+                    allocations.append({
+                        "ticker": etf["ticker"],
+                        "name": etf.get("name", etf["ticker"]),
+                        "allocation_amount": actual_amount,
+                        "allocation_percent": (actual_amount / deposit_amount_usd) * 100,
+                        "shares": shares,
+                        "price": etf["current_price"],
+                        "score": etf["score"],
+                        "recommendation": etf["recommendation"],
+                        "reasons": etf["reasons"],
+                        "action": "NEW" if etf["ticker"] not in current_holdings else "INCREASE",
+                        "category": "BONDS"
+                    })
+                    bond_allocated += actual_amount
+                    remaining_bonds -= actual_amount
+        
+        # 4. Allocate any remaining to Core (safest option)
+        remaining_total = remaining_stocks + remaining_bonds
+        if remaining_total > 50 and core_analyses:
+            top_core = core_analyses[0]
+            shares = int(remaining_total / top_core["current_price"]) if top_core["current_price"] > 0 else 0
+            if shares > 0:
+                actual_amount = shares * top_core["current_price"]
+                # Check if already in allocations
+                existing = next((a for a in allocations if a["ticker"] == top_core["ticker"]), None)
+                if existing:
+                    existing["shares"] += shares
+                    existing["allocation_amount"] += actual_amount
+                    existing["allocation_percent"] = (existing["allocation_amount"] / deposit_amount_usd) * 100
+                else:
+                    allocations.append({
+                        "ticker": top_core["ticker"],
+                        "name": top_core.get("name", top_core["ticker"]),
+                        "allocation_amount": actual_amount,
+                        "allocation_percent": (actual_amount / deposit_amount_usd) * 100,
+                        "shares": shares,
+                        "price": top_core["current_price"],
+                        "score": top_core["score"],
+                        "recommendation": top_core["recommendation"],
+                        "reasons": top_core["reasons"],
+                        "action": "NEW" if top_core["ticker"] not in current_holdings else "INCREASE",
+                        "category": "CORE"
+                    })
         
         return allocations
     
@@ -773,7 +850,25 @@ class DepositAdvisor:
         print("\n" + "-" * 60)
         print("RECOMMENDED PURCHASES (All prices and amounts in USD)")
         print("-" * 60)
+        print("\n📊 Strategy: 75/25 Balanced Growth")
+        print("   • 75% Stocks (50% Core + 25% Satellite)")
+        print("   • 25% Bonds (Protection)")
+        print("   • Optimized for family stability with growth potential")
         print("\n⚠️  NOTE: All purchases are executed in USD. Amounts shown in ILS are for reference only.")
+        
+        # Calculate and show allocation breakdown
+        core_total = sum(r['allocation_amount'] for r in recommendations if r.get('category') == 'CORE')
+        satellite_total = sum(r['allocation_amount'] for r in recommendations if r.get('category') == 'SATELLITE')
+        bonds_total = sum(r['allocation_amount'] for r in recommendations if r.get('category') == 'BONDS')
+        
+        if core_total + satellite_total + bonds_total > 0:
+            print(f"\n📈 Allocation Breakdown:")
+            if core_total > 0:
+                print(f"   • Core Stocks: ${core_total:,.2f} ({core_total/deposit_amount_usd*100:.1f}%)")
+            if satellite_total > 0:
+                print(f"   • Satellite Stocks: ${satellite_total:,.2f} ({satellite_total/deposit_amount_usd*100:.1f}%)")
+            if bonds_total > 0:
+                print(f"   • Bonds: ${bonds_total:,.2f} ({bonds_total/deposit_amount_usd*100:.1f}%)")
         
         # Check for leveraged ETFs in recommendations
         leveraged_count = sum(1 for rec in recommendations if any(lev in rec.get('ticker', '').upper() 
@@ -801,6 +896,13 @@ class DepositAdvisor:
                                                                'TZA', 'FAZ', 'SOXS', 'LABD', 'TECS', 'SSO', 'QLD', 'UWM', 'EFO'])
             
             print(f"\n{i}. {rec['ticker']} - {rec['name']}")
+            category = rec.get('category', '')
+            if category == 'CORE':
+                print(f"   📊 Category: CORE (Essential for portfolio stability)")
+            elif category == 'BONDS':
+                print(f"   🛡️  Category: BONDS (Portfolio protection)")
+            elif category == 'SATELLITE':
+                print(f"   🚀 Category: SATELLITE (Growth opportunity)")
             if is_leveraged:
                 print(f"   🚨 LEVERAGED ETF - EXTREME RISK 🚨")
             print(f"   Action: {rec['action']}")

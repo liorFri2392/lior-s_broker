@@ -631,32 +631,51 @@ class PortfolioAnalyzer:
         }
     
     def find_best_etfs_to_buy(self, amount_usd: float, current_holdings: List[str], exclude_tickers: List[str] = None) -> List[Dict]:
-        """Find best ETFs to buy for diversification - uses all categories from DepositAdvisor."""
+        """
+        Find best ETFs to buy following 75/25 Balanced Growth Strategy.
+        Prioritizes Core ETFs and Bonds over high-risk trends.
+        """
         from deposit_advisor import DepositAdvisor
         
         exclude_tickers = exclude_tickers or []
         advisor = DepositAdvisor(self.portfolio_file)
         
-        # Get all ETFs from all categories (including Gold, Silver, Crypto, AI, etc.)
-        all_etfs = []
-        for category, etfs in advisor.ETF_CATEGORIES.items():
-            for etf in etfs:
-                if etf not in all_etfs:
-                    all_etfs.append(etf)
+        # Define Core ETFs (priority)
+        core_etfs = ["SPY", "VOO", "IVV", "VXUS", "VEA"]
+        # Define Satellite ETFs (safe growth)
+        satellite_etfs = ["IWM", "VB", "XLK", "VGT", "VWO", "EEM", "XLV", "VHT"]
+        # Define Bond ETFs (protection)
+        bond_etfs = ["BND", "AGG", "TIP", "SCHP", "VTIP"]
         
-        # Filter out current holdings and excluded
-        diversification_etfs = [
-            etf for etf in all_etfs 
-            if etf not in current_holdings and etf not in exclude_tickers
-        ]
+        # Exclude high-risk categories
+        excluded_categories = ["LEVERAGED_2X", "LEVERAGED_3X", "LEVERAGED_INVERSE", "CRYPTO"]
+        excluded_from_categories = []
+        for cat in excluded_categories:
+            if cat in advisor.ETF_CATEGORIES:
+                excluded_from_categories.extend(advisor.ETF_CATEGORIES[cat])
         
-        # Filter out current holdings and excluded
-        candidate_etfs = [
-            etf for etf in diversification_etfs 
-            if etf not in current_holdings and etf not in exclude_tickers
-        ]
+        # Build candidate list prioritizing Core and Bonds
+        candidate_etfs = []
         
-        # Analyze top candidates in parallel
+        # Add Core ETFs first (highest priority)
+        for etf in core_etfs:
+            if etf not in current_holdings and etf not in exclude_tickers:
+                candidate_etfs.append(etf)
+        
+        # Add Bond ETFs (high priority for protection)
+        for etf in bond_etfs:
+            if etf not in current_holdings and etf not in exclude_tickers:
+                candidate_etfs.append(etf)
+        
+        # Add Satellite ETFs (moderate priority)
+        for etf in satellite_etfs:
+            if (etf not in current_holdings and 
+                etf not in exclude_tickers and 
+                etf not in candidate_etfs and
+                etf not in excluded_from_categories):
+                candidate_etfs.append(etf)
+        
+        # Analyze candidates in parallel
         def analyze_etf_candidate(etf):
             try:
                 stock = yf.Ticker(etf)
@@ -665,9 +684,20 @@ class PortfolioAnalyzer:
                     price = float(hist['Close'].iloc[-1])
                     shares = int(amount_usd / price / 3)  # Divide by 3 for 3 recommendations
                     if shares > 0:
-                        # Simple scoring
-                        score = 60  # Base score for diversification
+                        # Scoring based on category
+                        score = 60  # Base score
                         info = stock.info
+                        
+                        # Boost for Core and Bonds
+                        if etf.upper() in [e.upper() for e in core_etfs]:
+                            score += 20
+                            category = "CORE"
+                        elif etf.upper() in [e.upper() for e in bond_etfs]:
+                            score += 25
+                            category = "BONDS"
+                        else:
+                            category = "SATELLITE"
+                        
                         if info.get('annualReportExpenseRatio', 1) < 0.001:
                             score += 10
                         
@@ -679,7 +709,11 @@ class PortfolioAnalyzer:
                             "allocation_amount": shares * price,
                             "score": score,
                             "recommendation": "BUY",
-                            "reasons": ["Diversification", "Low expense ratio" if info.get('annualReportExpenseRatio', 1) < 0.001 else "Good diversification"]
+                            "reasons": [
+                                f"{category} holding" if category else "Diversification",
+                                "Low expense ratio" if info.get('annualReportExpenseRatio', 1) < 0.001 else "Good diversification"
+                            ],
+                            "category": category
                         }
             except Exception as e:
                 logger.debug(f"Failed to analyze ETF candidate {etf}: {e}")
@@ -687,25 +721,151 @@ class PortfolioAnalyzer:
             return None
         
         recommendations = []
-        with ThreadPoolExecutor(max_workers=min(5, len(candidate_etfs[:10]))) as executor:
-            futures = [executor.submit(analyze_etf_candidate, etf) for etf in candidate_etfs[:10]]
+        # Limit to top candidates (prioritize Core and Bonds)
+        candidates_to_analyze = candidate_etfs[:10]
+        with ThreadPoolExecutor(max_workers=min(5, len(candidates_to_analyze))) as executor:
+            futures = [executor.submit(analyze_etf_candidate, etf) for etf in candidates_to_analyze]
             for future in as_completed(futures):
                 result = future.result()
                 if result:
                     recommendations.append(result)
         
-        # Sort by score and return top 3
+        # Sort by score (Core and Bonds will be prioritized)
         recommendations.sort(key=lambda x: x['score'], reverse=True)
         return recommendations[:3]
     
+    def check_75_25_balance(self, portfolio_metrics: Dict, analyses: List[Dict]) -> Dict:
+        """
+        Check if portfolio follows 75/25 Balanced Growth Strategy:
+        - 75% Stocks (50% Core + 25% Satellite)
+        - 25% Bonds
+        Returns recommendations to achieve proper balance.
+        """
+        balance_check = {
+            "is_balanced": False,
+            "stocks_percent": 0,
+            "bonds_percent": 0,
+            "core_percent": 0,
+            "satellite_percent": 0,
+            "recommendations": []
+        }
+        
+        # Define Core ETFs (SPY, VOO, VXUS, etc.)
+        core_etfs = ["SPY", "VOO", "IVV", "VXUS", "VEA"]
+        # Define Bond ETFs
+        bond_etfs = ["BND", "AGG", "TIP", "SCHP", "VTIP"]
+        
+        total_value = portfolio_metrics["total_value"]
+        if total_value == 0:
+            return balance_check
+        
+        # Calculate current allocation
+        stocks_value = 0
+        bonds_value = 0
+        core_value = 0
+        satellite_value = 0
+        
+        for analysis in analyses:
+            ticker = analysis["ticker"]
+            value = analysis["current_value"]
+            
+            if ticker.upper() in [e.upper() for e in bond_etfs]:
+                bonds_value += value
+            else:
+                stocks_value += value
+                if ticker.upper() in [e.upper() for e in core_etfs]:
+                    core_value += value
+                else:
+                    satellite_value += value
+        
+        # Calculate percentages
+        stocks_percent = (stocks_value / total_value) * 100 if total_value > 0 else 0
+        bonds_percent = (bonds_value / total_value) * 100 if total_value > 0 else 0
+        core_percent = (core_value / total_value) * 100 if total_value > 0 else 0
+        satellite_percent = (satellite_value / total_value) * 100 if total_value > 0 else 0
+        
+        balance_check["stocks_percent"] = stocks_percent
+        balance_check["bonds_percent"] = bonds_percent
+        balance_check["core_percent"] = core_percent
+        balance_check["satellite_percent"] = satellite_percent
+        
+        # Check if balanced (with tolerance of ±5%)
+        target_stocks = 75
+        target_bonds = 25
+        target_core = 50
+        target_satellite = 25
+        
+        tolerance = 5
+        is_balanced = (
+            abs(stocks_percent - target_stocks) <= tolerance and
+            abs(bonds_percent - target_bonds) <= tolerance
+        )
+        
+        balance_check["is_balanced"] = is_balanced
+        
+        # Generate recommendations if not balanced
+        if not is_balanced:
+            recommendations = []
+            
+            # Check if need more bonds
+            if bonds_percent < target_bonds - tolerance:
+                needed_bonds = total_value * (target_bonds - bonds_percent) / 100
+                recommendations.append({
+                    "action": "BUY_BONDS",
+                    "amount": needed_bonds,
+                    "reason": f"Portfolio has {bonds_percent:.1f}% bonds, target is {target_bonds}%. Need ${needed_bonds:,.2f} in bonds for protection."
+                })
+            
+            # Check if need more core stocks
+            if core_percent < target_core - tolerance:
+                needed_core = total_value * (target_core - core_percent) / 100
+                recommendations.append({
+                    "action": "BUY_CORE",
+                    "amount": needed_core,
+                    "reason": f"Portfolio has {core_percent:.1f}% core stocks, target is {target_core}%. Need ${needed_core:,.2f} in core ETFs (SPY, VXUS)."
+                })
+            
+            # Check if too many bonds
+            if bonds_percent > target_bonds + tolerance:
+                excess_bonds = total_value * (bonds_percent - target_bonds) / 100
+                recommendations.append({
+                    "action": "REDUCE_BONDS",
+                    "amount": excess_bonds,
+                    "reason": f"Portfolio has {bonds_percent:.1f}% bonds, target is {target_bonds}%. Consider reducing by ${excess_bonds:,.2f} to increase growth."
+                })
+            
+            # Check if too many stocks
+            if stocks_percent > target_stocks + tolerance:
+                excess_stocks = total_value * (stocks_percent - target_stocks) / 100
+                recommendations.append({
+                    "action": "REDUCE_STOCKS",
+                    "amount": excess_stocks,
+                    "reason": f"Portfolio has {stocks_percent:.1f}% stocks, target is {target_stocks}%. Consider reducing by ${excess_stocks:,.2f} and adding bonds for protection."
+                })
+            
+            balance_check["recommendations"] = recommendations
+        
+        return balance_check
+    
     def check_rebalancing(self, portfolio_metrics: Dict, analyses: List[Dict]) -> Dict:
-        """Determine if rebalancing is needed."""
+        """Determine if rebalancing is needed, including 75/25 balance check."""
         rebalancing = {
             "needed": False,
             "reason": "",
             "recommendations": [],
-            "buy_recommendations": []
+            "buy_recommendations": [],
+            "balance_75_25": {}
         }
+        
+        # First check 75/25 balance
+        balance_check = self.check_75_25_balance(portfolio_metrics, analyses)
+        rebalancing["balance_75_25"] = balance_check
+        
+        if not balance_check["is_balanced"]:
+            rebalancing["needed"] = True
+            balance_reasons = [r["reason"] for r in balance_check["recommendations"]]
+            if not rebalancing["reason"]:
+                rebalancing["reason"] = f"Portfolio not balanced (75/25): {balance_reasons[0] if balance_reasons else 'Needs rebalancing'}"
         
         weights = portfolio_metrics["weights"]
         total_holdings = len(weights)
@@ -1049,6 +1209,31 @@ class PortfolioAnalyzer:
         print(f"Exchange Rate: {exchange_rate} ILS/USD")
         print(f"Diversification Score: {metrics['diversification_score']:.2f} (1.0 = perfect diversification)")
         print(f"Average Recommendation Score: {metrics['average_recommendation_score']:.1f}/100")
+        
+        # Show 75/25 balance status
+        balance_info = results["rebalancing"].get("balance_75_25", {})
+        if balance_info:
+            print("\n" + "-" * 60)
+            print("75/25 BALANCED GROWTH STRATEGY STATUS")
+            print("-" * 60)
+            stocks_pct = balance_info.get("stocks_percent", 0)
+            bonds_pct = balance_info.get("bonds_percent", 0)
+            core_pct = balance_info.get("core_percent", 0)
+            satellite_pct = balance_info.get("satellite_percent", 0)
+            is_balanced = balance_info.get("is_balanced", False)
+            
+            status_icon = "✅" if is_balanced else "⚠️"
+            print(f"{status_icon} Stocks: {stocks_pct:.1f}% (Target: 75%)")
+            print(f"   ├─ Core: {core_pct:.1f}% (Target: 50%)")
+            print(f"   └─ Satellite: {satellite_pct:.1f}% (Target: 25%)")
+            print(f"{status_icon} Bonds: {bonds_pct:.1f}% (Target: 25%)")
+            
+            if not is_balanced:
+                recommendations = balance_info.get("recommendations", [])
+                if recommendations:
+                    print(f"\n📋 Recommendations to achieve 75/25 balance:")
+                    for rec in recommendations:
+                        print(f"   • {rec.get('reason', 'N/A')}")
         
         print("\n" + "-" * 60)
         print("HOLDINGS ANALYSIS (All prices and values in USD)")
