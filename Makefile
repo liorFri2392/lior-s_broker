@@ -75,8 +75,8 @@ risk: venv
 	@$(PYTHON) -c "from risk_manager import RiskManager; rm = RiskManager(); rm.print_risk_report()"
 
 tax: venv
-	@echo "Analyzing tax implications..."
-	@$(PYTHON) -c "from tax_analyzer import TaxAnalyzer; ta = TaxAnalyzer(); print('Tax analyzer ready. Use in Python scripts.')"
+	@echo "Analyzing tax implications for current portfolio..."
+	@$(PYTHON) tax_report.py
 
 clean:
 	@echo "Removing virtual environment..."
