@@ -51,12 +51,25 @@ jobs:
             echo "EMAIL_RECIPIENT=$EMAIL_SENDER" >> $GITHUB_ENV
           fi
       
+      - name: Run Portfolio Analysis
+        run: |
+          echo "📊 Running portfolio analysis..."
+          python portfolio_analyzer.py > analysis_output.txt 2>&1 || true
+        continue-on-error: true
+        
+      - name: Run Risk Management Check
+        run: |
+          echo "🛡️ Checking portfolio risk..."
+          python -c "from risk_manager import RiskManager; rm = RiskManager(); rm.print_risk_report()" > risk_output.txt 2>&1 || true
+        continue-on-error: true
+      
       - name: Run Critical Alert Check
         env:
           EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT || secrets.EMAIL_SENDER }}
         run: |
+          echo "⚠️ Checking for critical alerts..."
           python critical_alert.py
         continue-on-error: true  # Don't fail workflow if alerts are sent
       
@@ -64,9 +77,11 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: critical-alert-results
+          name: portfolio-analysis-results
           path: |
             portfolio.json
-          retention-days: 1
+            analysis_output.txt
+            risk_output.txt
+          retention-days: 7
 
 
