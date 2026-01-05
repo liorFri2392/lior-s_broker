@@ -118,9 +118,46 @@ class CriticalAlertSystem:
                         })
         
         # 2. Scan for critical buy opportunities (high-yield ETFs)
-        print("\nScanning for critical buy opportunities...")
-        critical_buys = self.scan_critical_buy_opportunities()
-        critical_items.extend(critical_buys)
+        # Only if portfolio is significantly unbalanced and cash available
+        portfolio = self.analyzer.load_portfolio()
+        cash_available = portfolio.get("cash", 0)
+        
+        # Check if portfolio needs balancing
+        if portfolio_analysis:
+            balance_check = self.analyzer.check_75_25_balance(
+                portfolio_metrics,
+                holdings_analysis
+            )
+            
+            needs_balancing = not balance_check.get("is_balanced", False)
+            bonds_percent = balance_check.get("bonds_percent", 0)
+        else:
+            needs_balancing = True  # If no analysis, assume needs balancing
+            bonds_percent = 0
+        
+        # Only scan for buys if:
+        # 1. Portfolio is unbalanced (needs bonds or stocks)
+        # 2. Have sufficient cash (>$500)
+        if needs_balancing and cash_available > 500:
+            print("\nScanning for critical buy opportunities...")
+            critical_buys = self.scan_critical_buy_opportunities()
+            
+            # Filter to only most critical (limit to top 3-5)
+            # Prioritize bonds if portfolio lacks bonds
+            if bonds_percent < 15:
+                bond_buys = [b for b in critical_buys if b.get("category") == "BONDS"]
+                other_buys = [b for b in critical_buys if b.get("category") != "BONDS"]
+                # Top 2 bonds + top 2 others (max 4 total)
+                critical_buys = bond_buys[:2] + other_buys[:2]
+            else:
+                critical_buys = critical_buys[:3]  # Top 3 overall
+            
+            critical_items.extend(critical_buys)
+        else:
+            if cash_available <= 500:
+                print("\n⚠️  Insufficient cash for new purchases (${:.2f})".format(cash_available))
+            elif not needs_balancing:
+                print("\n✅ Portfolio is balanced - no critical buy opportunities needed")
         
         # 3. Check for market anomalies or extreme opportunities
         print("\nChecking for market anomalies...")
@@ -214,13 +251,55 @@ class CriticalAlertSystem:
                 analysis = self.advisor.analyze_etf(etf, verbose=False)
                 score = analysis.get("score", 0)
                 
-                # Boost score for Core and Bonds (they're essential)
+                # Check if already in portfolio with sufficient allocation
+                holding = next((h for h in portfolio.get("holdings", []) if h.get("ticker", "").upper() == etf_upper), None)
+                if holding:
+                    holding_value = holding.get("current_value", 0)
+                    holding_weight = (holding_value / portfolio_value * 100) if portfolio_value > 0 else 0
+                    
+                    # Skip if already has sufficient allocation
+                    if is_core and holding_weight >= 15:  # Core should be 15-20% each
+                        logger.debug(f"Skipping {etf} - already has {holding_weight:.1f}% allocation")
+                        continue
+                    elif is_bond and holding_weight >= 10:  # Bonds should be 10-15% each
+                        logger.debug(f"Skipping {etf} - already has {holding_weight:.1f}% allocation")
+                        continue
+                    elif not (is_core or is_bond) and holding_weight >= 5:  # Satellite should be 5-10% each
+                        logger.debug(f"Skipping {etf} - already has {holding_weight:.1f}% allocation")
+                        continue
+                
+                # Check if portfolio actually needs this (75/25 balance check)
+                # Calculate current allocation
+                bonds_value = sum(h.get("current_value", 0) for h in portfolio.get("holdings", []) 
+                                if h.get("ticker", "").upper() in [b.upper() for b in bond_etfs])
+                bonds_percent = (bonds_value / portfolio_value * 100) if portfolio_value > 0 else 0
+                
+                # Only recommend bonds if portfolio has < 20% bonds
+                if is_bond and bonds_percent >= 20:
+                    logger.debug(f"Skipping {etf} - portfolio already has {bonds_percent:.1f}% bonds")
+                    continue
+                
+                # Only recommend Core/Satellite if portfolio has < 80% stocks
+                stocks_value = portfolio_value - bonds_value
+                stocks_percent = (stocks_value / portfolio_value * 100) if portfolio_value > 0 else 100
+                if (is_core or not is_bond) and stocks_percent >= 80:
+                    # Still allow if bonds are needed (to balance)
+                    if bonds_percent < 20:
+                        pass  # Allow to balance
+                    else:
+                        logger.debug(f"Skipping {etf} - portfolio already has {stocks_percent:.1f}% stocks")
+                        continue
+                
+                # Boost score for Core and Bonds (they're essential) - but cap at 100
                 if is_core:
-                    score += 15
+                    score = min(100, score + 15)
                     analysis["reasons"].append("Core holding - essential for portfolio stability")
                 elif is_bond:
-                    score += 20
+                    score = min(100, score + 20)
                     analysis["reasons"].append("Bond holding - essential for portfolio protection")
+                
+                # Ensure score doesn't exceed 100
+                score = min(100, score)
                 
                 # Check for critical buy signals (lower threshold for Core/Bonds)
                 threshold = 70 if (is_core or is_bond) else self.critical_threshold
@@ -229,13 +308,19 @@ class CriticalAlertSystem:
                     expected_return = analysis.get("mid_term_forecast", {}).get("expected_3yr_return", 0)
                     reasons = analysis.get("reasons", [])
                     
+                    # Filter out unrealistic returns (>50% is not realistic for 3 years)
+                    if expected_return > 50 or expected_return < -50:
+                        logger.debug(f"Skipping {etf} - unrealistic expected return: {expected_return:.1f}%")
+                        continue
+                    
                     # For Core and Bonds, lower the expected return requirement
-                    min_return = 10 if (is_core or is_bond) else 15
+                    min_return = 5 if (is_core or is_bond) else 10  # Lowered from 10/15
                     
                     # Only flag as critical if:
                     # 1. High score (>=threshold)
-                    # 2. Strong expected return (or Core/Bonds with moderate return)
+                    # 2. Reasonable expected return (filtered unrealistic ones)
                     # 3. Not leveraged (we exclude those)
+                    # 4. Have cash available
                     is_leveraged = analysis.get("is_leveraged", False)
                     
                     if is_leveraged:
@@ -243,30 +328,49 @@ class CriticalAlertSystem:
                         logger.debug(f"Skipping {etf} - leveraged ETF, not suitable for balanced strategy")
                         continue
                     
-                    if expected_return > min_return or score >= 85:
+                    # Check if we have cash available
+                    if cash_available < 100:
+                        logger.debug(f"Skipping {etf} - insufficient cash (${cash_available:.2f})")
+                        continue
+                    
+                    # Only recommend if expected return is reasonable OR score is very high
+                    if (expected_return > min_return and expected_return <= 50) or score >= 85:
                         leverage_mult = analysis.get("leverage_multiplier", 1.0)
                         
-                        # Calculate recommended amount based on category
+                        # Calculate recommended amount based on category and available cash
                         if is_core:
-                            # Core gets higher allocation
-                            recommended_amount = min(1500, cash_available * 0.15) if cash_available > 0 else 1500
+                            # Core gets higher allocation, but not more than available cash
+                            recommended_amount = min(1500, cash_available * 0.3, cash_available * 0.5)
                             category_note = "Core holding - increase allocation"
                         elif is_bond:
-                            # Bonds get moderate allocation
-                            recommended_amount = min(1000, cash_available * 0.1) if cash_available > 0 else 1000
+                            # Bonds get moderate allocation, prioritize if portfolio lacks bonds
+                            if bonds_percent < 15:
+                                recommended_amount = min(1000, cash_available * 0.4, cash_available * 0.6)
+                            else:
+                                recommended_amount = min(1000, cash_available * 0.2, cash_available * 0.3)
                             category_note = "Bond holding - add protection"
                         else:
                             # Satellite gets smaller allocation
-                            recommended_amount = min(800, cash_available * 0.08) if cash_available > 0 else 800
+                            recommended_amount = min(800, cash_available * 0.15, cash_available * 0.25)
                             category_note = "Satellite holding - growth opportunity"
+                        
+                        # Ensure we don't recommend more than available cash
+                        recommended_amount = min(recommended_amount, cash_available)
+                        
+                        if recommended_amount < 50:  # Skip if amount too small
+                            logger.debug(f"Skipping {etf} - recommended amount too small (${recommended_amount:.2f})")
+                            continue
+                        
+                        # Cap expected return display at 50% to avoid confusion
+                        display_return = min(expected_return, 50) if expected_return > 0 else expected_return
                         
                         critical_buys.append({
                             "type": "BUY",
                             "ticker": etf,
-                            "priority": "CRITICAL" if (score >= 85 or is_core or is_bond) else "HIGH",
-                            "reason": f"{category_note} - Score: {score}/100. Expected 3yr return: {expected_return:.1f}%.",
+                            "priority": "CRITICAL" if (score >= 85 or (is_bond and bonds_percent < 10)) else "HIGH",
+                            "reason": f"{category_note} - Score: {score}/100. Expected 3yr return: {display_return:.1f}%.",
                             "amount": recommended_amount,
-                            "expected_return": expected_return,
+                            "expected_return": display_return,
                             "score": score,
                             "details": "; ".join(reasons[:3]),  # Top 3 reasons
                             "diversification": "Balanced 75/25 strategy",

@@ -121,6 +121,34 @@ class AdvancedAnalyzer:
             if current_price > 0:
                 expected_return_linear = (linear_forecast / current_price - 1) * 100
                 expected_return_poly = (poly_forecast / current_price - 1) * 100
+                
+                # Sanity check: if forecast is unrealistic, use historical average instead
+                # For 3-year forecast, realistic range is -50% to +50% annualized
+                # For total 3-year return, realistic range is roughly -80% to +200%
+                max_realistic_return = 200  # 200% over 3 years is very optimistic but possible
+                min_realistic_return = -80  # -80% over 3 years is very pessimistic
+                
+                # If polynomial forecast is unrealistic, fall back to linear or historical
+                if expected_return_poly > max_realistic_return or expected_return_poly < min_realistic_return:
+                    # Use linear if it's more reasonable
+                    if min_realistic_return <= expected_return_linear <= max_realistic_return:
+                        expected_return_poly = expected_return_linear
+                    else:
+                        # Fall back to historical average annualized return
+                        historical_returns = (closes[-1] / closes[0] - 1) * 100 if len(closes) > 0 else 0
+                        years_of_data = len(closes) / 252  # Approximate years
+                        if years_of_data > 0:
+                            annualized_return = ((1 + historical_returns / 100) ** (1 / years_of_data) - 1) * 100
+                            # Project to 3 years
+                            expected_return_poly = ((1 + annualized_return / 100) ** 3 - 1) * 100
+                            # Cap at realistic range
+                            expected_return_poly = max(min_realistic_return, min(max_realistic_return, expected_return_poly))
+                        else:
+                            expected_return_poly = 10  # Default to 10% if no data
+                
+                # Cap both returns at realistic range
+                expected_return_linear = max(min_realistic_return, min(max_realistic_return, expected_return_linear))
+                expected_return_poly = max(min_realistic_return, min(max_realistic_return, expected_return_poly))
             else:
                 expected_return_linear = 0
                 expected_return_poly = 0
