@@ -21,6 +21,27 @@ Go to your repository on GitHub:
 - **`PORTFOLIO_JSON`**: Your portfolio.json file content as a JSON string
   - Copy the entire content of your `portfolio.json` file
   - Paste it as the secret value
+  - **IMPORTANT**: Update this secret whenever your portfolio changes!
+
+### Updating PORTFOLIO_JSON Secret
+
+**After running `make analyze` or `make deposit`, update the secret:**
+
+**Option 1 - Using the script (easiest):**
+```bash
+make update-secret
+```
+This will show you the portfolio content to copy and paste into GitHub.
+
+**Option 2 - Manual:**
+1. Copy the content of your local `portfolio.json` file
+2. Go to: https://github.com/liorFri2392/lior-s_broker/settings/secrets/actions
+3. Click on `PORTFOLIO_JSON` secret
+4. Click "Update"
+5. Paste the new content
+6. Click "Update secret"
+
+**Why update?** The GitHub Actions workflow uses this secret to know what's in your portfolio. If it's outdated, critical alerts won't be accurate!
 
 ### 2. Gmail App Password Setup
 
