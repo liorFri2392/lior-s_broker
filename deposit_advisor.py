@@ -930,7 +930,11 @@ class DepositAdvisor:
         print("Recommendations completed!")
         print("=" * 60)
         print("\n⚠️  After executing the purchases, you will be asked to confirm.")
-        print("   If you confirm, the portfolio will be updated automatically.\n")
+        print("   If you confirm, the portfolio will be updated automatically.")
+        print("\n💡 REMINDER: Update GitHub Secret")
+        print("   After updating your portfolio, update the GitHub secret so critical alerts use the latest data:")
+        print("   Run: make update-secret")
+        print("   Or go to: https://github.com/liorFri2392/lior-s_broker/settings/secrets/actions\n")
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
