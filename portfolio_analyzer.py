@@ -8,6 +8,7 @@ import json
 import os
 import logging
 import subprocess
+import base64
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -18,6 +19,20 @@ from newsapi import NewsApiClient
 from advanced_analysis import AdvancedAnalyzer
 import warnings
 warnings.filterwarnings('ignore')
+
+# Try to import requests for GitHub API
+try:
+    import requests
+    HAS_REQUESTS = True
+except ImportError:
+    HAS_REQUESTS = False
+
+# Try to import PyNaCl for encryption (required for GitHub Secrets API)
+try:
+    from nacl import encoding, public
+    HAS_PYNACL = True
+except ImportError:
+    HAS_PYNACL = False
 
 # Setup logging
 logging.basicConfig(
@@ -145,8 +160,8 @@ class PortfolioAnalyzer:
     
     def _try_update_github_secret(self, portfolio: Dict):
         """Try to update GitHub secret automatically (silently, no errors if fails)."""
+        # Method 1: Try GitHub CLI first (easiest)
         try:
-            # Check if GitHub CLI is available
             result = subprocess.run(
                 ["gh", "--version"],
                 capture_output=True,
@@ -165,14 +180,64 @@ class PortfolioAnalyzer:
                 )
                 stdout, stderr = process.communicate(input=portfolio_json_str, timeout=10)
                 if process.returncode == 0:
-                    logger.info("✅ GitHub secret updated automatically")
+                    logger.info("✅ GitHub secret updated automatically (via GitHub CLI)")
                     return True
-                else:
-                    logger.debug(f"GitHub secret update failed: {stderr}")
-        except (FileNotFoundError, subprocess.TimeoutExpired, Exception) as e:
-            # Silently fail - GitHub CLI not available or update failed
-            logger.debug(f"Could not update GitHub secret automatically: {e}")
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass  # GitHub CLI not available, try API method
+        
+        # Method 2: Try GitHub API with token (if requests and PyNaCl available)
+        github_token = os.getenv("GITHUB_TOKEN")
+        if github_token and HAS_REQUESTS and HAS_PYNACL:
+            try:
+                return self._update_secret_via_api(github_token, portfolio)
+            except Exception as e:
+                logger.debug(f"GitHub API update failed: {e}")
+        
+        # If both methods fail, silently return False
         return False
+    
+    def _update_secret_via_api(self, token: str, portfolio: Dict) -> bool:
+        """Update GitHub secret using GitHub API with token."""
+        repo_owner = "liorFri2392"
+        repo_name = "lior-s_broker"
+        secret_name = "PORTFOLIO_JSON"
+        
+        # Get public key
+        public_key_url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/actions/secrets/public-key"
+        headers = {
+            "Authorization": f"token {token}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+        
+        try:
+            response = requests.get(public_key_url, headers=headers, timeout=10)
+            response.raise_for_status()
+            public_key_data = response.json()
+            public_key = public_key_data["key"]
+            key_id = public_key_data["key_id"]
+            
+            # Encrypt the secret using public key
+            portfolio_json_str = json.dumps(portfolio, ensure_ascii=False, indent=2)
+            public_key_obj = public.PublicKey(public_key.encode("utf-8"), encoding.Base64Encoder())
+            sealed_box = public.SealedBox(public_key_obj)
+            encrypted = sealed_box.encrypt(portfolio_json_str.encode("utf-8"))
+            encrypted_value = base64.b64encode(encrypted).decode("utf-8")
+            
+            # Update the secret
+            secret_url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/actions/secrets/{secret_name}"
+            payload = {
+                "encrypted_value": encrypted_value,
+                "key_id": key_id
+            }
+            
+            response = requests.put(secret_url, headers=headers, json=payload, timeout=10)
+            response.raise_for_status()
+            logger.info("✅ GitHub secret updated automatically (via GitHub API)")
+            return True
+            
+        except Exception as e:
+            logger.debug(f"GitHub API secret update failed: {e}")
+            return False
     
     def is_market_open(self) -> Tuple[bool, str]:
         """Check if US stock market (NYSE/NASDAQ) is currently open."""
