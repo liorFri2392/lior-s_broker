@@ -1064,6 +1064,42 @@ class PortfolioAnalyzer:
         
         return recommendations
     
+    def _generate_bond_recommendations(self, amount_usd: float, current_tickers: List[str], exchange_rate: float) -> List[Dict]:
+        """Generate bond ETF recommendations for a specific amount."""
+        bond_etfs = ["BND", "AGG", "TIP", "SCHP", "VTIP"]
+        recommendations = []
+        
+        import yfinance as yf
+        remaining_amount = amount_usd
+        
+        for bond_etf in bond_etfs:
+            if remaining_amount <= 0 or len(recommendations) >= 3:
+                break
+            
+            if bond_etf.upper() not in [t.upper() for t in current_tickers]:
+                try:
+                    stock = yf.Ticker(bond_etf)
+                    hist = stock.history(period="1d")
+                    if not hist.empty:
+                        price = float(hist['Close'].iloc[-1])
+                        shares = int(remaining_amount / price) if price > 0 else 0
+                        if shares > 0:
+                            actual_amount = shares * price
+                            recommendations.append({
+                                "ticker": bond_etf,
+                                "shares": shares,
+                                "price": price,
+                                "allocation_amount": actual_amount,
+                                "name": bond_etf,
+                                "reasons": [f"Rebalancing: Buy bonds to reach 25% target"]
+                            })
+                            remaining_amount -= actual_amount
+                except Exception as e:
+                    logger.debug(f"Failed to get price for {bond_etf}: {e}")
+                    continue
+        
+        return recommendations
+    
     def check_rebalancing(self, portfolio_metrics: Dict, analyses: List[Dict]) -> Dict:
         """Determine if rebalancing is needed, including 75/25 balance check."""
         rebalancing = {
@@ -1205,11 +1241,90 @@ class PortfolioAnalyzer:
             # Don't force rebalancing, but note it in the reason
             rebalancing["reason"] = f"Some holdings have low scores: {', '.join([a['ticker'] for a in low_score_holdings])}"
         
-        # If we're selling, recommend what to buy instead
+        # PRIORITY 2: Rebalance for 75/25 balance by selling stocks to buy bonds
+        if not balance_check["is_balanced"]:
+            bonds_percent = balance_check.get("bonds_percent", 0)
+            stocks_percent = balance_check.get("stocks_percent", 0)
+            
+            # If we have too many stocks (>75%) and too few bonds (<25%), sell stocks to buy bonds
+            if stocks_percent > 75 and bonds_percent < 25:
+                target_stocks = 75
+                target_bonds = 25
+                excess_stocks = stocks_percent - target_stocks
+                needed_bonds = target_bonds - bonds_percent
+                
+                # Calculate how much to rebalance (take the smaller of the two)
+                rebalance_percentage = min(excess_stocks, needed_bonds) / 100
+                
+                if rebalance_percentage > 0.05:  # Only if difference is >5%
+                    # Calculate total value to rebalance
+                    total_value = portfolio_metrics["total_value"]
+                    rebalance_amount = total_value * rebalance_percentage
+                    
+                    # Find stocks to sell (prioritize non-core stocks first, then core)
+                    core_etfs = ["SPY", "VOO", "IVV", "VXUS", "VEA"]
+                    bond_etfs = ["BND", "AGG", "TIP", "SCHP", "VTIP"]
+                    
+                    # Sort stocks: non-core first (satellite), then core
+                    stocks_to_sell = []
+                    for analysis in analyses:
+                        ticker = analysis["ticker"]
+                        if ticker.upper() not in [b.upper() for b in bond_etfs]:
+                            is_core = ticker.upper() in [c.upper() for c in core_etfs]
+                            stocks_to_sell.append({
+                                "ticker": ticker,
+                                "analysis": analysis,
+                                "is_core": is_core,
+                                "weight": weights.get(ticker, 0)
+                            })
+                    
+                    # Sort: satellite first, then by weight (smaller first to avoid big disruption)
+                    stocks_to_sell.sort(key=lambda x: (x["is_core"], -x["weight"]))
+                    
+                    # Sell stocks to get money for bonds
+                    remaining_to_sell = rebalance_amount
+                    for stock_info in stocks_to_sell:
+                        if remaining_to_sell <= 0:
+                            break
+                        
+                        ticker = stock_info["ticker"]
+                        analysis = stock_info["analysis"]
+                        current_value = analysis["current_value"]
+                        
+                        # Sell up to the needed amount, but max 30% of this holding
+                        sell_amount = min(remaining_to_sell, current_value * 0.30)
+                        if sell_amount > 100:  # Only if meaningful amount
+                            sell_shares = int(sell_amount / analysis["current_price"]) if analysis["current_price"] > 0 else 0
+                            if sell_shares > 0:
+                                # Check if already in sell recommendations (avoid duplicates)
+                                if not any(r.get("ticker") == ticker and r.get("action") == "SELL" 
+                                          for r in rebalancing["recommendations"]):
+                                    rebalancing["needed"] = True
+                                    total_sell_amount += sell_amount
+                                    rebalancing["recommendations"].append({
+                                        "action": "SELL",
+                                        "ticker": ticker,
+                                        "sell_amount_usd": sell_amount,
+                                        "sell_shares": sell_shares,
+                                        "current_price_usd": analysis["current_price"],
+                                        "current_weight": stock_info["weight"],
+                                        "reason": f"Rebalancing: Sell {sell_shares} shares (${sell_amount:,.2f}) to buy bonds for 75/25 balance"
+                                    })
+                                    remaining_to_sell -= sell_amount
+                    
+                    # Now recommend bonds to buy with the proceeds
+                    if total_sell_amount > 0:
+                        bond_recs = self._generate_bond_recommendations(total_sell_amount, current_tickers, exchange_rate=self.get_exchange_rate())
+                        if bond_recs:
+                            rebalancing["buy_recommendations"].extend(bond_recs)
+        
+        # If we're selling for other reasons (performance, concentration), recommend what to buy instead
         if total_sell_amount > 0 and rebalancing["recommendations"]:
             sell_tickers = [r["ticker"] for r in rebalancing["recommendations"] if r["action"] == "SELL"]
-            buy_recs = self.find_best_etfs_to_buy(total_sell_amount, current_tickers, exclude_tickers=sell_tickers)
-            rebalancing["buy_recommendations"] = buy_recs
+            # Only add buy recommendations if not already added for rebalancing
+            if not rebalancing["buy_recommendations"]:
+                buy_recs = self.find_best_etfs_to_buy(total_sell_amount, current_tickers, exclude_tickers=sell_tickers)
+                rebalancing["buy_recommendations"] = buy_recs
         
         return rebalancing
     
