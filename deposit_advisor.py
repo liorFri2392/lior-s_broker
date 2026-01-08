@@ -953,7 +953,7 @@ class DepositAdvisor:
         print("\n" + "-" * 60)
         print("RECOMMENDED PURCHASES (All prices and amounts in USD)")
         print("-" * 60)
-        print("\n📊 Strategy: 75/25 Balanced Growth")
+        print("\n📊 Strategy: 80/20 Balanced Growth")
         print("   • 80% Stocks (50% Core + 30% Satellite)")
         print("   • 20% Bonds (Protection)")
         print("   • Optimized for family stability with growth potential")
