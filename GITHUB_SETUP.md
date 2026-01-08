@@ -43,6 +43,42 @@ This will show you the portfolio content to copy and paste into GitHub.
 
 **Why update?** The GitHub Actions workflow uses this secret to know what's in your portfolio. If it's outdated, critical alerts won't be accurate!
 
+### Automatic Secret Updates (Optional but Recommended)
+
+The system can automatically update the GitHub secret when your portfolio changes! Two methods:
+
+**Method 1 - Using GitHub CLI (easiest):**
+```bash
+# Install GitHub CLI
+brew install gh  # macOS
+# or: https://cli.github.com/
+
+# Login
+gh auth login
+
+# That's it! Now it will update automatically
+```
+
+**Method 2 - Using GitHub Token:**
+```bash
+# Set your GitHub token as environment variable
+export GITHUB_TOKEN=ghp_your_token_here
+
+# Or add to your shell profile (~/.zshrc or ~/.bashrc):
+echo 'export GITHUB_TOKEN=ghp_your_token_here' >> ~/.zshrc
+source ~/.zshrc
+
+# Install required packages
+pip install PyNaCl requests
+```
+
+**How it works:**
+- After running `make analyze` or `make deposit`, if your portfolio changes, it will automatically try to update the GitHub secret
+- First tries GitHub CLI (if installed)
+- Falls back to GitHub API with token (if GITHUB_TOKEN is set)
+- If both fail, silently continues (no errors)
+- You'll see "✅ GitHub secret updated automatically!" if successful
+
 ### 2. Gmail App Password Setup
 
 1. Go to [Google Account Security](https://myaccount.google.com/security)
