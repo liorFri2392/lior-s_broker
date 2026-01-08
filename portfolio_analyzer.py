@@ -1242,81 +1242,152 @@ class PortfolioAnalyzer:
             rebalancing["reason"] = f"Some holdings have low scores: {', '.join([a['ticker'] for a in low_score_holdings])}"
         
         # PRIORITY 2: Rebalance for 75/25 balance by selling stocks to buy bonds
+        # BUT: Consider tax implications and alternatives
         if not balance_check["is_balanced"]:
             bonds_percent = balance_check.get("bonds_percent", 0)
             stocks_percent = balance_check.get("stocks_percent", 0)
+            cash_available = portfolio_metrics.get("cash", 0)
             
-            # If we have too many stocks (>75%) and too few bonds (<25%), sell stocks to buy bonds
+            # If we have too many stocks (>75%) and too few bonds (<25%)
             if stocks_percent > 75 and bonds_percent < 25:
                 target_stocks = 75
                 target_bonds = 25
                 excess_stocks = stocks_percent - target_stocks
                 needed_bonds = target_bonds - bonds_percent
                 
-                # Calculate how much to rebalance (take the smaller of the two)
-                rebalance_percentage = min(excess_stocks, needed_bonds) / 100
+                # Calculate how much to rebalance
+                total_value = portfolio_metrics["total_value"]
+                needed_bonds_value = total_value * (needed_bonds / 100)
                 
-                if rebalance_percentage > 0.05:  # Only if difference is >5%
-                    # Calculate total value to rebalance
-                    total_value = portfolio_metrics["total_value"]
-                    rebalance_amount = total_value * rebalance_percentage
+                # STRATEGY DECISION: Should we sell or wait for deposit?
+                # Option 1: If we have significant cash, prefer using cash over selling
+                # Option 2: If we need to sell, prioritize tax-loss harvesting
+                
+                # Check if we can use cash instead (if cash covers >50% of needed bonds)
+                if cash_available > needed_bonds_value * 0.5:
+                    # Prefer using cash - add note but don't force selling
+                    if not rebalancing["reason"]:
+                        rebalancing["reason"] = f"Portfolio not balanced (75/25): Need ${needed_bonds_value:,.2f} in bonds. Consider using ${cash_available:,.2f} cash first, or wait for deposit to avoid tax on sales."
+                else:
+                    # Need to sell - but be smart about it
+                    rebalance_percentage = min(excess_stocks, needed_bonds) / 100
                     
-                    # Find stocks to sell (prioritize non-core stocks first, then core)
-                    core_etfs = ["SPY", "VOO", "IVV", "VXUS", "VEA"]
-                    bond_etfs = ["BND", "AGG", "TIP", "SCHP", "VTIP"]
-                    
-                    # Sort stocks: non-core first (satellite), then core
-                    stocks_to_sell = []
-                    for analysis in analyses:
-                        ticker = analysis["ticker"]
-                        if ticker.upper() not in [b.upper() for b in bond_etfs]:
-                            is_core = ticker.upper() in [c.upper() for c in core_etfs]
-                            stocks_to_sell.append({
-                                "ticker": ticker,
-                                "analysis": analysis,
-                                "is_core": is_core,
-                                "weight": weights.get(ticker, 0)
-                            })
-                    
-                    # Sort: satellite first, then by weight (smaller first to avoid big disruption)
-                    stocks_to_sell.sort(key=lambda x: (x["is_core"], -x["weight"]))
-                    
-                    # Sell stocks to get money for bonds
-                    remaining_to_sell = rebalance_amount
-                    for stock_info in stocks_to_sell:
-                        if remaining_to_sell <= 0:
-                            break
+                    if rebalance_percentage > 0.05:  # Only if difference is >5%
+                        rebalance_amount = total_value * rebalance_percentage
                         
-                        ticker = stock_info["ticker"]
-                        analysis = stock_info["analysis"]
-                        current_value = analysis["current_value"]
+                        # Load portfolio to check purchase dates for tax analysis
+                        portfolio = self.load_portfolio()
+                        from tax_analyzer import TaxAnalyzer
+                        tax_analyzer = TaxAnalyzer()
                         
-                        # Sell up to the needed amount, but max 30% of this holding
-                        sell_amount = min(remaining_to_sell, current_value * 0.30)
-                        if sell_amount > 100:  # Only if meaningful amount
-                            sell_shares = int(sell_amount / analysis["current_price"]) if analysis["current_price"] > 0 else 0
-                            if sell_shares > 0:
-                                # Check if already in sell recommendations (avoid duplicates)
-                                if not any(r.get("ticker") == ticker and r.get("action") == "SELL" 
-                                          for r in rebalancing["recommendations"]):
-                                    rebalancing["needed"] = True
-                                    total_sell_amount += sell_amount
-                                    rebalancing["recommendations"].append({
-                                        "action": "SELL",
-                                        "ticker": ticker,
-                                        "sell_amount_usd": sell_amount,
-                                        "sell_shares": sell_shares,
-                                        "current_price_usd": analysis["current_price"],
-                                        "current_weight": stock_info["weight"],
-                                        "reason": f"Rebalancing: Sell {sell_shares} shares (${sell_amount:,.2f}) to buy bonds for 75/25 balance"
-                                    })
-                                    remaining_to_sell -= sell_amount
-                    
-                    # Now recommend bonds to buy with the proceeds
-                    if total_sell_amount > 0:
-                        bond_recs = self._generate_bond_recommendations(total_sell_amount, current_tickers, exchange_rate=self.get_exchange_rate())
-                        if bond_recs:
-                            rebalancing["buy_recommendations"].extend(bond_recs)
+                        core_etfs = ["SPY", "VOO", "IVV", "VXUS", "VEA"]
+                        bond_etfs = ["BND", "AGG", "TIP", "SCHP", "VTIP"]
+                        
+                        # Analyze stocks for tax implications
+                        stocks_to_sell = []
+                        for analysis in analyses:
+                            ticker = analysis["ticker"]
+                            if ticker.upper() not in [b.upper() for b in bond_etfs]:
+                                is_core = ticker.upper() in [c.upper() for c in core_etfs]
+                                
+                                # Find holding info for tax calculation
+                                holding = next((h for h in portfolio.get("holdings", []) if h.get("ticker") == ticker), None)
+                                purchase_date = holding.get("purchase_date") if holding else portfolio.get("last_updated", datetime.now().isoformat())
+                                # Use last_price as cost_basis if no cost_basis recorded (assume bought at last known price)
+                                cost_basis = holding.get("cost_basis", holding.get("last_price", analysis["current_price"])) if holding else analysis["current_price"]
+                                
+                                # Calculate tax impact
+                                tax_calc = tax_analyzer.calculate_capital_gains_tax(
+                                    purchase_price=cost_basis,
+                                    sale_price=analysis["current_price"],
+                                    quantity=analysis["quantity"],
+                                    purchase_date=purchase_date
+                                )
+                                
+                                # Calculate gain/loss
+                                gain_loss = tax_calc.get("total_gain_ils", 0)
+                                tax_cost = tax_calc.get("capital_gains_tax_ils", 0)
+                                is_loss = gain_loss < 0
+                                is_long_term = tax_calc.get("is_long_term", False)
+                                
+                                stocks_to_sell.append({
+                                    "ticker": ticker,
+                                    "analysis": analysis,
+                                    "is_core": is_core,
+                                    "weight": weights.get(ticker, 0),
+                                    "gain_loss": gain_loss,
+                                    "tax_cost": tax_cost,
+                                    "is_loss": is_loss,
+                                    "is_long_term": is_long_term,
+                                    "tax_impact": tax_cost / analysis["current_value"] if analysis["current_value"] > 0 else 0
+                                })
+                        
+                        # Sort by tax efficiency: losses first, then long-term gains, then short-term gains
+                        # Within each group: satellite first, then by tax impact (lower is better)
+                        stocks_to_sell.sort(key=lambda x: (
+                            not x["is_loss"],  # Losses first (True < False, so losses come first)
+                            not x["is_long_term"],  # Long-term before short-term
+                            x["is_core"],  # Satellite before core
+                            x["tax_impact"]  # Lower tax impact first
+                        ))
+                        
+                        # Sell stocks to get money for bonds
+                        remaining_to_sell = rebalance_amount
+                        total_tax_cost = 0
+                        for stock_info in stocks_to_sell:
+                            if remaining_to_sell <= 0:
+                                break
+                            
+                            ticker = stock_info["ticker"]
+                            analysis = stock_info["analysis"]
+                            current_value = analysis["current_value"]
+                            
+                            # Sell up to the needed amount, but max 30% of this holding
+                            sell_amount = min(remaining_to_sell, current_value * 0.30)
+                            if sell_amount > 100:  # Only if meaningful amount
+                                sell_shares = int(sell_amount / analysis["current_price"]) if analysis["current_price"] > 0 else 0
+                                if sell_shares > 0:
+                                    # Check if already in sell recommendations (avoid duplicates)
+                                    if not any(r.get("ticker") == ticker and r.get("action") == "SELL" 
+                                              for r in rebalancing["recommendations"]):
+                                        rebalancing["needed"] = True
+                                        total_sell_amount += sell_amount
+                                        
+                                        # Calculate proportional tax for this sale
+                                        proportional_tax = stock_info["tax_cost"] * (sell_amount / current_value) if current_value > 0 else 0
+                                        total_tax_cost += proportional_tax
+                                        
+                                        # Build reason with tax info
+                                        reason = f"Rebalancing: Sell {sell_shares} shares (${sell_amount:,.2f}) to buy bonds"
+                                        if stock_info["is_loss"]:
+                                            reason += f" | Tax benefit: {abs(stock_info['gain_loss']):,.0f} ILS loss"
+                                        elif stock_info["tax_cost"] > 0:
+                                            reason += f" | Tax cost: ~{proportional_tax:,.0f} ILS"
+                                        if stock_info["is_long_term"]:
+                                            reason += " | Long-term (lower tax)"
+                                        
+                                        rebalancing["recommendations"].append({
+                                            "action": "SELL",
+                                            "ticker": ticker,
+                                            "sell_amount_usd": sell_amount,
+                                            "sell_shares": sell_shares,
+                                            "current_price_usd": analysis["current_price"],
+                                            "current_weight": stock_info["weight"],
+                                            "reason": reason,
+                                            "tax_cost_ils": proportional_tax,
+                                            "is_loss": stock_info["is_loss"]
+                                        })
+                                        remaining_to_sell -= sell_amount
+                        
+                        # Add tax warning to reason
+                        if total_tax_cost > 0:
+                            rebalancing["reason"] += f" | Estimated tax cost: ~{total_tax_cost:,.0f} ILS. Consider waiting for deposit instead."
+                        
+                        # Now recommend bonds to buy with the proceeds
+                        if total_sell_amount > 0:
+                            bond_recs = self._generate_bond_recommendations(total_sell_amount, current_tickers, exchange_rate=self.get_exchange_rate())
+                            if bond_recs:
+                                rebalancing["buy_recommendations"].extend(bond_recs)
         
         # If we're selling for other reasons (performance, concentration), recommend what to buy instead
         if total_sell_amount > 0 and rebalancing["recommendations"]:
