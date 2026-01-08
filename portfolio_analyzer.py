@@ -732,7 +732,7 @@ class PortfolioAnalyzer:
     
     def find_best_etfs_to_buy(self, amount_usd: float, current_holdings: List[str], exclude_tickers: List[str] = None) -> List[Dict]:
         """
-        Find best ETFs to buy following 75/25 Balanced Growth Strategy.
+        Find best ETFs to buy following 80/20 Balanced Growth Strategy.
         Prioritizes Core ETFs and Bonds over high-risk trends.
         """
         from deposit_advisor import DepositAdvisor
@@ -834,11 +834,11 @@ class PortfolioAnalyzer:
         recommendations.sort(key=lambda x: x['score'], reverse=True)
         return recommendations[:3]
     
-    def check_75_25_balance(self, portfolio_metrics: Dict, analyses: List[Dict]) -> Dict:
+    def check_80_20_balance(self, portfolio_metrics: Dict, analyses: List[Dict]) -> Dict:
         """
-        Check if portfolio follows 75/25 Balanced Growth Strategy:
-        - 75% Stocks (50% Core + 25% Satellite)
-        - 25% Bonds
+        Check if portfolio follows 80/20 Balanced Growth Strategy:
+        - 80% Stocks (50% Core + 30% Satellite)
+        - 20% Bonds
         Returns recommendations to achieve proper balance.
         """
         balance_check = {
@@ -890,10 +890,10 @@ class PortfolioAnalyzer:
         balance_check["satellite_percent"] = satellite_percent
         
         # Check if balanced (with tolerance of ±5%)
-        target_stocks = 75
-        target_bonds = 25
+        target_stocks = 80
+        target_bonds = 20
         target_core = 50
-        target_satellite = 25
+        target_satellite = 30
         
         tolerance = 5
         is_balanced = (
@@ -947,14 +947,14 @@ class PortfolioAnalyzer:
         
         return balance_check
     
-    def _generate_concrete_75_25_recommendations(
+    def _generate_concrete_80_20_recommendations(
         self,
         balance_info: Dict,
         portfolio_metrics: Dict,
         holdings_analysis: List[Dict],
         exchange_rate: float
     ) -> List[Dict]:
-        """Generate concrete buy recommendations to achieve 75/25 balance."""
+        """Generate concrete buy recommendations to achieve 80/20 balance."""
         recommendations = []
         
         bonds_percent = balance_info.get("bonds_percent", 0)
@@ -973,7 +973,7 @@ class PortfolioAnalyzer:
         bond_etfs = ["BND", "AGG", "TIP", "SCHP", "VTIP"]
         
         # Check what we need
-        target_bonds = total_value * 0.25
+        target_bonds = total_value * 0.20
         current_bonds = total_value * (bonds_percent / 100)
         needed_bonds = max(0, target_bonds - current_bonds)
         
@@ -981,7 +981,7 @@ class PortfolioAnalyzer:
         current_core = total_value * (core_percent / 100)
         needed_core = max(0, target_core - current_core)
         
-        target_satellite = total_value * 0.25
+        target_satellite = total_value * 0.30
         current_satellite = total_value * (satellite_percent / 100)
         needed_satellite = max(0, target_satellite - current_satellite)
         
@@ -1007,7 +1007,7 @@ class PortfolioAnalyzer:
                             shares = int(amount_to_recommend / price) if price > 0 else 0
                             if shares > 0:
                                 actual_amount = shares * price
-                                reason = f"Add bonds to reach 25% target (currently {bonds_percent:.1f}%)"
+                                reason = f"Add bonds to reach 20% target (currently {bonds_percent:.1f}%)"
                                 if cash_available < needed_bonds:
                                     reason += f" | Need ${needed_bonds:,.2f} total, but only ${cash_available:,.2f} cash available"
                                 recommendations.append({
@@ -1101,24 +1101,24 @@ class PortfolioAnalyzer:
         return recommendations
     
     def check_rebalancing(self, portfolio_metrics: Dict, analyses: List[Dict]) -> Dict:
-        """Determine if rebalancing is needed, including 75/25 balance check."""
+        """Determine if rebalancing is needed, including 80/20 balance check."""
         rebalancing = {
             "needed": False,
             "reason": "",
             "recommendations": [],
             "buy_recommendations": [],
-            "balance_75_25": {}
+            "balance_80_20": {}
         }
         
-        # First check 75/25 balance
-        balance_check = self.check_75_25_balance(portfolio_metrics, analyses)
-        rebalancing["balance_75_25"] = balance_check
+        # First check 80/20 balance
+        balance_check = self.check_80_20_balance(portfolio_metrics, analyses)
+        rebalancing["balance_80_20"] = balance_check
         
         if not balance_check["is_balanced"]:
             rebalancing["needed"] = True
             balance_reasons = [r["reason"] for r in balance_check["recommendations"]]
             if not rebalancing["reason"]:
-                rebalancing["reason"] = f"Portfolio not balanced (75/25): {balance_reasons[0] if balance_reasons else 'Needs rebalancing'}"
+                rebalancing["reason"] = f"Portfolio not balanced (80/20): {balance_reasons[0] if balance_reasons else 'Needs rebalancing'}"
         
         weights = portfolio_metrics["weights"]
         total_holdings = len(weights)
@@ -1241,17 +1241,17 @@ class PortfolioAnalyzer:
             # Don't force rebalancing, but note it in the reason
             rebalancing["reason"] = f"Some holdings have low scores: {', '.join([a['ticker'] for a in low_score_holdings])}"
         
-        # PRIORITY 2: Rebalance for 75/25 balance by selling stocks to buy bonds
+        # PRIORITY 2: Rebalance for 80/20 balance by selling stocks to buy bonds
         # BUT: Consider tax implications and alternatives
         if not balance_check["is_balanced"]:
             bonds_percent = balance_check.get("bonds_percent", 0)
             stocks_percent = balance_check.get("stocks_percent", 0)
             cash_available = portfolio_metrics.get("cash", 0)
             
-            # If we have too many stocks (>75%) and too few bonds (<25%)
-            if stocks_percent > 75 and bonds_percent < 25:
-                target_stocks = 75
-                target_bonds = 25
+            # If we have too many stocks (>80%) and too few bonds (<20%)
+            if stocks_percent > 80 and bonds_percent < 20:
+                target_stocks = 80
+                target_bonds = 20
                 excess_stocks = stocks_percent - target_stocks
                 needed_bonds = target_bonds - bonds_percent
                 
@@ -1267,7 +1267,7 @@ class PortfolioAnalyzer:
                 if cash_available > needed_bonds_value * 0.5:
                     # Prefer using cash - add note but don't force selling
                     if not rebalancing["reason"]:
-                        rebalancing["reason"] = f"Portfolio not balanced (75/25): Need ${needed_bonds_value:,.2f} in bonds. Consider using ${cash_available:,.2f} cash first, or wait for deposit to avoid tax on sales."
+                        rebalancing["reason"] = f"Portfolio not balanced (80/20): Need ${needed_bonds_value:,.2f} in bonds. Consider using ${cash_available:,.2f} cash first, or wait for deposit to avoid tax on sales."
                 else:
                     # Need to sell - but be smart about it
                     rebalance_percentage = min(excess_stocks, needed_bonds) / 100
@@ -1475,11 +1475,11 @@ class PortfolioAnalyzer:
         # Check rebalancing
         rebalancing = self.check_rebalancing(portfolio_metrics, analyses)
         
-        # Add concrete 75/25 recommendations if needed
-        balance_info = rebalancing.get("balance_75_25", {})
+        # Add concrete 80/20 recommendations if needed
+        balance_info = rebalancing.get("balance_80_20", {})
         if balance_info and not balance_info.get("is_balanced", False):
             exchange_rate = self.get_exchange_rate()
-            concrete_recs = self._generate_concrete_75_25_recommendations(
+            concrete_recs = self._generate_concrete_80_20_recommendations(
                 balance_info, portfolio_metrics, analyses, exchange_rate
             )
             # Add to buy_recommendations if not already there
@@ -1643,11 +1643,11 @@ class PortfolioAnalyzer:
         print(f"Diversification Score: {metrics['diversification_score']:.2f} (1.0 = perfect diversification)")
         print(f"Average Recommendation Score: {metrics['average_recommendation_score']:.1f}/100")
         
-        # Show 75/25 balance status
-        balance_info = results["rebalancing"].get("balance_75_25", {})
+        # Show 80/20 balance status
+        balance_info = results["rebalancing"].get("balance_80_20", {})
         if balance_info:
             print("\n" + "-" * 60)
-            print("75/25 BALANCED GROWTH STRATEGY STATUS")
+            print("80/20 BALANCED GROWTH STRATEGY STATUS")
             print("-" * 60)
             stocks_pct = balance_info.get("stocks_percent", 0)
             bonds_pct = balance_info.get("bonds_percent", 0)
@@ -1656,21 +1656,21 @@ class PortfolioAnalyzer:
             is_balanced = balance_info.get("is_balanced", False)
             
             status_icon = "✅" if is_balanced else "⚠️"
-            print(f"{status_icon} Stocks: {stocks_pct:.1f}% (Target: 75%)")
+            print(f"{status_icon} Stocks: {stocks_pct:.1f}% (Target: 80%)")
             print(f"   ├─ Core: {core_pct:.1f}% (Target: 50%)")
-            print(f"   └─ Satellite: {satellite_pct:.1f}% (Target: 25%)")
-            print(f"{status_icon} Bonds: {bonds_pct:.1f}% (Target: 25%)")
+            print(f"   └─ Satellite: {satellite_pct:.1f}% (Target: 30%)")
+            print(f"{status_icon} Bonds: {bonds_pct:.1f}% (Target: 20%)")
             
             if not is_balanced:
                 recommendations = balance_info.get("recommendations", [])
                 if recommendations:
-                    print(f"\n📋 Recommendations to achieve 75/25 balance:")
+                    print(f"\n📋 Recommendations to achieve 80/20 balance:")
                     for rec in recommendations:
                         print(f"   • {rec.get('reason', 'N/A')}")
                     
                     # Generate concrete buy recommendations
                     print(f"\n💡 CONCRETE BUY RECOMMENDATIONS:")
-                    concrete_recs = self._generate_concrete_75_25_recommendations(
+                    concrete_recs = self._generate_concrete_80_20_recommendations(
                         balance_info, metrics, results["holdings_analysis"], exchange_rate
                     )
                     if concrete_recs:

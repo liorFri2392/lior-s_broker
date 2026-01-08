@@ -124,7 +124,7 @@ class CriticalAlertSystem:
         
         # Check if portfolio needs balancing
         if portfolio_analysis:
-            balance_check = self.analyzer.check_75_25_balance(
+            balance_check = self.analyzer.check_80_20_balance(
                 portfolio_metrics,
                 holdings_analysis
             )
@@ -178,7 +178,7 @@ class CriticalAlertSystem:
     
     def scan_critical_buy_opportunities(self) -> List[Dict]:
         """
-        Scan for critical buy opportunities following 75/25 Balanced Growth Strategy.
+        Scan for critical buy opportunities following 80/20 Balanced Growth Strategy.
         Prioritizes Core ETFs and Bonds over high-risk trends.
         """
         critical_buys = []
@@ -192,7 +192,7 @@ class CriticalAlertSystem:
         logger.info(f"Current portfolio has {len(current_holdings)} holdings: {current_holdings}")
         logger.info(f"Portfolio value: ${portfolio_value:,.2f}, Cash available: ${cash_available:,.2f}")
         
-        # 75/25 Strategy: Focus on Core, Satellite, and Bonds
+        # 80/20 Strategy: Focus on Core, Satellite, and Bonds
         # Exclude high-risk categories (leveraged, crypto)
         excluded_categories = ["LEVERAGED_2X", "LEVERAGED_3X", "LEVERAGED_INVERSE", "CRYPTO"]
         
@@ -232,7 +232,7 @@ class CriticalAlertSystem:
             if etf.upper() not in analyzed_etfs:
                 analyzed_etfs.append(etf)
         
-        print(f"   Analyzing {len(analyzed_etfs)} ETFs (Core, Satellite, Bonds) following 75/25 strategy...")
+        print(f"   Analyzing {len(analyzed_etfs)} ETFs (Core, Satellite, Bonds) following 80/20 strategy...")
         print("   (Excluding leveraged ETFs and crypto for balanced risk)")
         
         # Analyze in batches
@@ -268,7 +268,7 @@ class CriticalAlertSystem:
                         logger.debug(f"Skipping {etf} - already has {holding_weight:.1f}% allocation")
                         continue
                 
-                # Check if portfolio actually needs this (75/25 balance check)
+                # Check if portfolio actually needs this (80/20 balance check)
                 # Calculate current allocation
                 bonds_value = sum(h.get("current_value", 0) for h in portfolio.get("holdings", []) 
                                 if h.get("ticker", "").upper() in [b.upper() for b in bond_etfs])
@@ -324,7 +324,7 @@ class CriticalAlertSystem:
                     is_leveraged = analysis.get("is_leveraged", False)
                     
                     if is_leveraged:
-                        # Skip leveraged ETFs - not suitable for 75/25 strategy
+                        # Skip leveraged ETFs - not suitable for 80/20 strategy
                         logger.debug(f"Skipping {etf} - leveraged ETF, not suitable for balanced strategy")
                         continue
                     
@@ -373,7 +373,7 @@ class CriticalAlertSystem:
                             "expected_return": display_return,
                             "score": score,
                             "details": "; ".join(reasons[:3]),  # Top 3 reasons
-                            "diversification": "Balanced 75/25 strategy",
+                            "diversification": "Balanced 80/20 strategy",
                             "is_leveraged": False,
                             "leverage_multiplier": 1.0,
                             "category": "CORE" if is_core else ("BONDS" if is_bond else "SATELLITE")

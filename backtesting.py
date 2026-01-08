@@ -386,7 +386,7 @@ if __name__ == "__main__":
         start_date="2020-01-01",
         end_date="2023-12-31",
         strategy="buy_and_hold",
-        allocation={"SPY": 0.5, "VXUS": 0.25, "BND": 0.25}
+        allocation={"SPY": 0.5, "VWO": 0.3, "BND": 0.2}
     )
     
     backtester.print_results(results)

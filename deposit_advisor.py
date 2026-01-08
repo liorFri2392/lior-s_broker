@@ -510,13 +510,13 @@ class DepositAdvisor:
     
     def recommend_etfs(self, deposit_amount_ils: float, portfolio: Dict) -> List[Dict]:
         """
-        Recommend ETFs based on 75/25 Balanced Growth Strategy:
-        - 75% Stocks (50% Core + 25% Satellite)
-        - 25% Bonds (Protection)
+        Recommend ETFs based on 80/20 Balanced Growth Strategy:
+        - 80% Stocks (50% Core + 30% Satellite)
+        - 20% Bonds (Protection)
         Optimized for family with mortgage - balanced risk/return.
         """
         print(f"\nAnalyzing deposit of ₪{deposit_amount_ils:,.2f}...")
-        print("📊 Strategy: 75/25 Balanced Growth (75% Stocks, 25% Bonds)")
+        print("📊 Strategy: 80/20 Balanced Growth (80% Stocks, 20% Bonds)")
         print("   Optimized for family stability with growth potential\n")
         
         # Convert to USD
@@ -526,8 +526,8 @@ class DepositAdvisor:
         print(f"Deposit amount in USD: ${deposit_amount_usd:,.2f}")
         
         # Calculate target allocations
-        stocks_target = deposit_amount_usd * 0.75  # 75% stocks
-        bonds_target = deposit_amount_usd * 0.25    # 25% bonds
+        stocks_target = deposit_amount_usd * 0.80  # 80% stocks
+        bonds_target = deposit_amount_usd * 0.20    # 20% bonds
         
         # Analyze current portfolio to understand current allocation
         current_holdings = [h["ticker"] for h in portfolio.get("holdings", [])]
@@ -609,15 +609,15 @@ class DepositAdvisor:
         satellite_analyses.sort(key=lambda x: x["score"], reverse=True)
         bond_analyses.sort(key=lambda x: x["score"], reverse=True)
         
-        print("✅ Analysis complete! Generating 75/25 balanced recommendations...\n")
+        print("✅ Analysis complete! Generating 80/20 balanced recommendations...\n")
         
-        # Build allocations following 75/25 strategy
+        # Build allocations following 80/20 strategy
         allocations = []
         remaining_stocks = stocks_target
         remaining_bonds = bonds_target
         
-        # 1. Core Stocks (50% of total = 66.7% of stocks allocation)
-        core_target = stocks_target * 0.667  # 50% of total portfolio
+        # 1. Core Stocks (50% of total = 62.5% of stocks allocation)
+        core_target = stocks_target * 0.625  # 50% of total portfolio
         core_allocated = 0
         for etf in core_analyses[:2]:  # Top 2 Core ETFs
             if core_allocated < core_target:
@@ -641,8 +641,8 @@ class DepositAdvisor:
                     core_allocated += actual_amount
                     remaining_stocks -= actual_amount
         
-        # 2. Satellite Stocks (25% of total = 33.3% of stocks allocation)
-        satellite_target = stocks_target * 0.333  # 25% of total portfolio
+        # 2. Satellite Stocks (30% of total = 37.5% of stocks allocation)
+        satellite_target = stocks_target * 0.375  # 30% of total portfolio
         satellite_allocated = 0
         for etf in satellite_analyses[:3]:  # Top 3 Satellite ETFs
             if satellite_allocated < satellite_target:
@@ -954,8 +954,8 @@ class DepositAdvisor:
         print("RECOMMENDED PURCHASES (All prices and amounts in USD)")
         print("-" * 60)
         print("\n📊 Strategy: 75/25 Balanced Growth")
-        print("   • 75% Stocks (50% Core + 25% Satellite)")
-        print("   • 25% Bonds (Protection)")
+        print("   • 80% Stocks (50% Core + 30% Satellite)")
+        print("   • 20% Bonds (Protection)")
         print("   • Optimized for family stability with growth potential")
         print("\n⚠️  NOTE: All purchases are executed in USD. Amounts shown in ILS are for reference only.")
         
