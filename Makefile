@@ -19,6 +19,7 @@ help:
 	@echo "  make backtest    - Run backtesting on historical data"
 	@echo "  make risk       - Check portfolio risk and get risk management report"
 	@echo "  make tax        - Analyze tax implications for portfolio"
+	@echo "  make update-secret - Update GitHub secret with current portfolio (for workflows)"
 	@echo "  make clean      - Remove virtual environment"
 
 venv:
@@ -77,6 +78,10 @@ risk: venv
 tax: venv
 	@echo "Analyzing tax implications for current portfolio..."
 	@$(PYTHON) tax_report.py
+
+update-secret: venv
+	@echo "Updating GitHub secret with current portfolio..."
+	@$(PYTHON) update_github_secret.py
 
 clean:
 	@echo "Removing virtual environment..."

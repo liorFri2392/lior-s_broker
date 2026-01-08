@@ -83,5 +83,23 @@ jobs:
             analysis_output.txt
             risk_output.txt
           retention-days: 7
+      
+      - name: Display portfolio update reminder
+        if: always()
+        run: |
+          echo "📝 IMPORTANT: Update GitHub Secret"
+          echo "=================================="
+          echo ""
+          echo "The portfolio.json has been updated. To keep GitHub Actions in sync:"
+          echo ""
+          echo "Option 1 - Automatic (recommended):"
+          echo "  Run locally: make update-secret"
+          echo ""
+          echo "Option 2 - Manual:"
+          echo "  1. Download portfolio.json from artifacts above"
+          echo "  2. Go to: https://github.com/${{ github.repository }}/settings/secrets/actions"
+          echo "  3. Update PORTFOLIO_JSON secret with the new content"
+          echo ""
+          echo "This ensures critical alerts use your latest portfolio data."
 
 
