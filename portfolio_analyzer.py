@@ -989,61 +989,75 @@ class PortfolioAnalyzer:
         current_holdings = [h.get("ticker", "").upper() for h in holdings_analysis]
         
         # Recommend bonds if needed (priority)
-        if needed_bonds > 100 and cash_available > 100:
+        if needed_bonds > 100:
             # Try to get price for bond ETFs
             import yfinance as yf
+            remaining_needed = needed_bonds
             for bond_etf in bond_etfs:
+                if remaining_needed <= 0 or len(recommendations) >= 3:
+                    break
                 if bond_etf.upper() not in current_holdings or needed_bonds > 500:
                     try:
                         stock = yf.Ticker(bond_etf)
                         hist = stock.history(period="1d")
                         if not hist.empty:
                             price = float(hist['Close'].iloc[-1])
-                            # Recommend up to needed amount or available cash
-                            amount_to_use = min(needed_bonds, cash_available * 0.5)
-                            shares = int(amount_to_use / price) if price > 0 else 0
+                            # Recommend based on what's needed, but note cash limitation
+                            amount_to_recommend = min(remaining_needed, cash_available) if cash_available > 0 else remaining_needed
+                            shares = int(amount_to_recommend / price) if price > 0 else 0
                             if shares > 0:
                                 actual_amount = shares * price
+                                reason = f"Add bonds to reach 25% target (currently {bonds_percent:.1f}%)"
+                                if cash_available < needed_bonds:
+                                    reason += f" | Need ${needed_bonds:,.2f} total, but only ${cash_available:,.2f} cash available"
                                 recommendations.append({
                                     "ticker": bond_etf,
                                     "shares": shares,
                                     "price": price,
                                     "amount": actual_amount,
                                     "amount_ils": actual_amount * exchange_rate,
-                                    "reason": f"Add bonds to reach 25% target (currently {bonds_percent:.1f}%)"
+                                    "reason": reason,
+                                    "needed_total": needed_bonds,
+                                    "cash_available": cash_available
                                 })
-                                needed_bonds -= actual_amount
-                                if needed_bonds <= 0 or len(recommendations) >= 2:
-                                    break
+                                remaining_needed -= actual_amount
                     except Exception as e:
                         logger.debug(f"Failed to get price for {bond_etf}: {e}")
                         continue
         
-        # Recommend core if needed
-        if needed_core > 100 and cash_available > 100:
+        # Recommend core if needed (only if we have cash left after bonds)
+        remaining_cash = cash_available - sum(r.get("amount", 0) for r in recommendations)
+        if needed_core > 100 and remaining_cash > 100:
             import yfinance as yf
+            remaining_needed = needed_core
             for core_etf in core_etfs:
+                if remaining_needed <= 0 or len(recommendations) >= 5:
+                    break
                 if core_etf.upper() not in current_holdings or needed_core > 500:
                     try:
                         stock = yf.Ticker(core_etf)
                         hist = stock.history(period="1d")
                         if not hist.empty:
                             price = float(hist['Close'].iloc[-1])
-                            amount_to_use = min(needed_core, cash_available * 0.3)
-                            shares = int(amount_to_use / price) if price > 0 else 0
+                            amount_to_recommend = min(remaining_needed, remaining_cash)
+                            shares = int(amount_to_recommend / price) if price > 0 else 0
                             if shares > 0:
                                 actual_amount = shares * price
+                                reason = f"Increase core holdings to reach 50% target (currently {core_percent:.1f}%)"
+                                if remaining_cash < needed_core:
+                                    reason += f" | Need ${needed_core:,.2f} total, but only ${remaining_cash:,.2f} cash available"
                                 recommendations.append({
                                     "ticker": core_etf,
                                     "shares": shares,
                                     "price": price,
                                     "amount": actual_amount,
                                     "amount_ils": actual_amount * exchange_rate,
-                                    "reason": f"Increase core holdings to reach 50% target (currently {core_percent:.1f}%)"
+                                    "reason": reason,
+                                    "needed_total": needed_core,
+                                    "cash_available": remaining_cash
                                 })
-                                needed_core -= actual_amount
-                                if needed_core <= 0 or len(recommendations) >= 4:
-                                    break
+                                remaining_needed -= actual_amount
+                                remaining_cash -= actual_amount
                     except Exception as e:
                         logger.debug(f"Failed to get price for {core_etf}: {e}")
                         continue
@@ -1466,6 +1480,10 @@ class PortfolioAnalyzer:
                         balance_info, metrics, results["holdings_analysis"], exchange_rate
                     )
                     if concrete_recs:
+                        total_needed = sum(r.get('needed_total', 0) for r in concrete_recs if r.get('needed_total'))
+                        total_recommended = sum(r.get('amount', 0) for r in concrete_recs)
+                        if total_needed > 0 and total_needed > total_recommended:
+                            print(f"\n   ⚠️  Total needed: ${total_needed:,.2f}, but only ${total_recommended:,.2f} recommended (limited by available cash)")
                         for rec in concrete_recs:
                             print(f"   🟢 BUY: {rec['ticker']} - {rec['shares']} shares × ${rec['price']:.2f} = ${rec['amount']:,.2f} (₪{rec['amount_ils']:,.2f})")
                             print(f"      Reason: {rec['reason']}")
