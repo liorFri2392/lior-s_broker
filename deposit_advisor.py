@@ -525,14 +525,83 @@ class DepositAdvisor:
         
         print(f"Deposit amount in USD: ${deposit_amount_usd:,.2f}")
         
-        # Calculate target allocations
-        stocks_target = deposit_amount_usd * 0.80  # 80% stocks
-        bonds_target = deposit_amount_usd * 0.20    # 20% bonds
-        
         # Analyze current portfolio to understand current allocation
         current_holdings = [h["ticker"] for h in portfolio.get("holdings", [])]
         portfolio_value = sum(h.get("current_value", 0) for h in portfolio.get("holdings", []))
         portfolio_value += portfolio.get("cash", 0)
+        
+        # Calculate current portfolio allocation
+        bond_etfs = ["BND", "AGG", "TIP", "SCHP", "VTIP"]
+        core_etfs = ["SPY", "VOO", "IVV", "VXUS", "VEA"]
+        
+        current_bonds_value = sum(h.get("current_value", 0) for h in portfolio.get("holdings", []) 
+                                 if h.get("ticker", "").upper() in [b.upper() for b in bond_etfs])
+        current_stocks_value = portfolio_value - current_bonds_value
+        
+        current_bonds_percent = (current_bonds_value / portfolio_value * 100) if portfolio_value > 0 else 0
+        current_stocks_percent = (current_stocks_value / portfolio_value * 100) if portfolio_value > 0 else 100
+        
+        # Calculate what the portfolio will look like after deposit
+        total_after_deposit = portfolio_value + deposit_amount_usd
+        
+        # Calculate target allocation for entire portfolio (80/20)
+        target_stocks_total = total_after_deposit * 0.80
+        target_bonds_total = total_after_deposit * 0.20
+        
+        # Calculate how much we need to add to reach target
+        needed_stocks = max(0, target_stocks_total - current_stocks_value)
+        needed_bonds = max(0, target_bonds_total - current_bonds_value)
+        
+        # Adjust deposit allocation based on what's needed
+        # If portfolio is already heavy on stocks, allocate more of deposit to bonds
+        if current_stocks_percent > 80:
+            # Portfolio has too many stocks - prioritize bonds in deposit
+            bonds_target = min(deposit_amount_usd, needed_bonds)
+            stocks_target = deposit_amount_usd - bonds_target
+        elif current_bonds_percent > 20:
+            # Portfolio has too many bonds - prioritize stocks in deposit
+            stocks_target = min(deposit_amount_usd, needed_stocks)
+            bonds_target = deposit_amount_usd - stocks_target
+        else:
+            # Portfolio is relatively balanced - use standard 80/20 split
+            stocks_target = deposit_amount_usd * 0.80
+            bonds_target = deposit_amount_usd * 0.20
+        
+        # Ensure we don't exceed what's needed
+        stocks_target = min(stocks_target, needed_stocks) if needed_stocks > 0 else stocks_target
+        bonds_target = min(bonds_target, needed_bonds) if needed_bonds > 0 else bonds_target
+        
+        # If one target is zero but we have deposit, allocate to the other
+        if stocks_target == 0 and bonds_target == 0:
+            # Both targets met - use standard split
+            stocks_target = deposit_amount_usd * 0.80
+            bonds_target = deposit_amount_usd * 0.20
+        elif stocks_target == 0:
+            bonds_target = deposit_amount_usd
+        elif bonds_target == 0:
+            stocks_target = deposit_amount_usd
+        
+        # Ensure we use the full deposit amount
+        total_allocated = stocks_target + bonds_target
+        if total_allocated < deposit_amount_usd * 0.99:  # Allow small rounding differences
+            # Distribute remaining amount proportionally
+            remaining = deposit_amount_usd - total_allocated
+            if stocks_target > 0 and bonds_target > 0:
+                stocks_target += remaining * (stocks_target / total_allocated)
+                bonds_target += remaining * (bonds_target / total_allocated)
+            elif stocks_target > 0:
+                stocks_target += remaining
+            else:
+                bonds_target += remaining
+        
+        print(f"📊 Current Portfolio: {current_stocks_percent:.1f}% Stocks, {current_bonds_percent:.1f}% Bonds")
+        print(f"📊 After Deposit Target: 80% Stocks, 20% Bonds")
+        if current_stocks_percent > 80 or current_bonds_percent > 20:
+            print(f"⚠️  Portfolio is unbalanced - adjusting deposit allocation to rebalance")
+            print(f"   Deposit allocation: ${stocks_target:,.2f} Stocks ({(stocks_target/deposit_amount_usd*100):.1f}%), ${bonds_target:,.2f} Bonds ({(bonds_target/deposit_amount_usd*100):.1f}%)")
+        else:
+            print(f"   Deposit allocation: ${stocks_target:,.2f} Stocks ({(stocks_target/deposit_amount_usd*100):.1f}%), ${bonds_target:,.2f} Bonds ({(bonds_target/deposit_amount_usd*100):.1f}%)")
+        print()
         
         # Define Core ETFs (stable, broad market)
         core_etfs = ["SPY", "VOO", "IVV", "VXUS", "VEA"]  # US Large Cap + International
