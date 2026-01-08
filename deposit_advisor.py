@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import logging
+import subprocess
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 import yfinance as yf
@@ -761,10 +762,45 @@ class DepositAdvisor:
         with open(self.portfolio_file, 'w', encoding='utf-8') as f:
             json.dump(portfolio, f, indent=2, ensure_ascii=False)
         
+        # Try to update GitHub secret automatically
+        self._try_update_github_secret(portfolio)
+        
         print(f"\n✅ Portfolio updated successfully!")
         print(f"   Total spent: ${total_spent_usd:,.2f} (₪{total_spent_usd * exchange_rate:,.2f})")
         print(f"   Remaining cash: ${new_cash_usd:,.2f} (₪{new_cash_usd * exchange_rate:,.2f})")
         print(f"   Portfolio saved to {self.portfolio_file}\n")
+    
+    def _try_update_github_secret(self, portfolio: Dict):
+        """Try to update GitHub secret automatically (silently, no errors if fails)."""
+        try:
+            # Check if GitHub CLI is available
+            result = subprocess.run(
+                ["gh", "--version"],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            if result.returncode == 0:
+                # GitHub CLI is available, try to update secret
+                portfolio_json_str = json.dumps(portfolio, ensure_ascii=False, indent=2)
+                process = subprocess.Popen(
+                    ["gh", "secret", "set", "PORTFOLIO_JSON", "--repo", "liorFri2392/lior-s_broker"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True
+                )
+                stdout, stderr = process.communicate(input=portfolio_json_str, timeout=10)
+                if process.returncode == 0:
+                    logger.info("✅ GitHub secret updated automatically")
+                    print("   ✅ GitHub secret updated automatically!")
+                    return True
+                else:
+                    logger.debug(f"GitHub secret update failed: {stderr}")
+        except (FileNotFoundError, subprocess.TimeoutExpired, Exception) as e:
+            # Silently fail - GitHub CLI not available or update failed
+            logger.debug(f"Could not update GitHub secret automatically: {e}")
+        return False
     
     def ask_confirmation(self) -> bool:
         """Ask user for confirmation."""

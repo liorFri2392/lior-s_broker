@@ -7,6 +7,7 @@ Analyzes portfolio holdings, provides recommendations, and suggests rebalancing.
 import json
 import os
 import logging
+import subprocess
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -138,6 +139,40 @@ class PortfolioAnalyzer:
         portfolio_path = os.path.abspath(self.portfolio_file)
         with open(portfolio_path, 'w', encoding='utf-8') as f:
             json.dump(portfolio, f, indent=2, ensure_ascii=False)
+        
+        # Try to update GitHub secret automatically (if GitHub CLI is available)
+        self._try_update_github_secret(portfolio)
+    
+    def _try_update_github_secret(self, portfolio: Dict):
+        """Try to update GitHub secret automatically (silently, no errors if fails)."""
+        try:
+            # Check if GitHub CLI is available
+            result = subprocess.run(
+                ["gh", "--version"],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            if result.returncode == 0:
+                # GitHub CLI is available, try to update secret
+                portfolio_json_str = json.dumps(portfolio, ensure_ascii=False, indent=2)
+                process = subprocess.Popen(
+                    ["gh", "secret", "set", "PORTFOLIO_JSON", "--repo", "liorFri2392/lior-s_broker"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True
+                )
+                stdout, stderr = process.communicate(input=portfolio_json_str, timeout=10)
+                if process.returncode == 0:
+                    logger.info("✅ GitHub secret updated automatically")
+                    return True
+                else:
+                    logger.debug(f"GitHub secret update failed: {stderr}")
+        except (FileNotFoundError, subprocess.TimeoutExpired, Exception) as e:
+            # Silently fail - GitHub CLI not available or update failed
+            logger.debug(f"Could not update GitHub secret automatically: {e}")
+        return False
     
     def is_market_open(self) -> Tuple[bool, str]:
         """Check if US stock market (NYSE/NASDAQ) is currently open."""
