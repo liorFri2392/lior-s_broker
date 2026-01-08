@@ -1402,8 +1402,8 @@ class PortfolioAnalyzer:
             sell_tickers = [r["ticker"] for r in rebalancing["recommendations"] if r["action"] == "SELL"]
             # Only add buy recommendations if not already added for rebalancing
             if not rebalancing["buy_recommendations"]:
-            buy_recs = self.find_best_etfs_to_buy(total_sell_amount, current_tickers, exclude_tickers=sell_tickers)
-            rebalancing["buy_recommendations"] = buy_recs
+                buy_recs = self.find_best_etfs_to_buy(total_sell_amount, current_tickers, exclude_tickers=sell_tickers)
+                rebalancing["buy_recommendations"] = buy_recs
         
         return rebalancing
     
