@@ -847,6 +847,109 @@ class PortfolioAnalyzer:
         
         return balance_check
     
+    def _generate_concrete_75_25_recommendations(
+        self,
+        balance_info: Dict,
+        portfolio_metrics: Dict,
+        holdings_analysis: List[Dict],
+        exchange_rate: float
+    ) -> List[Dict]:
+        """Generate concrete buy recommendations to achieve 75/25 balance."""
+        recommendations = []
+        
+        bonds_percent = balance_info.get("bonds_percent", 0)
+        stocks_percent = balance_info.get("stocks_percent", 0)
+        core_percent = balance_info.get("core_percent", 0)
+        satellite_percent = balance_info.get("satellite_percent", 0)
+        
+        total_value = portfolio_metrics.get("total_value", 0)
+        cash_available = portfolio_metrics.get("cash", 0)
+        
+        if total_value == 0:
+            return recommendations
+        
+        # Define target ETFs
+        core_etfs = ["SPY", "VOO", "IVV", "VXUS", "VEA"]
+        bond_etfs = ["BND", "AGG", "TIP", "SCHP", "VTIP"]
+        
+        # Check what we need
+        target_bonds = total_value * 0.25
+        current_bonds = total_value * (bonds_percent / 100)
+        needed_bonds = max(0, target_bonds - current_bonds)
+        
+        target_core = total_value * 0.50
+        current_core = total_value * (core_percent / 100)
+        needed_core = max(0, target_core - current_core)
+        
+        target_satellite = total_value * 0.25
+        current_satellite = total_value * (satellite_percent / 100)
+        needed_satellite = max(0, target_satellite - current_satellite)
+        
+        # Get current holdings
+        current_holdings = [h.get("ticker", "").upper() for h in holdings_analysis]
+        
+        # Recommend bonds if needed (priority)
+        if needed_bonds > 100 and cash_available > 100:
+            # Try to get price for bond ETFs
+            import yfinance as yf
+            for bond_etf in bond_etfs:
+                if bond_etf.upper() not in current_holdings or needed_bonds > 500:
+                    try:
+                        stock = yf.Ticker(bond_etf)
+                        hist = stock.history(period="1d")
+                        if not hist.empty:
+                            price = float(hist['Close'].iloc[-1])
+                            # Recommend up to needed amount or available cash
+                            amount_to_use = min(needed_bonds, cash_available * 0.5)
+                            shares = int(amount_to_use / price) if price > 0 else 0
+                            if shares > 0:
+                                actual_amount = shares * price
+                                recommendations.append({
+                                    "ticker": bond_etf,
+                                    "shares": shares,
+                                    "price": price,
+                                    "amount": actual_amount,
+                                    "amount_ils": actual_amount * exchange_rate,
+                                    "reason": f"Add bonds to reach 25% target (currently {bonds_percent:.1f}%)"
+                                })
+                                needed_bonds -= actual_amount
+                                if needed_bonds <= 0 or len(recommendations) >= 2:
+                                    break
+                    except Exception as e:
+                        logger.debug(f"Failed to get price for {bond_etf}: {e}")
+                        continue
+        
+        # Recommend core if needed
+        if needed_core > 100 and cash_available > 100:
+            import yfinance as yf
+            for core_etf in core_etfs:
+                if core_etf.upper() not in current_holdings or needed_core > 500:
+                    try:
+                        stock = yf.Ticker(core_etf)
+                        hist = stock.history(period="1d")
+                        if not hist.empty:
+                            price = float(hist['Close'].iloc[-1])
+                            amount_to_use = min(needed_core, cash_available * 0.3)
+                            shares = int(amount_to_use / price) if price > 0 else 0
+                            if shares > 0:
+                                actual_amount = shares * price
+                                recommendations.append({
+                                    "ticker": core_etf,
+                                    "shares": shares,
+                                    "price": price,
+                                    "amount": actual_amount,
+                                    "amount_ils": actual_amount * exchange_rate,
+                                    "reason": f"Increase core holdings to reach 50% target (currently {core_percent:.1f}%)"
+                                })
+                                needed_core -= actual_amount
+                                if needed_core <= 0 or len(recommendations) >= 4:
+                                    break
+                    except Exception as e:
+                        logger.debug(f"Failed to get price for {core_etf}: {e}")
+                        continue
+        
+        return recommendations
+    
     def check_rebalancing(self, portfolio_metrics: Dict, analyses: List[Dict]) -> Dict:
         """Determine if rebalancing is needed, including 75/25 balance check."""
         rebalancing = {
@@ -1064,6 +1167,28 @@ class PortfolioAnalyzer:
         # Check rebalancing
         rebalancing = self.check_rebalancing(portfolio_metrics, analyses)
         
+        # Add concrete 75/25 recommendations if needed
+        balance_info = rebalancing.get("balance_75_25", {})
+        if balance_info and not balance_info.get("is_balanced", False):
+            exchange_rate = self.get_exchange_rate()
+            concrete_recs = self._generate_concrete_75_25_recommendations(
+                balance_info, portfolio_metrics, analyses, exchange_rate
+            )
+            # Add to buy_recommendations if not already there
+            if concrete_recs and not rebalancing.get("buy_recommendations"):
+                rebalancing["buy_recommendations"] = []
+            for rec in concrete_recs:
+                # Check if not already in buy_recommendations
+                if not any(r.get("ticker") == rec["ticker"] for r in rebalancing.get("buy_recommendations", [])):
+                    rebalancing["buy_recommendations"].append({
+                        "ticker": rec["ticker"],
+                        "shares": rec["shares"],
+                        "price": rec["price"],
+                        "allocation_amount": rec["amount"],
+                        "name": rec["ticker"],
+                        "reasons": [rec["reason"]]
+                    })
+        
         # Update portfolio with current values
         portfolio["total_value"] = portfolio_metrics["total_value"]
         for i, analysis in enumerate(analyses):
@@ -1234,6 +1359,16 @@ class PortfolioAnalyzer:
                     print(f"\n📋 Recommendations to achieve 75/25 balance:")
                     for rec in recommendations:
                         print(f"   • {rec.get('reason', 'N/A')}")
+                    
+                    # Generate concrete buy recommendations
+                    print(f"\n💡 CONCRETE BUY RECOMMENDATIONS:")
+                    concrete_recs = self._generate_concrete_75_25_recommendations(
+                        balance_info, metrics, results["holdings_analysis"], exchange_rate
+                    )
+                    if concrete_recs:
+                        for rec in concrete_recs:
+                            print(f"   🟢 BUY: {rec['ticker']} - {rec['shares']} shares × ${rec['price']:.2f} = ${rec['amount']:,.2f} (₪{rec['amount_ils']:,.2f})")
+                            print(f"      Reason: {rec['reason']}")
         
         print("\n" + "-" * 60)
         print("HOLDINGS ANALYSIS (All prices and values in USD)")
