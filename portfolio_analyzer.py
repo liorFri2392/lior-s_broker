@@ -1187,44 +1187,120 @@ class PortfolioAnalyzer:
             if not rebalancing["reason"]:
                 rebalancing["reason"] = "Low diversification - consider adding more holdings"
         
-        # PRIORITY 1: Check for underperforming holdings (STRONG SELL or SELL recommendations)
+        # PRIORITY 1: Check for underperforming holdings and compare with better alternatives
         # Performance-based selling takes priority over concentration
+        # Also check if there are better ETF alternatives available
+        
+        # First, identify underperforming holdings
+        underperforming_holdings = []
         for analysis in analyses:
             score = analysis.get("recommendation_score", 50)
             recommendation = analysis.get("recommendation", "HOLD")
             ticker = analysis["ticker"]
-            current_weight = weights.get(ticker, 0)
             
-            # Sell if performance is poor, regardless of concentration
             if recommendation == "STRONG SELL" or score < 30:
-                rebalancing["needed"] = True
-                if not rebalancing["reason"]:
-                    rebalancing["reason"] = f"Underperforming holding: {ticker} (Score: {score:.1f}/100) - Performance-based sell"
-                
-                # More aggressive selling for very poor performance
-                sell_percentage = 0.75 if recommendation == "STRONG SELL" or score < 20 else 0.5
-                sell_value_usd = analysis["current_value"] * sell_percentage
-                sell_shares = int(analysis["quantity"] * sell_percentage)
-                total_sell_amount += sell_value_usd
-                rebalancing["recommendations"].append({
-                    "action": "SELL",
+                underperforming_holdings.append({
                     "ticker": ticker,
-                    "sell_amount_usd": sell_value_usd,
-                    "sell_shares": sell_shares,
-                    "current_price_usd": analysis["current_price"],
-                    "current_weight": current_weight,
-                    "reason": f"{recommendation} - Score: {score:.1f}/100. Poor performance - selling {sell_percentage*100:.0f}% ({sell_shares} shares, ${sell_value_usd:,.2f})"
+                    "score": score,
+                    "recommendation": recommendation,
+                    "analysis": analysis
                 })
             elif recommendation == "SELL" or (30 <= score < 40):
-                # Moderate underperformance - sell smaller portion
-                rebalancing["needed"] = True
-                if not rebalancing["reason"]:
-                    rebalancing["reason"] = f"Underperforming holding: {ticker} (Score: {score:.1f}/100)"
+                underperforming_holdings.append({
+                    "ticker": ticker,
+                    "score": score,
+                    "recommendation": recommendation,
+                    "analysis": analysis,
+                    "moderate": True
+                })
+        
+        # For each underperforming holding, try to find better alternatives
+        if underperforming_holdings:
+            from deposit_advisor import DepositAdvisor
+            advisor = DepositAdvisor(self.portfolio_file)
+            
+            # Define categories for comparison
+            core_etfs = ["SPY", "VOO", "IVV", "VXUS", "VEA"]
+            satellite_etfs = ["IWM", "VB", "XLK", "VGT", "VWO", "EEM", "XLV", "VHT"]
+            bond_etfs = ["BND", "AGG", "TIP", "SCHP", "VTIP"]
+            
+            for underperformer in underperforming_holdings:
+                ticker = underperformer["ticker"]
+                current_score = underperformer["score"]
+                analysis = underperformer["analysis"]
+                current_weight = weights.get(ticker, 0)
+                is_moderate = underperformer.get("moderate", False)
                 
-                sell_percentage = 0.25
+                # Determine category of underperforming ETF
+                ticker_upper = ticker.upper()
+                is_core = ticker_upper in [e.upper() for e in core_etfs]
+                is_bond = ticker_upper in [e.upper() for e in bond_etfs]
+                is_satellite = ticker_upper in [e.upper() for e in satellite_etfs]
+                
+                # Find better alternatives in the same category
+                better_alternatives = []
+                candidates = []
+                
+                if is_core:
+                    candidates = [e for e in core_etfs if e.upper() != ticker_upper and e.upper() not in current_tickers]
+                elif is_bond:
+                    candidates = [e for e in bond_etfs if e.upper() != ticker_upper and e.upper() not in current_tickers]
+                elif is_satellite:
+                    candidates = [e for e in satellite_etfs if e.upper() != ticker_upper and e.upper() not in current_tickers]
+                
+                # Analyze candidates to find better alternatives
+                for candidate in candidates[:3]:  # Check top 3 alternatives
+                    try:
+                        candidate_analysis = advisor.analyze_etf(candidate, verbose=False)
+                        candidate_score = candidate_analysis.get("score", 0)
+                        
+                        # If alternative is significantly better (at least 20 points higher)
+                        if candidate_score > current_score + 20:
+                            better_alternatives.append({
+                                "ticker": candidate,
+                                "score": candidate_score,
+                                "name": candidate_analysis.get("name", candidate),
+                                "current_price": candidate_analysis.get("current_price", 0),
+                                "score_difference": candidate_score - current_score
+                            })
+                    except Exception as e:
+                        logger.debug(f"Failed to analyze alternative {candidate}: {e}")
+                        continue
+                
+                # Sort alternatives by score difference
+                better_alternatives.sort(key=lambda x: x["score_difference"], reverse=True)
+                
+                # Generate sell recommendation with replacement suggestion
+                rebalancing["needed"] = True
+                sell_percentage = 0.75 if not is_moderate else 0.5
+                if is_moderate:
+                    sell_percentage = 0.25
+                
                 sell_value_usd = analysis["current_value"] * sell_percentage
                 sell_shares = int(analysis["quantity"] * sell_percentage)
                 total_sell_amount += sell_value_usd
+                
+                reason = f"{underperformer['recommendation']} - Score: {current_score:.1f}/100. Poor performance"
+                if better_alternatives:
+                    best_alternative = better_alternatives[0]
+                    reason += f" | Better alternative: {best_alternative['ticker']} (Score: {best_alternative['score']:.1f}/100, +{best_alternative['score_difference']:.1f} points)"
+                    # Add buy recommendation for the better alternative
+                    if best_alternative["current_price"] > 0:
+                        buy_shares = int(sell_value_usd / best_alternative["current_price"])
+                        rebalancing["buy_recommendations"].append({
+                            "ticker": best_alternative["ticker"],
+                            "name": best_alternative["name"],
+                            "shares": buy_shares,
+                            "price": best_alternative["current_price"],
+                            "amount": buy_shares * best_alternative["current_price"],
+                            "reason": f"Replace {ticker} (Score: {current_score:.1f}) with {best_alternative['ticker']} (Score: {best_alternative['score']:.1f}) - Better performance"
+                        })
+                else:
+                    reason += " - No better alternatives found in same category"
+                
+                if not rebalancing["reason"]:
+                    rebalancing["reason"] = f"Underperforming holding: {ticker} (Score: {current_score:.1f}/100)"
+                
                 rebalancing["recommendations"].append({
                     "action": "SELL",
                     "ticker": ticker,
@@ -1232,7 +1308,9 @@ class PortfolioAnalyzer:
                     "sell_shares": sell_shares,
                     "current_price_usd": analysis["current_price"],
                     "current_weight": current_weight,
-                    "reason": f"{recommendation} - Score: {score:.1f}/100. Moderate underperformance - selling {sell_percentage*100:.0f}% ({sell_shares} shares, ${sell_value_usd:,.2f})"
+                    "current_score": current_score,
+                    "better_alternatives": better_alternatives[:2],  # Top 2 alternatives
+                    "reason": f"{reason} - selling {sell_percentage*100:.0f}% ({sell_shares} shares, ${sell_value_usd:,.2f})"
                 })
         
         # Check for holdings with very low scores but not yet SELL (warning threshold)
