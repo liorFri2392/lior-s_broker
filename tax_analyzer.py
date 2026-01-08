@@ -70,8 +70,23 @@ class TaxAnalyzer:
         total_gain_ils = total_gain_usd * exchange_rate
         
         # Check if long-term (>2 years)
-        purchase_dt = datetime.fromisoformat(purchase_date.replace('Z', '+00:00'))
-        sale_dt = datetime.fromisoformat(sale_date.replace('Z', '+00:00'))
+        # Handle None or invalid purchase_date
+        if not purchase_date:
+            purchase_date = datetime.now().isoformat()
+        
+        # Normalize timezone format
+        if isinstance(purchase_date, str):
+            purchase_date_normalized = purchase_date.replace('Z', '+00:00')
+        else:
+            purchase_date_normalized = purchase_date.isoformat() if hasattr(purchase_date, 'isoformat') else datetime.now().isoformat()
+        
+        if isinstance(sale_date, str):
+            sale_date_normalized = sale_date.replace('Z', '+00:00')
+        else:
+            sale_date_normalized = sale_date.isoformat() if hasattr(sale_date, 'isoformat') else datetime.now().isoformat()
+        
+        purchase_dt = datetime.fromisoformat(purchase_date_normalized)
+        sale_dt = datetime.fromisoformat(sale_date_normalized)
         holding_period = (sale_dt - purchase_dt).days
         
         is_long_term = holding_period > 730  # 2 years

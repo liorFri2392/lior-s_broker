@@ -1292,7 +1292,15 @@ class PortfolioAnalyzer:
                                 
                                 # Find holding info for tax calculation
                                 holding = next((h for h in portfolio.get("holdings", []) if h.get("ticker") == ticker), None)
-                                purchase_date = holding.get("purchase_date") if holding else portfolio.get("last_updated", datetime.now().isoformat())
+                                # Ensure purchase_date is not None
+                                purchase_date = None
+                                if holding:
+                                    purchase_date = holding.get("purchase_date")
+                                if not purchase_date:
+                                    purchase_date = portfolio.get("last_updated")
+                                if not purchase_date:
+                                    purchase_date = datetime.now().isoformat()
+                                
                                 # Use last_price as cost_basis if no cost_basis recorded (assume bought at last known price)
                                 cost_basis = holding.get("cost_basis", holding.get("last_price", analysis["current_price"])) if holding else analysis["current_price"]
                                 
@@ -1394,8 +1402,8 @@ class PortfolioAnalyzer:
             sell_tickers = [r["ticker"] for r in rebalancing["recommendations"] if r["action"] == "SELL"]
             # Only add buy recommendations if not already added for rebalancing
             if not rebalancing["buy_recommendations"]:
-                buy_recs = self.find_best_etfs_to_buy(total_sell_amount, current_tickers, exclude_tickers=sell_tickers)
-                rebalancing["buy_recommendations"] = buy_recs
+            buy_recs = self.find_best_etfs_to_buy(total_sell_amount, current_tickers, exclude_tickers=sell_tickers)
+            rebalancing["buy_recommendations"] = buy_recs
         
         return rebalancing
     
