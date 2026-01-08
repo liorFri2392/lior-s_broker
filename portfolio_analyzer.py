@@ -1474,6 +1474,13 @@ class PortfolioAnalyzer:
         print("\n" + "=" * 60)
         print(f"Analysis completed at: {results['timestamp']}")
         print("=" * 60 + "\n")
+        
+        # Remind user to update GitHub secret if portfolio changed
+        if rebalancing.get("needed") or any(a.get("recommendation") in ["BUY", "SELL"] for a in results["holdings_analysis"]):
+            print("💡 REMINDER: Update GitHub Secret")
+            print("   Your portfolio has changed. Update the secret so GitHub Actions uses the latest data:")
+            print("   Run: make update-secret")
+            print("   Or go to: https://github.com/liorFri2392/lior-s_broker/settings/secrets/actions\n")
 
 if __name__ == "__main__":
     analyzer = PortfolioAnalyzer()
