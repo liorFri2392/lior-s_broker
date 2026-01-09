@@ -47,6 +47,7 @@ class DepositAdvisor:
         # Technology & Innovation (High Growth Trends)
         "TECHNOLOGY": ["XLK", "VGT", "FTEC", "QQQ"],
         "AI_AND_ROBOTICS": ["BOTZ", "ROBO", "AIQ", "CHAT"],  # IRBO removed - possibly delisted
+        "QUANTUM_COMPUTING": ["QUBT", "QTUM"],  # Quantum computing - emerging technology
         "SEMICONDUCTORS": ["SOXX", "SMH", "XSD"],
         "CLOUD_COMPUTING": ["WCLD", "SKYY", "CLOU"],
         "CYBERSECURITY": ["HACK", "CIBR", "BUG"],
@@ -84,8 +85,11 @@ class DepositAdvisor:
         "TIPS": ["TIP", "SCHP", "VTIP"],
         
         # Digital Assets
-        "CRYPTO": ["GBTC", "BITO", "ETHE"],
-        "BLOCKCHAIN": ["BLOK", "LEGR", "KOIN"],
+        # WARNING: Crypto is HIGH RISK - Not recommended for young families with mortgages
+        # Only consider if you have high risk tolerance and can afford to lose the investment
+        # Bitcoin ETFs: BITO (Bitcoin futures), GBTC (Grayscale Bitcoin Trust)
+        "CRYPTO": ["GBTC", "BITO", "ETHE", "IBIT", "FBTC"],  # Bitcoin ETFs (high volatility)
+        "BLOCKCHAIN": ["BLOK", "LEGR", "KOIN"],  # Blockchain technology (less risky than direct crypto)
         
         # Investment Styles
         "DIVIDEND": ["VYM", "SCHD", "DVY"],
@@ -191,7 +195,13 @@ class DepositAdvisor:
         }
     
     def analyze_etf(self, ticker: str, verbose: bool = False) -> Dict:
-        """Analyze an ETF for investment potential with industry trend analysis."""
+        """
+        Analyze an ETF for investment potential with industry trend analysis.
+        
+        Note: This function can analyze ANY ETF ticker, even if not in ETF_CATEGORIES.
+        If you discover a new ETF, you can analyze it directly by ticker.
+        The system will automatically fetch data and calculate scores.
+        """
         if verbose:
             print(f"Analyzing ETF: {ticker}...")
         
@@ -611,9 +621,10 @@ class DepositAdvisor:
             # Core Satellite (essential diversification)
             "IWM", "VB", "XLK", "VGT", "VWO", "EEM", "XLV", "VHT",  # Small Cap, Tech, Emerging, Healthcare
             # High-growth trends
-            "BOTZ", "ROBO", "SOXX", "SMH",  # AI/Robotics, Semiconductors
-            "WCLD", "SKYY", "HACK", "CIBR",  # Cloud, Cybersecurity
-            "ICLN", "QCLN", "DRIV", "IDRV",  # Clean Energy, Electric Vehicles
+            "BOTZ", "ROBO", "QUBT", "QTUM",  # AI/Robotics, Quantum Computing
+            "SOXX", "SMH", "WCLD", "SKYY",  # Semiconductors, Cloud
+            "HACK", "CIBR", "ICLN", "QCLN",  # Cybersecurity, Clean Energy
+            "DRIV", "IDRV",  # Electric Vehicles
             # Defensive growth
             "VNQ", "SCHH", "IFRA", "PAVE",  # Real Estate, Infrastructure
             # Investment styles

@@ -747,9 +747,10 @@ class PortfolioAnalyzer:
             # Core Satellite (essential diversification)
             "IWM", "VB", "XLK", "VGT", "VWO", "EEM", "XLV", "VHT",  # Small Cap, Tech, Emerging, Healthcare
             # High-growth trends
-            "BOTZ", "ROBO", "SOXX", "SMH",  # AI/Robotics, Semiconductors
-            "WCLD", "SKYY", "HACK", "CIBR",  # Cloud, Cybersecurity
-            "ICLN", "QCLN", "DRIV", "IDRV",  # Clean Energy, Electric Vehicles
+            "BOTZ", "ROBO", "QUBT", "QTUM",  # AI/Robotics, Quantum Computing
+            "SOXX", "SMH", "WCLD", "SKYY",  # Semiconductors, Cloud
+            "HACK", "CIBR", "ICLN", "QCLN",  # Cybersecurity, Clean Energy
+            "DRIV", "IDRV",  # Electric Vehicles
             # Defensive growth
             "VNQ", "SCHH", "IFRA", "PAVE",  # Real Estate, Infrastructure
             # Investment styles

@@ -194,6 +194,8 @@ class CriticalAlertSystem:
         
         # 80/20 Strategy: Focus on Core, Satellite, and Bonds
         # Exclude high-risk categories (leveraged, crypto)
+        # Note: Crypto is excluded by default for balanced risk profile
+        # To enable crypto, remove "CRYPTO" from excluded_categories (not recommended for young families)
         excluded_categories = ["LEVERAGED_2X", "LEVERAGED_3X", "LEVERAGED_INVERSE", "CRYPTO"]
         
         # Core ETFs (essential for portfolio stability)
@@ -205,7 +207,7 @@ class CriticalAlertSystem:
             # Core Satellite (essential diversification)
             "US_SMALL_CAP", "TECHNOLOGY", "HEALTHCARE", "EMERGING_MARKETS",
             # High-growth trends (but not leveraged)
-            "AI_AND_ROBOTICS", "SEMICONDUCTORS", "CLOUD_COMPUTING", "CYBERSECURITY",
+            "AI_AND_ROBOTICS", "QUANTUM_COMPUTING", "SEMICONDUCTORS", "CLOUD_COMPUTING", "CYBERSECURITY",
             "ELECTRIC_VEHICLES", "CLEAN_ENERGY",
             # Defensive growth
             "REAL_ESTATE", "INFRASTRUCTURE",
