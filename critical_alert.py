@@ -52,6 +52,19 @@ class CriticalAlertSystem:
             weekday = datetime.now().weekday()
             return weekday < 5
     
+    def detect_emerging_trends(self) -> List[Dict]:
+        """
+        Detect emerging trends across all categories.
+        This automatically identifies new hot sectors and trends.
+        """
+        excluded_categories = ["LEVERAGED_2X", "LEVERAGED_3X", "LEVERAGED_INVERSE", "CRYPTO"]
+        emerging_trends = self.advisor.detect_emerging_trends(excluded_categories)
+        
+        # Filter to only very strong trends for critical alerts
+        strong_trends = [t for t in emerging_trends if t.get("trend") == "STRONG_UPTREND" and t.get("avg_momentum", 0) > 8]
+        
+        return strong_trends
+    
     def check_critical_opportunities(self) -> Dict:
         """Run comprehensive analysis to find critical opportunities."""
         print("=" * 60)
@@ -159,7 +172,32 @@ class CriticalAlertSystem:
             elif not needs_balancing:
                 print("\n✅ Portfolio is balanced - no critical buy opportunities needed")
         
-        # 3. Check for market anomalies or extreme opportunities
+        # 3. Detect emerging trends (NEW - automatically identifies hot sectors)
+        print("\n🔍 Detecting emerging trends and hot sectors...")
+        emerging_trends = self.detect_emerging_trends()
+        if emerging_trends:
+            print(f"   Found {len(emerging_trends)} emerging trends with strong momentum!")
+            for trend in emerging_trends[:3]:  # Top 3 emerging trends
+                category = trend.get("category", "")
+                momentum = trend.get("avg_momentum", 0)
+                return_pct = trend.get("avg_return", 0)
+                etfs = trend.get("etfs", [])
+                
+                critical_items.append({
+                    "type": "EMERGING_TREND",
+                    "category": category,
+                    "priority": "HIGH",
+                    "reason": f"🔥 EMERGING TREND: {category} showing strong momentum ({momentum:.1f}% in 20 days, {return_pct:.1f}% in 6mo)",
+                    "etfs": etfs,
+                    "momentum": momentum,
+                    "return": return_pct,
+                    "score": trend.get("score", 50)
+                })
+                print(f"   🔥 {category}: {momentum:.1f}% momentum, {return_pct:.1f}% return - ETFs: {', '.join(etfs)}")
+        else:
+            print("   No strong emerging trends detected at this time")
+        
+        # 4. Check for market anomalies or extreme opportunities
         print("\nChecking for market anomalies...")
         anomalies = self.check_market_anomalies()
         critical_items.extend(anomalies)

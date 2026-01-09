@@ -194,6 +194,45 @@ class DepositAdvisor:
             "avg_momentum": avg_momentum
         }
     
+    def detect_emerging_trends(self, excluded_categories: List[str] = None) -> List[Dict]:
+        """
+        Scan all categories to detect emerging trends and hot sectors.
+        This function automatically identifies which categories are showing strong momentum.
+        
+        Returns:
+            List of categories with strong trends, sorted by momentum score
+        """
+        excluded_categories = excluded_categories or ["LEVERAGED_2X", "LEVERAGED_3X", "LEVERAGED_INVERSE", "CRYPTO"]
+        
+        emerging_trends = []
+        
+        print("🔍 Scanning all categories for emerging trends...")
+        
+        for category, etfs in self.ETF_CATEGORIES.items():
+            # Skip excluded categories
+            if category in excluded_categories:
+                continue
+            
+            # Analyze this category
+            trend_data = self.analyze_industry_trends(category)
+            
+            # Only include categories with strong positive trends
+            if trend_data.get("trend") in ["STRONG_UPTREND", "UPTREND"]:
+                emerging_trends.append({
+                    "category": category,
+                    "trend": trend_data.get("trend"),
+                    "score": trend_data.get("score", 50),
+                    "avg_return": trend_data.get("avg_return", 0),
+                    "avg_momentum": trend_data.get("avg_momentum", 0),
+                    "reason": trend_data.get("reason", ""),
+                    "etfs": etfs[:3]  # Top 3 ETFs in this category
+                })
+        
+        # Sort by momentum (highest first)
+        emerging_trends.sort(key=lambda x: x.get("avg_momentum", 0), reverse=True)
+        
+        return emerging_trends
+    
     def analyze_etf(self, ticker: str, verbose: bool = False) -> Dict:
         """
         Analyze an ETF for investment potential with industry trend analysis.
