@@ -681,6 +681,21 @@ class DepositAdvisor:
             if cat in self.ETF_CATEGORIES:
                 excluded_tickers.extend(self.ETF_CATEGORIES[cat])
         
+        # Check for emerging trends first (NEW - automatically detects hot sectors)
+        print("🔍 Checking for emerging trends and hot sectors...")
+        excluded_categories = ["LEVERAGED_2X", "LEVERAGED_3X", "LEVERAGED_INVERSE", "CRYPTO"]
+        emerging_trends = self.detect_emerging_trends(excluded_categories)
+        if emerging_trends:
+            print(f"   ✅ Found {len(emerging_trends)} emerging trends with strong momentum:")
+            for trend in emerging_trends[:3]:  # Show top 3
+                category = trend.get("category", "")
+                momentum = trend.get("avg_momentum", 0)
+                return_pct = trend.get("avg_return", 0)
+                print(f"      🔥 {category}: {momentum:.1f}% momentum, {return_pct:.1f}% return (6mo)")
+        else:
+            print("   ℹ️  No strong emerging trends detected at this time")
+        print()
+        
         print(f"🔍 Analyzing Core, Satellite, and Bond ETFs...")
         print("   (Excluding leveraged ETFs and crypto for balanced risk)\n")
         
