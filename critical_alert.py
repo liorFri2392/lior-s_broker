@@ -200,8 +200,21 @@ class CriticalAlertSystem:
         core_etfs = ["SPY", "VOO", "IVV", "VXUS", "VEA"]
         
         # Satellite ETFs (growth, but not too risky)
+        # Expanded to cover more opportunities while maintaining balanced risk
         satellite_categories = [
-            "US_SMALL_CAP", "TECHNOLOGY", "HEALTHCARE", "EMERGING_MARKETS"
+            # Core Satellite (essential diversification)
+            "US_SMALL_CAP", "TECHNOLOGY", "HEALTHCARE", "EMERGING_MARKETS",
+            # High-growth trends (but not leveraged)
+            "AI_AND_ROBOTICS", "SEMICONDUCTORS", "CLOUD_COMPUTING", "CYBERSECURITY",
+            "ELECTRIC_VEHICLES", "CLEAN_ENERGY",
+            # Defensive growth
+            "REAL_ESTATE", "INFRASTRUCTURE",
+            # Investment styles
+            "DIVIDEND", "GROWTH", "VALUE",
+            # Sector diversification
+            "FINANCIAL", "ENERGY", "CONSUMER",
+            # Thematic trends
+            "ESG", "BIOTECH"
         ]
         
         # Bond ETFs (protection)
@@ -218,7 +231,7 @@ class CriticalAlertSystem:
         # Add Satellite ETFs from safe categories
         for category in satellite_categories:
             if category in self.advisor.ETF_CATEGORIES:
-                etfs = self.advisor.ETF_CATEGORIES[category][:2]  # Top 2 from each category
+                etfs = self.advisor.ETF_CATEGORIES[category][:3]  # Top 3 from each category (increased from 2)
                 for etf in etfs:
                     etf_upper = etf.upper()
                     # Skip excluded categories
@@ -236,7 +249,8 @@ class CriticalAlertSystem:
         print("   (Excluding leveraged ETFs and crypto for balanced risk)")
         
         # Analyze in batches
-        for i, etf in enumerate(analyzed_etfs[:25]):  # Limit to 25 for performance
+        # Increased limit to 60 to cover more opportunities (was 25)
+        for i, etf in enumerate(analyzed_etfs[:60]):  # Limit to 60 for comprehensive coverage
             try:
                 etf_upper = etf.upper()
                 
@@ -380,8 +394,8 @@ class CriticalAlertSystem:
                         })
                 
                 # Progress indicator
-                if (i + 1) % 5 == 0:
-                    print(f"   Progress: {i + 1}/{min(len(analyzed_etfs), 25)} ETFs analyzed...")
+                if (i + 1) % 10 == 0:
+                    print(f"   Progress: {i + 1}/{min(len(analyzed_etfs), 60)} ETFs analyzed...")
                     
             except Exception as e:
                 logger.debug(f"Failed to analyze ETF {etf}: {e}")

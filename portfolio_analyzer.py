@@ -742,8 +742,21 @@ class PortfolioAnalyzer:
         
         # Define Core ETFs (priority)
         core_etfs = ["SPY", "VOO", "IVV", "VXUS", "VEA"]
-        # Define Satellite ETFs (safe growth)
-        satellite_etfs = ["IWM", "VB", "XLK", "VGT", "VWO", "EEM", "XLV", "VHT"]
+        # Define Satellite ETFs (safe growth) - Expanded for better coverage
+        satellite_etfs = [
+            # Core Satellite (essential diversification)
+            "IWM", "VB", "XLK", "VGT", "VWO", "EEM", "XLV", "VHT",  # Small Cap, Tech, Emerging, Healthcare
+            # High-growth trends
+            "BOTZ", "ROBO", "SOXX", "SMH",  # AI/Robotics, Semiconductors
+            "WCLD", "SKYY", "HACK", "CIBR",  # Cloud, Cybersecurity
+            "ICLN", "QCLN", "DRIV", "IDRV",  # Clean Energy, Electric Vehicles
+            # Defensive growth
+            "VNQ", "SCHH", "IFRA", "PAVE",  # Real Estate, Infrastructure
+            # Investment styles
+            "VYM", "SCHD", "VUG", "IVW", "VTV", "IVE",  # Dividend, Growth, Value
+            # Sector diversification
+            "XLF", "VFH", "XLE", "VDE", "XLY", "VCR"  # Financial, Energy, Consumer
+        ]
         # Define Bond ETFs (protection)
         bond_etfs = ["BND", "AGG", "TIP", "SCHP", "VTIP"]
         

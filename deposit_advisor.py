@@ -606,7 +606,21 @@ class DepositAdvisor:
         # Define Core ETFs (stable, broad market)
         core_etfs = ["SPY", "VOO", "IVV", "VXUS", "VEA"]  # US Large Cap + International
         # Define Satellite ETFs (growth, trends - but not too risky)
-        satellite_etfs = ["IWM", "VB", "XLK", "VGT", "VWO", "EEM", "XLV", "VHT"]  # Small Cap, Tech, Emerging, Healthcare
+        # Expanded to include more categories for better coverage
+        satellite_etfs = [
+            # Core Satellite (essential diversification)
+            "IWM", "VB", "XLK", "VGT", "VWO", "EEM", "XLV", "VHT",  # Small Cap, Tech, Emerging, Healthcare
+            # High-growth trends
+            "BOTZ", "ROBO", "SOXX", "SMH",  # AI/Robotics, Semiconductors
+            "WCLD", "SKYY", "HACK", "CIBR",  # Cloud, Cybersecurity
+            "ICLN", "QCLN", "DRIV", "IDRV",  # Clean Energy, Electric Vehicles
+            # Defensive growth
+            "VNQ", "SCHH", "IFRA", "PAVE",  # Real Estate, Infrastructure
+            # Investment styles
+            "VYM", "SCHD", "VUG", "IVW", "VTV", "IVE",  # Dividend, Growth, Value
+            # Sector diversification
+            "XLF", "VFH", "XLE", "VDE", "XLY", "VCR"  # Financial, Energy, Consumer
+        ]
         # Define Bonds (protection)
         bond_etfs = ["BND", "AGG", "TIP", "SCHP", "VTIP"]  # US Bonds + Inflation Protection
         
