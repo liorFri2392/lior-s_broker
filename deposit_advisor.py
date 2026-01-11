@@ -89,7 +89,7 @@ class DepositAdvisor:
         # Only consider if you have high risk tolerance and can afford to lose the investment
         # Bitcoin ETFs: BITO (Bitcoin futures), GBTC (Grayscale Bitcoin Trust)
         "CRYPTO": ["GBTC", "BITO", "ETHE", "IBIT", "FBTC"],  # Bitcoin ETFs (high volatility)
-        "BLOCKCHAIN": ["BLOK", "LEGR", "KOIN"],  # Blockchain technology (less risky than direct crypto)
+        "BLOCKCHAIN": ["BLOK", "LEGR"],  # Blockchain technology (less risky than direct crypto) - KOIN delisted
         
         # Investment Styles
         "DIVIDEND": ["VYM", "SCHD", "DVY"],
@@ -770,24 +770,24 @@ class DepositAdvisor:
         for etf in core_analyses[:2]:  # Top 2 Core ETFs
             if core_allocated < core_target:
                 amount = min(core_target * 0.5, core_target - core_allocated)  # Split between top 2
-                shares = int(amount / etf["current_price"]) if etf["current_price"] > 0 else 0
-                if shares > 0:
-                    actual_amount = shares * etf["current_price"]
-                    allocations.append({
-                        "ticker": etf["ticker"],
-                        "name": etf.get("name", etf["ticker"]),
-                        "allocation_amount": actual_amount,
-                        "allocation_percent": (actual_amount / deposit_amount_usd) * 100,
-                        "shares": shares,
-                        "price": etf["current_price"],
-                        "score": etf["score"],
-                        "recommendation": etf["recommendation"],
-                        "reasons": etf["reasons"],
-                        "action": "NEW" if etf["ticker"] not in current_holdings else "INCREASE",
-                        "category": "CORE"
-                    })
-                    core_allocated += actual_amount
-                    remaining_stocks -= actual_amount
+            shares = int(amount / etf["current_price"]) if etf["current_price"] > 0 else 0
+            if shares > 0:
+                actual_amount = shares * etf["current_price"]
+                allocations.append({
+                    "ticker": etf["ticker"],
+                    "name": etf.get("name", etf["ticker"]),
+                    "allocation_amount": actual_amount,
+                    "allocation_percent": (actual_amount / deposit_amount_usd) * 100,
+                    "shares": shares,
+                    "price": etf["current_price"],
+                    "score": etf["score"],
+                    "recommendation": etf["recommendation"],
+                    "reasons": etf["reasons"],
+                    "action": "NEW" if etf["ticker"] not in current_holdings else "INCREASE",
+                    "category": "CORE"
+                })
+                core_allocated += actual_amount
+                remaining_stocks -= actual_amount
         
         # 2. Satellite Stocks (30% of total = 37.5% of stocks allocation)
         satellite_target = stocks_target * 0.375  # 30% of total portfolio
