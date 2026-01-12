@@ -770,7 +770,9 @@ class DepositAdvisor:
         for etf in core_analyses[:2]:  # Top 2 Core ETFs
             if core_allocated < core_target:
                 amount = min(core_target * 0.5, core_target - core_allocated)  # Split between top 2
-            shares = int(amount / etf["current_price"]) if etf["current_price"] > 0 else 0
+                shares = int(amount / etf["current_price"]) if etf["current_price"] > 0 else 0
+            else:
+                shares = 0
             if shares > 0:
                 actual_amount = shares * etf["current_price"]
                 allocations.append({
@@ -814,7 +816,7 @@ class DepositAdvisor:
                     satellite_allocated += actual_amount
                     remaining_stocks -= actual_amount
         
-        # 3. Bonds (25% of total)
+        # 3. Bonds (20% of total)
         bond_allocated = 0
         for etf in bond_analyses[:2]:  # Top 2 Bond ETFs
             if bond_allocated < bonds_target:
@@ -840,33 +842,95 @@ class DepositAdvisor:
                     bond_allocated += actual_amount
                     remaining_bonds -= actual_amount
         
-        # 4. Allocate any remaining to Core (safest option)
+        # 4. Allocate any remaining funds to maximize usage
         remaining_total = remaining_stocks + remaining_bonds
-        if remaining_total > 50 and core_analyses:
-            top_core = core_analyses[0]
-            shares = int(remaining_total / top_core["current_price"]) if top_core["current_price"] > 0 else 0
-            if shares > 0:
-                actual_amount = shares * top_core["current_price"]
-                # Check if already in allocations
-                existing = next((a for a in allocations if a["ticker"] == top_core["ticker"]), None)
-                if existing:
-                    existing["shares"] += shares
-                    existing["allocation_amount"] += actual_amount
-                    existing["allocation_percent"] = (existing["allocation_amount"] / deposit_amount_usd) * 100
-                else:
-                    allocations.append({
-                        "ticker": top_core["ticker"],
-                        "name": top_core.get("name", top_core["ticker"]),
-                        "allocation_amount": actual_amount,
-                        "allocation_percent": (actual_amount / deposit_amount_usd) * 100,
-                        "shares": shares,
-                        "price": top_core["current_price"],
-                        "score": top_core["score"],
-                        "recommendation": top_core["recommendation"],
-                        "reasons": top_core["reasons"],
-                        "action": "NEW" if top_core["ticker"] not in current_holdings else "INCREASE",
-                        "category": "CORE"
-                    })
+        
+        # Try to allocate remaining funds, prioritizing by category
+        if remaining_total > 5:  # Use even small amounts
+            # First try Core (safest)
+            if remaining_total > 0 and core_analyses:
+                top_core = core_analyses[0]
+                shares = int(remaining_total / top_core["current_price"]) if top_core["current_price"] > 0 else 0
+                if shares > 0:
+                    actual_amount = shares * top_core["current_price"]
+                    # Check if already in allocations
+                    existing = next((a for a in allocations if a["ticker"] == top_core["ticker"]), None)
+                    if existing:
+                        existing["shares"] += shares
+                        existing["allocation_amount"] += actual_amount
+                        existing["allocation_percent"] = (existing["allocation_amount"] / deposit_amount_usd) * 100
+                        remaining_total -= actual_amount
+                    else:
+                        allocations.append({
+                            "ticker": top_core["ticker"],
+                            "name": top_core.get("name", top_core["ticker"]),
+                            "allocation_amount": actual_amount,
+                            "allocation_percent": (actual_amount / deposit_amount_usd) * 100,
+                            "shares": shares,
+                            "price": top_core["current_price"],
+                            "score": top_core["score"],
+                            "recommendation": top_core["recommendation"],
+                            "reasons": top_core["reasons"],
+                            "action": "NEW" if top_core["ticker"] not in current_holdings else "INCREASE",
+                            "category": "CORE"
+                        })
+                        remaining_total -= actual_amount
+            
+            # If still remaining, try Satellite
+            if remaining_total > 5 and satellite_analyses:
+                top_satellite = satellite_analyses[0]
+                shares = int(remaining_total / top_satellite["current_price"]) if top_satellite["current_price"] > 0 else 0
+                if shares > 0:
+                    actual_amount = shares * top_satellite["current_price"]
+                    existing = next((a for a in allocations if a["ticker"] == top_satellite["ticker"]), None)
+                    if existing:
+                        existing["shares"] += shares
+                        existing["allocation_amount"] += actual_amount
+                        existing["allocation_percent"] = (existing["allocation_amount"] / deposit_amount_usd) * 100
+                        remaining_total -= actual_amount
+                    else:
+                        allocations.append({
+                            "ticker": top_satellite["ticker"],
+                            "name": top_satellite.get("name", top_satellite["ticker"]),
+                            "allocation_amount": actual_amount,
+                            "allocation_percent": (actual_amount / deposit_amount_usd) * 100,
+                            "shares": shares,
+                            "price": top_satellite["current_price"],
+                            "score": top_satellite["score"],
+                            "recommendation": top_satellite["recommendation"],
+                            "reasons": top_satellite["reasons"],
+                            "action": "NEW" if top_satellite["ticker"] not in current_holdings else "INCREASE",
+                            "category": "SATELLITE"
+                        })
+                        remaining_total -= actual_amount
+            
+            # If still remaining, try Bonds
+            if remaining_total > 5 and bond_analyses:
+                top_bond = bond_analyses[0]
+                shares = int(remaining_total / top_bond["current_price"]) if top_bond["current_price"] > 0 else 0
+                if shares > 0:
+                    actual_amount = shares * top_bond["current_price"]
+                    existing = next((a for a in allocations if a["ticker"] == top_bond["ticker"]), None)
+                    if existing:
+                        existing["shares"] += shares
+                        existing["allocation_amount"] += actual_amount
+                        existing["allocation_percent"] = (existing["allocation_amount"] / deposit_amount_usd) * 100
+                        remaining_total -= actual_amount
+                    else:
+                        allocations.append({
+                            "ticker": top_bond["ticker"],
+                            "name": top_bond.get("name", top_bond["ticker"]),
+                            "allocation_amount": actual_amount,
+                            "allocation_percent": (actual_amount / deposit_amount_usd) * 100,
+                            "shares": shares,
+                            "price": top_bond["current_price"],
+                            "score": top_bond["score"],
+                            "recommendation": top_bond["recommendation"],
+                            "reasons": top_bond["reasons"],
+                            "action": "NEW" if top_bond["ticker"] not in current_holdings else "INCREASE",
+                            "category": "BONDS"
+                        })
+                        remaining_total -= actual_amount
         
         return allocations
     
