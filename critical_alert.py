@@ -172,32 +172,111 @@ class CriticalAlertSystem:
             elif not needs_balancing:
                 print("\n✅ Portfolio is balanced - no critical buy opportunities needed")
         
-        # 3. Detect emerging trends (NEW - automatically identifies hot sectors)
+        # 3. Detect emerging trends and recommend replacing weak holdings
         print("\n🔍 Detecting emerging trends and hot sectors...")
         emerging_trends = self.detect_emerging_trends()
         if emerging_trends:
             print(f"   Found {len(emerging_trends)} emerging trends with strong momentum!")
+            
+            # Get current holdings for comparison
+            holdings_analysis = portfolio_analysis.get("holdings_analysis", []) if portfolio_analysis else []
+            portfolio_metrics = portfolio_analysis.get("portfolio_metrics", {}) if portfolio_analysis else {}
+            total_value = portfolio_metrics.get("total_value", 0)
+            
             for trend in emerging_trends[:3]:  # Top 3 emerging trends
                 category = trend.get("category", "")
                 momentum = trend.get("avg_momentum", 0)
                 return_pct = trend.get("avg_return", 0)
-                etfs = trend.get("etfs", [])
+                trend_etfs = trend.get("etfs", [])
                 
+                # Check if we should recommend replacing weak holdings with hot trend ETFs
+                if trend_etfs and holdings_analysis:
+                    # Find weak holdings (score < 50 or STRONG SELL)
+                    weak_holdings = [
+                        h for h in holdings_analysis 
+                        if h.get("recommendation_score", 50) < 50 
+                        or h.get("recommendation", "") == "STRONG SELL"
+                    ]
+                    
+                    # Analyze the best ETF from the hot trend
+                    best_trend_etf = None
+                    best_trend_score = 0
+                    for etf_ticker in trend_etfs[:2]:  # Check top 2 from trend
+                        try:
+                            etf_analysis = self.advisor.analyze_etf(etf_ticker, verbose=False)
+                            etf_score = etf_analysis.get("score", 0)
+                            if etf_score > best_trend_score:
+                                best_trend_score = etf_score
+                                best_trend_etf = {
+                                    "ticker": etf_ticker,
+                                    "score": etf_score,
+                                    "analysis": etf_analysis,
+                                    "category": category,
+                                    "momentum": momentum,
+                                    "return": return_pct
+                                }
+                        except Exception as e:
+                            logger.debug(f"Failed to analyze trend ETF {etf_ticker}: {e}")
+                            continue
+                    
+                    # If we found a strong trend ETF and have weak holdings, recommend replacement
+                    if best_trend_etf and best_trend_etf["score"] >= 70 and weak_holdings:
+                        # Find the weakest holding to replace
+                        weakest_holding = min(weak_holdings, key=lambda h: h.get("recommendation_score", 0))
+                        weakest_score = weakest_holding.get("recommendation_score", 0)
+                        weakest_ticker = weakest_holding.get("ticker", "")
+                        weakest_value = weakest_holding.get("current_value", 0)
+                        
+                        # Only recommend if the trend ETF is significantly better (at least 20 points difference)
+                        if best_trend_etf["score"] >= weakest_score + 20:
+                            shares_to_sell = int(weakest_holding.get("quantity", 0) * 0.5)  # Sell 50% of weak holding
+                            sell_amount = shares_to_sell * weakest_holding.get("current_price", 0)
+                            
+                            if sell_amount > 100:  # Only if meaningful amount
+                                critical_items.append({
+                                    "type": "REPLACE",
+                                    "priority": "HIGH",
+                                    "sell_ticker": weakest_ticker,
+                                    "sell_score": weakest_score,
+                                    "sell_amount": sell_amount,
+                                    "sell_shares": shares_to_sell,
+                                    "buy_ticker": best_trend_etf["ticker"],
+                                    "buy_score": best_trend_etf["score"],
+                                    "buy_category": category,
+                                    "reason": f"🔄 REPLACE: Sell {weakest_ticker} (Score: {weakest_score:.1f}/100) → Buy {best_trend_etf['ticker']} from 🔥 {category} trend (Score: {best_trend_etf['score']:.1f}/100, {momentum:.1f}% momentum)",
+                                    "momentum": momentum,
+                                    "return": return_pct,
+                                    "details": f"Replace weak holding with hot trend: {category} showing {momentum:.1f}% momentum and {return_pct:.1f}% return"
+                                })
+                                print(f"   🔄 REPLACE: {weakest_ticker} (Score: {weakest_score:.1f}) → {best_trend_etf['ticker']} from {category} (Score: {best_trend_etf['score']:.1f})")
+                                continue  # Skip adding as separate EMERGING_TREND if we already added REPLACE
+                
+                # If no replacement recommended, add as regular emerging trend alert
                 critical_items.append({
                     "type": "EMERGING_TREND",
                     "category": category,
                     "priority": "HIGH",
                     "reason": f"🔥 EMERGING TREND: {category} showing strong momentum ({momentum:.1f}% in 20 days, {return_pct:.1f}% in 6mo)",
-                    "etfs": etfs,
+                    "etfs": trend_etfs,
                     "momentum": momentum,
                     "return": return_pct,
                     "score": trend.get("score", 50)
                 })
-                print(f"   🔥 {category}: {momentum:.1f}% momentum, {return_pct:.1f}% return - ETFs: {', '.join(etfs)}")
+                print(f"   🔥 {category}: {momentum:.1f}% momentum, {return_pct:.1f}% return - ETFs: {', '.join(trend_etfs)}")
         else:
             print("   No strong emerging trends detected at this time")
         
-        # 4. Check for market anomalies or extreme opportunities
+        # 4. Deep analysis: Compare ALL existing holdings with market alternatives
+        print("\n🔍 Deep Analysis: Comparing existing holdings with market alternatives...")
+        if portfolio_analysis and holdings_analysis:
+            replacement_opportunities = self.find_better_alternatives(holdings_analysis, portfolio_metrics)
+            if replacement_opportunities:
+                print(f"   Found {len(replacement_opportunities)} better alternatives for existing holdings!")
+                critical_items.extend(replacement_opportunities)
+            else:
+                print("   ✅ All existing holdings are performing well - no better alternatives found")
+        
+        # 5. Check for market anomalies or extreme opportunities
         print("\nChecking for market anomalies...")
         anomalies = self.check_market_anomalies()
         critical_items.extend(anomalies)
@@ -443,6 +522,139 @@ class CriticalAlertSystem:
         
         return critical_buys
     
+    def find_better_alternatives(self, holdings_analysis: List[Dict], portfolio_metrics: Dict) -> List[Dict]:
+        """
+        Deep analysis: Compare ALL existing holdings with market alternatives.
+        Finds better ETFs even if current holdings are not weak.
+        This ensures portfolio is always optimized according to 80/20 strategy.
+        """
+        replacement_opportunities = []
+        
+        # Get current portfolio
+        portfolio = self.analyzer.load_portfolio()
+        current_tickers = [h.get("ticker", "").upper() for h in portfolio.get("holdings", [])]
+        total_value = portfolio_metrics.get("total_value", 0)
+        
+        # Define categories for comparison
+        core_etfs = ["SPY", "VOO", "IVV", "VXUS", "VEA"]
+        bond_etfs = ["BND", "AGG", "TIP", "SCHP", "VTIP"]
+        
+        # Get all satellite categories from advisor
+        satellite_categories = [
+            "US_SMALL_CAP", "TECHNOLOGY", "HEALTHCARE", "EMERGING_MARKETS",
+            "AI_AND_ROBOTICS", "QUANTUM_COMPUTING", "SEMICONDUCTORS", "CLOUD_COMPUTING", "CYBERSECURITY",
+            "ELECTRIC_VEHICLES", "CLEAN_ENERGY", "REAL_ESTATE", "INFRASTRUCTURE",
+            "DIVIDEND", "GROWTH", "VALUE", "FINANCIAL", "ENERGY", "CONSUMER", "ESG", "BIOTECH"
+        ]
+        
+        print(f"   Analyzing {len(holdings_analysis)} existing holdings for better alternatives...")
+        
+        for holding in holdings_analysis:
+            ticker = holding.get("ticker", "").upper()
+            current_score = holding.get("recommendation_score", 50)
+            current_value = holding.get("current_value", 0)
+            current_weight = (current_value / total_value * 100) if total_value > 0 else 0
+            
+            # Skip if holding is too small (<2% of portfolio) - not worth replacing
+            if current_weight < 2:
+                continue
+            
+            # Determine category
+            is_core = ticker in [e.upper() for e in core_etfs]
+            is_bond = ticker in [e.upper() for e in bond_etfs]
+            
+            # Find candidates in same category
+            candidates = []
+            category_name = ""
+            
+            if is_core:
+                candidates = [e for e in core_etfs if e.upper() != ticker and e.upper() not in current_tickers]
+                category_name = "CORE"
+            elif is_bond:
+                candidates = [e for e in bond_etfs if e.upper() != ticker and e.upper() not in current_tickers]
+                category_name = "BONDS"
+            else:
+                # For satellite ETFs, search in all satellite categories
+                category_name = "SATELLITE"
+                for cat in satellite_categories:
+                    if cat in self.advisor.ETF_CATEGORIES:
+                        cat_etfs = self.advisor.ETF_CATEGORIES[cat]
+                        # Add top 2 from each category that we don't already have
+                        for etf in cat_etfs[:2]:
+                            if etf.upper() != ticker and etf.upper() not in current_tickers:
+                                if etf.upper() not in [c.upper() for c in candidates]:
+                                    candidates.append(etf)
+            
+            # Analyze candidates to find better alternatives
+            best_alternative = None
+            best_score = 0
+            best_analysis = None
+            
+            for candidate in candidates[:5]:  # Check top 5 candidates
+                try:
+                    candidate_analysis = self.advisor.analyze_etf(candidate, verbose=False)
+                    candidate_score = candidate_analysis.get("score", 0)
+                    
+                    # Boost score for Core and Bonds (they're essential for 80/20 strategy)
+                    if is_core:
+                        candidate_score = min(100, candidate_score + 15)
+                    elif is_bond:
+                        candidate_score = min(100, candidate_score + 20)
+                    
+                    # Check if significantly better (at least 15 points higher for moderate replacement)
+                    # Or at least 25 points higher for strong replacement
+                    score_diff = candidate_score - current_score
+                    
+                    if score_diff >= 15 and candidate_score > best_score:
+                        # Additional checks: ensure alternative has good fundamentals
+                        expected_return = candidate_analysis.get("mid_term_forecast", {}).get("expected_3yr_return", 0)
+                        
+                        # Filter unrealistic returns
+                        if -50 <= expected_return <= 50:
+                            best_score = candidate_score
+                            best_alternative = candidate
+                            best_analysis = candidate_analysis
+                            
+                except Exception as e:
+                    logger.debug(f"Failed to analyze alternative {candidate}: {e}")
+                    continue
+            
+            # If found significantly better alternative, recommend replacement
+            if best_alternative and best_analysis:
+                score_diff = best_score - current_score
+                priority = "HIGH" if score_diff >= 25 else "MEDIUM"
+                
+                # Only recommend if meaningful improvement
+                if score_diff >= 15:
+                    # Recommend replacing 30-50% depending on score difference
+                    replace_percentage = 0.5 if score_diff >= 25 else 0.3
+                    shares_to_sell = int(holding.get("quantity", 0) * replace_percentage)
+                    sell_amount = shares_to_sell * holding.get("current_price", 0)
+                    
+                    if sell_amount > 100:  # Only if meaningful amount
+                        expected_return = best_analysis.get("mid_term_forecast", {}).get("expected_3yr_return", 0)
+                        current_return = holding.get("mid_term_forecast", {}).get("expected_3yr_return", 0) if isinstance(holding.get("mid_term_forecast"), dict) else 0
+                        
+                        replacement_opportunities.append({
+                            "type": "REPLACE",
+                            "priority": priority,
+                            "sell_ticker": ticker,
+                            "sell_score": current_score,
+                            "sell_amount": sell_amount,
+                            "sell_shares": shares_to_sell,
+                            "sell_category": category_name,
+                            "buy_ticker": best_alternative,
+                            "buy_score": best_score,
+                            "buy_category": category_name,
+                            "score_improvement": score_diff,
+                            "reason": f"🔄 OPTIMIZE: {ticker} (Score: {current_score:.1f}/100) → {best_alternative} (Score: {best_score:.1f}/100, +{score_diff:.1f} points) - Better performance for {category_name} allocation",
+                            "details": f"Replace {replace_percentage*100:.0f}% of {ticker} with {best_alternative} to improve {category_name} allocation. Expected return: {expected_return:.1f}% vs {current_return:.1f}%",
+                            "strategy": "80/20 Balanced Growth"
+                        })
+                        print(f"   🔄 {ticker} (Score: {current_score:.1f}) → {best_alternative} (Score: {best_score:.1f}, +{score_diff:.1f})")
+        
+        return replacement_opportunities
+    
     def check_market_anomalies(self) -> List[Dict]:
         """Check for market anomalies that require immediate attention."""
         anomalies = []
@@ -495,8 +707,21 @@ class CriticalAlertSystem:
             # Count by type
             buy_count = sum(1 for item in critical_items if item.get("type") == "BUY")
             sell_count = sum(1 for item in critical_items if item.get("type") == "SELL")
+            replace_count = sum(1 for item in critical_items if item.get("type") == "REPLACE")
+            trend_count = sum(1 for item in critical_items if item.get("type") == "EMERGING_TREND")
             
-            subject = f"URGENT: {buy_count} Buy{'s' if buy_count != 1 else ''}, {sell_count} Sell{'s' if sell_count != 1 else ''} Required"
+            # Build subject line
+            actions = []
+            if replace_count > 0:
+                actions.append(f"{replace_count} Replace{'s' if replace_count != 1 else ''}")
+            if buy_count > 0:
+                actions.append(f"{buy_count} Buy{'s' if buy_count != 1 else ''}")
+            if sell_count > 0:
+                actions.append(f"{sell_count} Sell{'s' if sell_count != 1 else ''}")
+            if trend_count > 0 and not actions:  # Only add if no other actions
+                actions.append(f"{trend_count} Hot Trend{'s' if trend_count != 1 else ''}")
+            
+            subject = f"URGENT: {', '.join(actions)} Required" if actions else "Portfolio Alert"
             
             success = notifier.send_critical_alert(subject, critical_items, portfolio_value)
             

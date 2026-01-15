@@ -112,6 +112,73 @@ class EmailNotifier:
                         <p><strong>Current Score:</strong> {item.get('score', 0)}/100</p>
                     </div>
                     """
+                elif action_type == "REPLACE":
+                    # Check if it's an optimization (better alternative) or trend replacement
+                    is_optimization = "OPTIMIZE" in item.get('reason', '') or item.get('strategy') is not None
+                    
+                    if is_optimization:
+                        body += f"""
+                        <div class="action" style="background-color: #e8f5e9; border-left: 4px solid #4caf50;">
+                            <h3>🔄 OPTIMIZE: {item.get('sell_ticker', 'N/A')} → {item.get('buy_ticker', 'N/A')}</h3>
+                            <p><strong>Reason:</strong> {item.get('reason', 'N/A')}</p>
+                            <p><strong>Priority:</strong> {priority}</p>
+                            <p><strong>Strategy:</strong> {item.get('strategy', '80/20 Balanced Growth')}</p>
+                            <div style="margin: 10px 0;">
+                                <p><strong>🔴 SELL:</strong> {item.get('sell_ticker', 'N/A')} ({item.get('sell_category', 'N/A')})</p>
+                                <ul>
+                                    <li>Score: {item.get('sell_score', 0):.1f}/100</li>
+                                    <li>Amount: ${item.get('sell_amount', 0):,.2f}</li>
+                                    <li>Shares: {item.get('sell_shares', 0)}</li>
+                                </ul>
+                            </div>
+                            <div style="margin: 10px 0;">
+                                <p><strong>🟢 BUY:</strong> {item.get('buy_ticker', 'N/A')} ({item.get('buy_category', 'N/A')})</p>
+                                <ul>
+                                    <li>Score: {item.get('buy_score', 0):.1f}/100</li>
+                                    <li>Score Improvement: +{item.get('score_improvement', 0):.1f} points</li>
+                                </ul>
+                            </div>
+                            <p><strong>Details:</strong> {item.get('details', 'Optimize portfolio allocation with better performing ETF')}</p>
+                        </div>
+                        """
+                    else:
+                        body += f"""
+                        <div class="action" style="background-color: #fff3e0; border-left: 4px solid #ff9800;">
+                            <h3>🔄 REPLACE: {item.get('sell_ticker', 'N/A')} → {item.get('buy_ticker', 'N/A')}</h3>
+                            <p><strong>Reason:</strong> {item.get('reason', 'N/A')}</p>
+                            <p><strong>Priority:</strong> {priority}</p>
+                            <div style="margin: 10px 0;">
+                                <p><strong>🔴 SELL:</strong> {item.get('sell_ticker', 'N/A')}</p>
+                                <ul>
+                                    <li>Score: {item.get('sell_score', 0):.1f}/100 (Weak performance)</li>
+                                    <li>Amount: ${item.get('sell_amount', 0):,.2f}</li>
+                                    <li>Shares: {item.get('sell_shares', 0)}</li>
+                                </ul>
+                            </div>
+                            <div style="margin: 10px 0;">
+                                <p><strong>🟢 BUY:</strong> {item.get('buy_ticker', 'N/A')} (🔥 {item.get('buy_category', 'Trend')})</p>
+                                <ul>
+                                    <li>Score: {item.get('buy_score', 0):.1f}/100 (Strong performance)</li>
+                                    <li>Momentum: {item.get('momentum', 0):.1f}% (20 days)</li>
+                                    <li>Return: {item.get('return', 0):.1f}% (6 months)</li>
+                                </ul>
+                            </div>
+                            <p><strong>Details:</strong> {item.get('details', 'Replace weak holding with hot trend ETF')}</p>
+                        </div>
+                        """
+                elif action_type == "EMERGING_TREND":
+                    etfs_list = ", ".join(item.get('etfs', []))
+                    body += f"""
+                    <div class="info" style="background-color: #fff3e0; border-left: 4px solid #ff9800;">
+                        <h3>🔥 EMERGING TREND: {item.get('category', 'N/A')}</h3>
+                        <p><strong>Reason:</strong> {item.get('reason', 'N/A')}</p>
+                        <p><strong>Priority:</strong> {priority}</p>
+                        <p><strong>Momentum:</strong> {item.get('momentum', 0):.1f}% (20 days)</p>
+                        <p><strong>Return:</strong> {item.get('return', 0):.1f}% (6 months)</p>
+                        <p><strong>ETFs:</strong> {etfs_list}</p>
+                        <p><em>Consider adding these ETFs to your portfolio if you have cash available.</em></p>
+                    </div>
+                    """
                 else:
                     body += f"""
                     <div class="action">
