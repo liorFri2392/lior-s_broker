@@ -236,9 +236,18 @@ class CriticalAlertSystem:
                                 # Calculate buy shares and amount based on current price of the trend ETF
                                 trend_analysis = best_trend_etf.get("analysis", {})
                                 buy_price = trend_analysis.get("current_price", 0)
+                                remaining_cash = 0
+                                
                                 if buy_price > 0:
                                     buy_shares = int(sell_amount / buy_price)
                                     buy_amount = buy_shares * buy_price
+                                    remaining_cash = sell_amount - buy_amount
+                                    
+                                    # If we have significant remaining cash (>$50), try to buy one more share
+                                    if remaining_cash > 50 and remaining_cash >= buy_price:
+                                        buy_shares += 1
+                                        buy_amount = buy_shares * buy_price
+                                        remaining_cash = sell_amount - buy_amount
                                 else:
                                     # Fallback: try to get price from yfinance
                                     try:
@@ -249,14 +258,23 @@ class CriticalAlertSystem:
                                             buy_price = float(hist['Close'].iloc[-1])
                                             buy_shares = int(sell_amount / buy_price)
                                             buy_amount = buy_shares * buy_price
+                                            remaining_cash = sell_amount - buy_amount
+                                            
+                                            # If we have significant remaining cash (>$50), try to buy one more share
+                                            if remaining_cash > 50 and remaining_cash >= buy_price:
+                                                buy_shares += 1
+                                                buy_amount = buy_shares * buy_price
+                                                remaining_cash = sell_amount - buy_amount
                                         else:
                                             buy_price = 0
                                             buy_shares = 0
                                             buy_amount = 0
+                                            remaining_cash = 0
                                     except Exception:
                                         buy_price = 0
                                         buy_shares = 0
                                         buy_amount = 0
+                                        remaining_cash = 0
                                 
                                 critical_items.append({
                                     "type": "REPLACE",
@@ -269,6 +287,7 @@ class CriticalAlertSystem:
                                     "buy_price": buy_price,
                                     "buy_shares": buy_shares,
                                     "buy_amount": buy_amount,
+                                    "remaining_cash": remaining_cash,
                                     "buy_score": best_trend_etf["score"],
                                     "buy_category": category,
                                     "reason": f"🔄 REPLACE: Sell {weakest_ticker} (Score: {weakest_score:.1f}/100) → Buy {best_trend_etf['ticker']} from 🔥 {category} trend (Score: {best_trend_etf['score']:.1f}/100, {momentum:.1f}% momentum)",
@@ -695,10 +714,22 @@ class CriticalAlertSystem:
                         current_return = holding.get("mid_term_forecast", {}).get("expected_3yr_return", 0) if isinstance(holding.get("mid_term_forecast"), dict) else 0
                         
                         # Calculate buy shares and amount based on current price of the new ETF
+                        # Use ALL money from sale to buy new ETF (maximize allocation)
                         buy_price = best_analysis.get("current_price", 0)
+                        remaining_cash = 0
+                        
                         if buy_price > 0:
+                            # Calculate how many shares we can buy with the sell amount
                             buy_shares = int(sell_amount / buy_price)
                             buy_amount = buy_shares * buy_price
+                            remaining_cash = sell_amount - buy_amount
+                            
+                            # If we have significant remaining cash (>$50), try to buy one more share
+                            # But only if we have enough money for the additional share
+                            if remaining_cash > 50 and remaining_cash >= buy_price:
+                                buy_shares += 1
+                                buy_amount = buy_shares * buy_price
+                                remaining_cash = sell_amount - buy_amount
                         else:
                             # Fallback: try to get price from yfinance
                             try:
@@ -709,14 +740,24 @@ class CriticalAlertSystem:
                                     buy_price = float(hist['Close'].iloc[-1])
                                     buy_shares = int(sell_amount / buy_price)
                                     buy_amount = buy_shares * buy_price
+                                    remaining_cash = sell_amount - buy_amount
+                                    
+                                    # If we have significant remaining cash (>$50), try to buy one more share
+                                    # But only if we have enough money for the additional share
+                                    if remaining_cash > 50 and remaining_cash >= buy_price:
+                                        buy_shares += 1
+                                        buy_amount = buy_shares * buy_price
+                                        remaining_cash = sell_amount - buy_amount
                                 else:
                                     buy_price = 0
                                     buy_shares = 0
                                     buy_amount = 0
+                                    remaining_cash = 0
                             except Exception:
                                 buy_price = 0
                                 buy_shares = 0
                                 buy_amount = 0
+                                remaining_cash = 0
                         
                         replacement_opportunities.append({
                             "type": "REPLACE",
@@ -730,6 +771,7 @@ class CriticalAlertSystem:
                             "buy_price": buy_price,
                             "buy_shares": buy_shares,
                             "buy_amount": buy_amount,
+                            "remaining_cash": remaining_cash,
                             "buy_score": best_score,
                             "buy_category": category_name,
                             "score_improvement": score_diff,

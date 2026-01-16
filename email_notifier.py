@@ -139,6 +139,7 @@ class EmailNotifier:
                                     <li>Price: ${item.get('buy_price', 0):,.2f}</li>
                                     <li>Shares to Buy: {item.get('buy_shares', 0)}</li>
                                     <li>Amount: ${item.get('buy_amount', 0):,.2f}</li>
+                                    {f"<li><strong>Remaining Cash:</strong> ${item.get('remaining_cash', 0):,.2f}</li>" if item.get('remaining_cash', 0) > 5 else ""}
                                 </ul>
                             </div>
                             <p><strong>Details:</strong> {item.get('details', 'Optimize portfolio allocation with better performing ETF')}</p>
@@ -165,6 +166,7 @@ class EmailNotifier:
                                     <li>Price: ${item.get('buy_price', 0):,.2f}</li>
                                     <li>Shares to Buy: {item.get('buy_shares', 0)}</li>
                                     <li>Amount: ${item.get('buy_amount', 0):,.2f}</li>
+                                    {f"<li><strong>Remaining Cash:</strong> ${item.get('remaining_cash', 0):,.2f}</li>" if item.get('remaining_cash', 0) > 5 else ""}
                                     <li>Momentum: {item.get('momentum', 0):.1f}% (20 days)</li>
                                     <li>Return: {item.get('return', 0):.1f}% (6 months)</li>
                                 </ul>
