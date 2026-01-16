@@ -152,8 +152,8 @@ class CriticalAlertSystem:
         # 1. Portfolio is unbalanced (needs bonds or stocks)
         # 2. Have sufficient cash (>$500)
         if needs_balancing and cash_available > 500:
-            print("\nScanning for critical buy opportunities...")
-            critical_buys = self.scan_critical_buy_opportunities()
+        print("\nScanning for critical buy opportunities...")
+        critical_buys = self.scan_critical_buy_opportunities()
             
             # Filter to only most critical (limit to top 3-5)
             # Prioritize bonds if portfolio lacks bonds
@@ -165,7 +165,7 @@ class CriticalAlertSystem:
             else:
                 critical_buys = critical_buys[:3]  # Top 3 overall
             
-            critical_items.extend(critical_buys)
+        critical_items.extend(critical_buys)
         else:
             if cash_available <= 500:
                 print("\n⚠️  Insufficient cash for new purchases (${:.2f})".format(cash_available))
@@ -233,6 +233,31 @@ class CriticalAlertSystem:
                             sell_amount = shares_to_sell * weakest_holding.get("current_price", 0)
                             
                             if sell_amount > 100:  # Only if meaningful amount
+                                # Calculate buy shares and amount based on current price of the trend ETF
+                                trend_analysis = best_trend_etf.get("analysis", {})
+                                buy_price = trend_analysis.get("current_price", 0)
+                                if buy_price > 0:
+                                    buy_shares = int(sell_amount / buy_price)
+                                    buy_amount = buy_shares * buy_price
+                                else:
+                                    # Fallback: try to get price from yfinance
+                                    try:
+                                        import yfinance as yf
+                                        stock = yf.Ticker(best_trend_etf["ticker"])
+                                        hist = stock.history(period="1d")
+                                        if not hist.empty:
+                                            buy_price = float(hist['Close'].iloc[-1])
+                                            buy_shares = int(sell_amount / buy_price)
+                                            buy_amount = buy_shares * buy_price
+                                        else:
+                                            buy_price = 0
+                                            buy_shares = 0
+                                            buy_amount = 0
+                                    except Exception:
+                                        buy_price = 0
+                                        buy_shares = 0
+                                        buy_amount = 0
+                                
                                 critical_items.append({
                                     "type": "REPLACE",
                                     "priority": "HIGH",
@@ -241,6 +266,9 @@ class CriticalAlertSystem:
                                     "sell_amount": sell_amount,
                                     "sell_shares": shares_to_sell,
                                     "buy_ticker": best_trend_etf["ticker"],
+                                    "buy_price": buy_price,
+                                    "buy_shares": buy_shares,
+                                    "buy_amount": buy_amount,
                                     "buy_score": best_trend_etf["score"],
                                     "buy_category": category,
                                     "reason": f"🔄 REPLACE: Sell {weakest_ticker} (Score: {weakest_score:.1f}/100) → Buy {best_trend_etf['ticker']} from 🔥 {category} trend (Score: {best_trend_etf['score']:.1f}/100, {momentum:.1f}% momentum)",
@@ -271,8 +299,39 @@ class CriticalAlertSystem:
         if portfolio_analysis and holdings_analysis:
             replacement_opportunities = self.find_better_alternatives(holdings_analysis, portfolio_metrics)
             if replacement_opportunities:
-                print(f"   Found {len(replacement_opportunities)} better alternatives for existing holdings!")
-                critical_items.extend(replacement_opportunities)
+                # Filter out duplicate buy recommendations (same ETF recommended multiple times)
+                # Keep only the best replacement opportunity for each buy_ticker
+                seen_buy_tickers = {}
+                filtered_opportunities = []
+                for opp in replacement_opportunities:
+                    buy_ticker = opp.get("buy_ticker", "").upper()
+                    if buy_ticker not in seen_buy_tickers:
+                        seen_buy_tickers[buy_ticker] = opp
+                        filtered_opportunities.append(opp)
+                    else:
+                        # Keep the one with higher priority or better score improvement
+                        existing = seen_buy_tickers[buy_ticker]
+                        existing_priority = existing.get("priority", "MEDIUM")
+                        new_priority = opp.get("priority", "MEDIUM")
+                        priority_order = {"HIGH": 0, "MEDIUM": 1}
+                        if priority_order.get(new_priority, 2) < priority_order.get(existing_priority, 2):
+                            # New one has higher priority, replace
+                            seen_buy_tickers[buy_ticker] = opp
+                            filtered_opportunities = [o for o in filtered_opportunities if o != existing]
+                            filtered_opportunities.append(opp)
+                        elif opp.get("score_improvement", 0) > existing.get("score_improvement", 0):
+                            # New one has better score improvement, replace
+                            seen_buy_tickers[buy_ticker] = opp
+                            filtered_opportunities = [o for o in filtered_opportunities if o != existing]
+                            filtered_opportunities.append(opp)
+                
+                if filtered_opportunities:
+                    print(f"   Found {len(filtered_opportunities)} better alternatives for existing holdings!")
+                    if len(replacement_opportunities) > len(filtered_opportunities):
+                        print(f"   (Filtered out {len(replacement_opportunities) - len(filtered_opportunities)} duplicate recommendations)")
+                    critical_items.extend(filtered_opportunities)
+                else:
+                    print("   ✅ All existing holdings are performing well - no better alternatives found")
             else:
                 print("   ✅ All existing holdings are performing well - no better alternatives found")
         
@@ -454,7 +513,7 @@ class CriticalAlertSystem:
                     # 2. Reasonable expected return (filtered unrealistic ones)
                     # 3. Not leveraged (we exclude those)
                     # 4. Have cash available
-                    is_leveraged = analysis.get("is_leveraged", False)
+                        is_leveraged = analysis.get("is_leveraged", False)
                     
                     if is_leveraged:
                         # Skip leveraged ETFs - not suitable for 80/20 strategy
@@ -635,6 +694,30 @@ class CriticalAlertSystem:
                         expected_return = best_analysis.get("mid_term_forecast", {}).get("expected_3yr_return", 0)
                         current_return = holding.get("mid_term_forecast", {}).get("expected_3yr_return", 0) if isinstance(holding.get("mid_term_forecast"), dict) else 0
                         
+                        # Calculate buy shares and amount based on current price of the new ETF
+                        buy_price = best_analysis.get("current_price", 0)
+                        if buy_price > 0:
+                            buy_shares = int(sell_amount / buy_price)
+                            buy_amount = buy_shares * buy_price
+                        else:
+                            # Fallback: try to get price from yfinance
+                            try:
+                                import yfinance as yf
+                                stock = yf.Ticker(best_alternative)
+                                hist = stock.history(period="1d")
+                                if not hist.empty:
+                                    buy_price = float(hist['Close'].iloc[-1])
+                                    buy_shares = int(sell_amount / buy_price)
+                                    buy_amount = buy_shares * buy_price
+                                else:
+                                    buy_price = 0
+                                    buy_shares = 0
+                                    buy_amount = 0
+                            except Exception:
+                                buy_price = 0
+                                buy_shares = 0
+                                buy_amount = 0
+                        
                         replacement_opportunities.append({
                             "type": "REPLACE",
                             "priority": priority,
@@ -644,6 +727,9 @@ class CriticalAlertSystem:
                             "sell_shares": shares_to_sell,
                             "sell_category": category_name,
                             "buy_ticker": best_alternative,
+                            "buy_price": buy_price,
+                            "buy_shares": buy_shares,
+                            "buy_amount": buy_amount,
                             "buy_score": best_score,
                             "buy_category": category_name,
                             "score_improvement": score_diff,

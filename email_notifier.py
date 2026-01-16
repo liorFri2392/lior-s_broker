@@ -136,6 +136,9 @@ class EmailNotifier:
                                 <ul>
                                     <li>Score: {item.get('buy_score', 0):.1f}/100</li>
                                     <li>Score Improvement: +{item.get('score_improvement', 0):.1f} points</li>
+                                    <li>Price: ${item.get('buy_price', 0):,.2f}</li>
+                                    <li>Shares to Buy: {item.get('buy_shares', 0)}</li>
+                                    <li>Amount: ${item.get('buy_amount', 0):,.2f}</li>
                                 </ul>
                             </div>
                             <p><strong>Details:</strong> {item.get('details', 'Optimize portfolio allocation with better performing ETF')}</p>
@@ -159,6 +162,9 @@ class EmailNotifier:
                                 <p><strong>🟢 BUY:</strong> {item.get('buy_ticker', 'N/A')} (🔥 {item.get('buy_category', 'Trend')})</p>
                                 <ul>
                                     <li>Score: {item.get('buy_score', 0):.1f}/100 (Strong performance)</li>
+                                    <li>Price: ${item.get('buy_price', 0):,.2f}</li>
+                                    <li>Shares to Buy: {item.get('buy_shares', 0)}</li>
+                                    <li>Amount: ${item.get('buy_amount', 0):,.2f}</li>
                                     <li>Momentum: {item.get('momentum', 0):.1f}% (20 days)</li>
                                     <li>Return: {item.get('return', 0):.1f}% (6 months)</li>
                                 </ul>
