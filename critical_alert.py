@@ -152,8 +152,8 @@ class CriticalAlertSystem:
         # 1. Portfolio is unbalanced (needs bonds or stocks)
         # 2. Have sufficient cash (>$500)
         if needs_balancing and cash_available > 500:
-        print("\nScanning for critical buy opportunities...")
-        critical_buys = self.scan_critical_buy_opportunities()
+            print("\nScanning for critical buy opportunities...")
+            critical_buys = self.scan_critical_buy_opportunities()
             
             # Filter to only most critical (limit to top 3-5)
             # Prioritize bonds if portfolio lacks bonds
@@ -165,7 +165,7 @@ class CriticalAlertSystem:
             else:
                 critical_buys = critical_buys[:3]  # Top 3 overall
             
-        critical_items.extend(critical_buys)
+            critical_items.extend(critical_buys)
         else:
             if cash_available <= 500:
                 print("\n⚠️  Insufficient cash for new purchases (${:.2f})".format(cash_available))
@@ -513,7 +513,7 @@ class CriticalAlertSystem:
                     # 2. Reasonable expected return (filtered unrealistic ones)
                     # 3. Not leveraged (we exclude those)
                     # 4. Have cash available
-                        is_leveraged = analysis.get("is_leveraged", False)
+                    is_leveraged = analysis.get("is_leveraged", False)
                     
                     if is_leveraged:
                         # Skip leveraged ETFs - not suitable for 80/20 strategy
