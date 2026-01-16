@@ -1114,6 +1114,146 @@ class PortfolioAnalyzer:
         
         return recommendations
     
+    def find_better_alternatives(self, holdings_analysis: List[Dict], portfolio_metrics: Dict) -> List[Dict]:
+        """
+        Deep analysis: Compare ALL existing holdings with market alternatives.
+        Finds better ETFs even if current holdings are not weak.
+        This ensures portfolio is always optimized according to 80/20 strategy.
+        """
+        from deposit_advisor import DepositAdvisor
+        
+        replacement_opportunities = []
+        advisor = DepositAdvisor(self.portfolio_file)
+        
+        # Get current portfolio
+        portfolio = self.load_portfolio()
+        current_tickers = [h.get("ticker", "").upper() for h in portfolio.get("holdings", [])]
+        total_value = portfolio_metrics.get("total_value", 0)
+        
+        # Define categories for comparison
+        core_etfs = ["SPY", "VOO", "IVV", "VXUS", "VEA"]
+        bond_etfs = ["BND", "AGG", "TIP", "SCHP", "VTIP"]
+        
+        # Get all satellite categories from advisor
+        satellite_categories = [
+            "US_SMALL_CAP", "TECHNOLOGY", "HEALTHCARE", "EMERGING_MARKETS",
+            "AI_AND_ROBOTICS", "QUANTUM_COMPUTING", "SEMICONDUCTORS", "CLOUD_COMPUTING", "CYBERSECURITY",
+            "ELECTRIC_VEHICLES", "CLEAN_ENERGY", "REAL_ESTATE", "INFRASTRUCTURE",
+            "DIVIDEND", "GROWTH", "VALUE", "FINANCIAL", "ENERGY", "CONSUMER", "ESG", "BIOTECH"
+        ]
+        
+        for holding in holdings_analysis:
+            ticker = holding.get("ticker", "").upper()
+            current_score = holding.get("recommendation_score", 50)
+            current_value = holding.get("current_value", 0)
+            current_weight = (current_value / total_value * 100) if total_value > 0 else 0
+            
+            # Skip if holding is too small (<2% of portfolio) - not worth replacing
+            if current_weight < 2:
+                continue
+            
+            # Determine category
+            is_core = ticker in [e.upper() for e in core_etfs]
+            is_bond = ticker in [e.upper() for e in bond_etfs]
+            
+            # Find candidates in same category
+            candidates = []
+            category_name = ""
+            
+            if is_core:
+                candidates = [e for e in core_etfs if e.upper() != ticker and e.upper() not in current_tickers]
+                category_name = "CORE"
+            elif is_bond:
+                candidates = [e for e in bond_etfs if e.upper() != ticker and e.upper() not in current_tickers]
+                category_name = "BONDS"
+            else:
+                # For satellite ETFs, search in all satellite categories
+                category_name = "SATELLITE"
+                for cat in satellite_categories:
+                    if cat in advisor.ETF_CATEGORIES:
+                        cat_etfs = advisor.ETF_CATEGORIES[cat]
+                        # Add top 2 from each category that we don't already have
+                        for etf in cat_etfs[:2]:
+                            if etf.upper() != ticker and etf.upper() not in current_tickers:
+                                if etf.upper() not in [c.upper() for c in candidates]:
+                                    candidates.append(etf)
+            
+            # Analyze candidates to find better alternatives
+            best_alternative = None
+            best_score = 0
+            best_analysis = None
+            
+            for candidate in candidates[:5]:  # Check top 5 candidates
+                try:
+                    candidate_analysis = advisor.analyze_etf(candidate, verbose=False)
+                    candidate_score = candidate_analysis.get("score", 0)
+                    
+                    # Boost score for Core and Bonds (they're essential for 80/20 strategy)
+                    if is_core:
+                        candidate_score = min(100, candidate_score + 15)
+                    elif is_bond:
+                        candidate_score = min(100, candidate_score + 20)
+                    
+                    # Check if significantly better (at least 15 points higher)
+                    score_diff = candidate_score - current_score
+                    
+                    if score_diff >= 15 and candidate_score > best_score:
+                        # Additional checks: ensure alternative has good fundamentals
+                        expected_return = candidate_analysis.get("mid_term_forecast", {}).get("expected_3yr_return", 0)
+                        
+                        # Filter unrealistic returns
+                        if -50 <= expected_return <= 50:
+                            best_score = candidate_score
+                            best_alternative = candidate
+                            best_analysis = candidate_analysis
+                            
+                except Exception as e:
+                    logger.debug(f"Failed to analyze alternative {candidate}: {e}")
+                    continue
+            
+            # If found significantly better alternative, recommend replacement
+            if best_alternative and best_analysis:
+                score_diff = best_score - current_score
+                
+                # Only recommend if meaningful improvement
+                if score_diff >= 15:
+                    # Recommend replacing 30-50% depending on score difference
+                    replace_percentage = 0.5 if score_diff >= 25 else 0.3
+                    shares_to_sell = int(holding.get("quantity", 0) * replace_percentage)
+                    sell_amount = shares_to_sell * holding.get("current_price", 0)
+                    
+                    if sell_amount > 100:  # Only if meaningful amount
+                        expected_return = best_analysis.get("mid_term_forecast", {}).get("expected_3yr_return", 0)
+                        current_return = holding.get("mid_term_forecast", {}).get("expected_3yr_return", 0) if isinstance(holding.get("mid_term_forecast"), dict) else 0
+                        
+                        # Calculate buy shares
+                        buy_price = best_analysis.get("current_price", 0)
+                        if buy_price > 0:
+                            buy_shares = int(sell_amount / buy_price)
+                            buy_amount = buy_shares * buy_price
+                        else:
+                            buy_shares = 0
+                            buy_amount = 0
+                        
+                        replacement_opportunities.append({
+                            "sell_ticker": ticker,
+                            "sell_score": current_score,
+                            "sell_shares": shares_to_sell,
+                            "sell_amount": sell_amount,
+                            "buy_ticker": best_alternative,
+                            "buy_score": best_score,
+                            "buy_shares": buy_shares,
+                            "buy_amount": buy_amount,
+                            "buy_price": buy_price,
+                            "score_improvement": score_diff,
+                            "category": category_name,
+                            "expected_return": expected_return,
+                            "current_return": current_return,
+                            "replace_percentage": replace_percentage
+                        })
+        
+        return replacement_opportunities
+    
     def check_rebalancing(self, portfolio_metrics: Dict, analyses: List[Dict]) -> Dict:
         """Determine if rebalancing is needed, including 80/20 balance check."""
         rebalancing = {
@@ -1615,6 +1755,15 @@ class PortfolioAnalyzer:
         # Save updated portfolio
         self.save_portfolio(portfolio)
         
+        # Check for better alternatives (like critical_alert does)
+        print("\n🔍 Checking for better ETF alternatives...")
+        replacement_opportunities = self.find_better_alternatives(analyses, portfolio_metrics)
+        if replacement_opportunities:
+            print(f"   ✅ Found {len(replacement_opportunities)} better alternatives!")
+            rebalancing["replacement_opportunities"] = replacement_opportunities
+        else:
+            print("   ✅ All holdings are performing well - no better alternatives found")
+        
         # Compile results
         results = {
             "portfolio_metrics": portfolio_metrics,
@@ -1890,6 +2039,42 @@ class PortfolioAnalyzer:
             print("└" + "─" * 78 + "┘")
         else:
             print("✅ Portfolio is well-balanced. No rebalancing needed at this time.")
+        
+        # Show replacement opportunities if any
+        if rebalancing.get("replacement_opportunities"):
+            print("\n" + "=" * 60)
+            print("🔄 REPLACEMENT OPPORTUNITIES (Better Alternatives Found)")
+            print("=" * 60)
+            exchange_rate = results["portfolio_metrics"].get("exchange_rate", 3.15)
+            
+            for opp in rebalancing["replacement_opportunities"]:
+                sell_ticker = opp["sell_ticker"]
+                buy_ticker = opp["buy_ticker"]
+                score_diff = opp["score_improvement"]
+                sell_score = opp["sell_score"]
+                buy_score = opp["buy_score"]
+                sell_shares = opp["sell_shares"]
+                sell_amount = opp["sell_amount"]
+                buy_shares = opp["buy_shares"]
+                buy_amount = opp["buy_amount"]
+                buy_price = opp["buy_price"]
+                category = opp["category"]
+                replace_pct = opp["replace_percentage"] * 100
+                
+                priority = "HIGH" if score_diff >= 25 else "MEDIUM"
+                priority_icon = "🔴" if priority == "HIGH" else "🟡"
+                
+                print(f"\n{priority_icon} [{priority}] OPTIMIZE: {sell_ticker} → {buy_ticker}")
+                print(f"   Category: {category}")
+                print(f"   Score Improvement: {sell_score:.1f}/100 → {buy_score:.1f}/100 (+{score_diff:.1f} points)")
+                print(f"   Recommendation: Replace {replace_pct:.0f}% of {sell_ticker} with {buy_ticker}")
+                print(f"   🔴 SELL: {sell_shares} shares of {sell_ticker} = ${sell_amount:,.2f} (₪{sell_amount * exchange_rate:,.2f})")
+                print(f"   🟢 BUY: {buy_shares} shares of {buy_ticker} @ ${buy_price:.2f} = ${buy_amount:,.2f} (₪{buy_amount * exchange_rate:,.2f})")
+                if sell_amount - buy_amount > 5:
+                    remaining = sell_amount - buy_amount
+                    print(f"   💰 Remaining Cash: ${remaining:,.2f} (₪{remaining * exchange_rate:,.2f})")
+            
+            print("\n" + "=" * 60)
         
         print("\n" + "=" * 60)
         print(f"Analysis completed at: {results['timestamp']}")
