@@ -1235,7 +1235,9 @@ class PortfolioAnalyzer:
                             buy_shares = 0
                             buy_amount = 0
                         
-                        replacement_opportunities.append({
+                        # Only recommend if we can buy at least 1 share
+                        if buy_shares > 0:
+                            replacement_opportunities.append({
                             "sell_ticker": ticker,
                             "sell_score": current_score,
                             "sell_shares": shares_to_sell,
