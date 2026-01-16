@@ -1256,6 +1256,196 @@ class PortfolioAnalyzer:
         
         return replacement_opportunities
     
+    def find_concentration_opportunities(self, holdings_analysis: List[Dict], portfolio_metrics: Dict) -> List[Dict]:
+        """
+        Find replacement opportunities based on:
+        1. Over-concentration (ETF > 30% of portfolio)
+        2. Hot sectors (emerging trends with strong momentum)
+        3. Portfolio balance (Core too low, Satellite too high)
+        """
+        from deposit_advisor import DepositAdvisor
+        
+        replacement_opportunities = []
+        advisor = DepositAdvisor(self.portfolio_file)
+        
+        # Get current portfolio
+        portfolio = self.load_portfolio()
+        current_tickers = [h.get("ticker", "").upper() for h in portfolio.get("holdings", [])]
+        total_value = portfolio_metrics.get("total_value", 0)
+        
+        # Get emerging trends
+        excluded_categories = ["LEVERAGED_2X", "LEVERAGED_3X", "LEVERAGED_INVERSE", "CRYPTO"]
+        emerging_trends = advisor.detect_emerging_trends(excluded_categories)
+        hot_sectors = {t.get("category", ""): t for t in emerging_trends[:5]}  # Top 5 hot sectors
+        
+        # Calculate current portfolio balance
+        core_etfs = ["SPY", "VOO", "IVV", "VXUS", "VEA"]
+        bond_etfs = ["BND", "AGG", "TIP", "SCHP", "VTIP"]
+        
+        core_value = 0
+        satellite_value = 0
+        bonds_value = 0
+        
+        for holding in holdings_analysis:
+            ticker = holding.get("ticker", "").upper()
+            value = holding.get("current_value", 0)
+            
+            if ticker in [e.upper() for e in core_etfs]:
+                core_value += value
+            elif ticker in [e.upper() for e in bond_etfs]:
+                bonds_value += value
+            else:
+                satellite_value += value
+        
+        core_pct = (core_value / total_value * 100) if total_value > 0 else 0
+        satellite_pct = (satellite_value / total_value * 100) if total_value > 0 else 0
+        
+        # Check each holding for over-concentration or opportunities
+        for holding in holdings_analysis:
+            ticker = holding.get("ticker", "").upper()
+            current_score = holding.get("recommendation_score", 50)
+            current_value = holding.get("current_value", 0)
+            current_weight = (current_value / total_value * 100) if total_value > 0 else 0
+            
+            # Skip if too small
+            if current_weight < 2:
+                continue
+            
+            is_core = ticker in [e.upper() for e in core_etfs]
+            is_bond = ticker in [e.upper() for e in bond_etfs]
+            
+            # 1. Check for over-concentration (>30% of portfolio)
+            if current_weight > 30:
+                # Find best alternative from hot sectors or Core
+                best_alternative = None
+                best_score = 0
+                best_analysis = None
+                reason = ""
+                
+                # Priority: If Core is low, recommend Core ETFs
+                if core_pct < 45:
+                    for core_etf in core_etfs:
+                        if core_etf.upper() not in current_tickers:
+                            try:
+                                analysis = advisor.analyze_etf(core_etf, verbose=False)
+                                score = analysis.get("score", 0)
+                                if score > best_score:
+                                    best_score = score
+                                    best_alternative = core_etf
+                                    best_analysis = analysis
+                                    reason = f"Over-concentration ({current_weight:.1f}%) + Low Core ({core_pct:.1f}%)"
+                            except:
+                                continue
+                
+                # If no Core alternative or Core is OK, check hot sectors
+                if not best_alternative or core_pct >= 45:
+                    for category, trend_data in hot_sectors.items():
+                        if category in advisor.ETF_CATEGORIES:
+                            trend_etfs = advisor.ETF_CATEGORIES[category]
+                            momentum = trend_data.get("avg_momentum", 0)
+                            
+                            # Only consider very hot sectors (momentum > 10%)
+                            if momentum > 10:
+                                for etf in trend_etfs[:2]:
+                                    if etf.upper() not in current_tickers:
+                                        try:
+                                            analysis = advisor.analyze_etf(etf, verbose=False)
+                                            score = analysis.get("score", 0)
+                                            # Boost score for hot sectors
+                                            score = min(100, score + 10)
+                                            if score > best_score:
+                                                best_score = score
+                                                best_alternative = etf
+                                                best_analysis = analysis
+                                                reason = f"Over-concentration ({current_weight:.1f}%) + Hot sector ({category}, {momentum:.1f}% momentum)"
+                                        except:
+                                            continue
+                
+                # If found alternative, recommend replacement
+                if best_alternative and best_analysis:
+                    # Recommend replacing 30-50% depending on concentration
+                    replace_percentage = 0.5 if current_weight > 40 else 0.3
+                    shares_to_sell = int(holding.get("quantity", 0) * replace_percentage)
+                    sell_amount = shares_to_sell * holding.get("current_price", 0)
+                    
+                    if sell_amount > 100:
+                        buy_price = best_analysis.get("current_price", 0)
+                        if buy_price > 0:
+                            buy_shares = int(sell_amount / buy_price)
+                            buy_amount = buy_shares * buy_price
+                        else:
+                            buy_shares = 0
+                            buy_amount = 0
+                        
+                        if buy_shares > 0:
+                            replacement_opportunities.append({
+                                "sell_ticker": ticker,
+                                "sell_score": current_score,
+                                "sell_shares": shares_to_sell,
+                                "sell_amount": sell_amount,
+                                "buy_ticker": best_alternative,
+                                "buy_score": best_score,
+                                "buy_shares": buy_shares,
+                                "buy_amount": buy_amount,
+                                "buy_price": buy_price,
+                                "score_improvement": best_score - current_score,
+                                "category": "DIVERSIFICATION",
+                                "expected_return": best_analysis.get("mid_term_forecast", {}).get("expected_3yr_return", 0),
+                                "current_return": holding.get("mid_term_forecast", {}).get("expected_3yr_return", 0) if isinstance(holding.get("mid_term_forecast"), dict) else 0,
+                                "replace_percentage": replace_percentage,
+                                "reason": reason
+                            })
+            
+            # 2. Check if Satellite is too high and Core is too low
+            elif not is_core and not is_bond and satellite_pct > 35 and core_pct < 45:
+                # Recommend replacing some Satellite with Core
+                for core_etf in core_etfs:
+                    if core_etf.upper() not in current_tickers:
+                        try:
+                            analysis = advisor.analyze_etf(core_etf, verbose=False)
+                            score = analysis.get("score", 0)
+                            # Boost score for Core when Core is low
+                            score = min(100, score + 15)
+                            
+                            # Only recommend if meaningful improvement
+                            if score >= current_score + 10:
+                                replace_percentage = 0.3
+                                shares_to_sell = int(holding.get("quantity", 0) * replace_percentage)
+                                sell_amount = shares_to_sell * holding.get("current_price", 0)
+                                
+                                if sell_amount > 100:
+                                    buy_price = analysis.get("current_price", 0)
+                                    if buy_price > 0:
+                                        buy_shares = int(sell_amount / buy_price)
+                                        buy_amount = buy_shares * buy_price
+                                    else:
+                                        buy_shares = 0
+                                        buy_amount = 0
+                                    
+                                    if buy_shares > 0:
+                                        replacement_opportunities.append({
+                                            "sell_ticker": ticker,
+                                            "sell_score": current_score,
+                                            "sell_shares": shares_to_sell,
+                                            "sell_amount": sell_amount,
+                                            "buy_ticker": core_etf,
+                                            "buy_score": score,
+                                            "buy_shares": buy_shares,
+                                            "buy_amount": buy_amount,
+                                            "buy_price": buy_price,
+                                            "score_improvement": score - current_score,
+                                            "category": "CORE",
+                                            "expected_return": analysis.get("mid_term_forecast", {}).get("expected_3yr_return", 0),
+                                            "current_return": holding.get("mid_term_forecast", {}).get("expected_3yr_return", 0) if isinstance(holding.get("mid_term_forecast"), dict) else 0,
+                                            "replace_percentage": replace_percentage,
+                                            "reason": f"Satellite too high ({satellite_pct:.1f}%) + Core too low ({core_pct:.1f}%) - Rebalance to 80/20"
+                                        })
+                                        break  # Only one Core recommendation per Satellite holding
+                        except:
+                            continue
+        
+        return replacement_opportunities
+    
     def check_rebalancing(self, portfolio_metrics: Dict, analyses: List[Dict]) -> Dict:
         """Determine if rebalancing is needed, including 80/20 balance check."""
         rebalancing = {
@@ -1428,9 +1618,10 @@ class PortfolioAnalyzer:
                 
                 # Generate sell recommendation with replacement suggestion
                 rebalancing["needed"] = True
-                sell_percentage = 0.75 if not is_moderate else 0.5
                 if is_moderate:
                     sell_percentage = 0.25
+                else:
+                    sell_percentage = 0.75
                 
                 sell_value_usd = analysis["current_value"] * sell_percentage
                 sell_shares = int(analysis["quantity"] * sell_percentage)
@@ -1760,6 +1951,12 @@ class PortfolioAnalyzer:
         # Check for better alternatives (like critical_alert does)
         print("\n🔍 Checking for better ETF alternatives...")
         replacement_opportunities = self.find_better_alternatives(analyses, portfolio_metrics)
+        
+        # Also check for over-concentration and hot sector opportunities
+        concentration_opportunities = self.find_concentration_opportunities(analyses, portfolio_metrics)
+        if concentration_opportunities:
+            replacement_opportunities.extend(concentration_opportunities)
+        
         if replacement_opportunities:
             print(f"   ✅ Found {len(replacement_opportunities)} better alternatives!")
             rebalancing["replacement_opportunities"] = replacement_opportunities

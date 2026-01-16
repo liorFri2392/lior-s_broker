@@ -317,6 +317,33 @@ class CriticalAlertSystem:
         print("\n🔍 Deep Analysis: Comparing existing holdings with market alternatives...")
         if portfolio_analysis and holdings_analysis:
             replacement_opportunities = self.find_better_alternatives(holdings_analysis, portfolio_metrics)
+            
+            # Also check for over-concentration and hot sector opportunities (same logic as analyze)
+            concentration_opportunities = self.analyzer.find_concentration_opportunities(holdings_analysis, portfolio_metrics)
+            if concentration_opportunities:
+                # Convert to critical_alert format
+                for opp in concentration_opportunities:
+                    replacement_opportunities.append({
+                        "type": "REPLACE",
+                        "priority": "HIGH" if opp.get("category") == "DIVERSIFICATION" else "MEDIUM",
+                        "sell_ticker": opp.get("sell_ticker", ""),
+                        "sell_score": opp.get("sell_score", 50),
+                        "sell_amount": opp.get("sell_amount", 0),
+                        "sell_shares": opp.get("sell_shares", 0),
+                        "sell_category": opp.get("category", "SATELLITE"),
+                        "buy_ticker": opp.get("buy_ticker", ""),
+                        "buy_price": opp.get("buy_price", 0),
+                        "buy_shares": opp.get("buy_shares", 0),
+                        "buy_amount": opp.get("buy_amount", 0),
+                        "remaining_cash": opp.get("sell_amount", 0) - opp.get("buy_amount", 0),
+                        "buy_score": opp.get("buy_score", 0),
+                        "buy_category": opp.get("category", "SATELLITE"),
+                        "score_improvement": opp.get("score_improvement", 0),
+                        "reason": f"🔄 OPTIMIZE: {opp.get('sell_ticker', '')} → {opp.get('buy_ticker', '')} - {opp.get('reason', '')}",
+                        "details": f"Replace {opp.get('replace_percentage', 0)*100:.0f}% of {opp.get('sell_ticker', '')} with {opp.get('buy_ticker', '')}. Expected return: {opp.get('expected_return', 0):.1f}% vs {opp.get('current_return', 0):.1f}%",
+                        "strategy": "80/20 Balanced Growth"
+                    })
+            
             if replacement_opportunities:
                 # Filter out duplicate buy recommendations (same ETF recommended multiple times)
                 # Keep only the best replacement opportunity for each buy_ticker
