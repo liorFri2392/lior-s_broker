@@ -301,32 +301,44 @@ class PortfolioAnalyzer:
                     if market_status:
                         try:
                             # Use fast_info for real-time data
-                            price = float(stock.fast_info.get('lastPrice', 0))
-                            if price > 0:
-                                self.price_cache[ticker] = (price, now)
-                                self._save_cache()  # Save to persistent cache
-                                return ticker, price, True  # True = real-time
+                            if hasattr(stock, 'fast_info') and stock.fast_info is not None:
+                                fast_info = stock.fast_info
+                                if hasattr(fast_info, 'get'):
+                                    price = float(fast_info.get('lastPrice', 0))
+                                    if price > 0:
+                                        self.price_cache[ticker] = (price, now)
+                                        self._save_cache()  # Save to persistent cache
+                                        return ticker, price, True  # True = real-time
                         except Exception as e:
                             logger.debug(f"Failed to get real-time price for {ticker}: {e}")
                             pass
                     
                     # Fallback to historical data (last close)
-                    info = stock.history(period="1d")
-                    if not info.empty:
-                        price = float(info['Close'].iloc[-1])
-                        self.price_cache[ticker] = (price, now)
-                        self._save_cache()  # Save to persistent cache
-                        return ticker, price, False  # False = last close
-                    else:
-                        try:
-                            price = float(stock.fast_info.get('lastPrice', 0))
+                    try:
+                        info = stock.history(period="1d")
+                        if info is not None and not info.empty and 'Close' in info.columns:
+                            price = float(info['Close'].iloc[-1])
                             if price > 0:
                                 self.price_cache[ticker] = (price, now)
                                 self._save_cache()  # Save to persistent cache
-                                return ticker, price, False
-                        except Exception as e:
-                            logger.debug(f"Failed to get fallback price for {ticker}: {e}")
-                            return ticker, None, False
+                                return ticker, price, False  # False = last close
+                    except Exception as e:
+                        logger.debug(f"Failed to get historical price for {ticker}: {e}")
+                    
+                    # Last resort: try fast_info again
+                    try:
+                        if hasattr(stock, 'fast_info') and stock.fast_info is not None:
+                            fast_info = stock.fast_info
+                            if hasattr(fast_info, 'get'):
+                                price = float(fast_info.get('lastPrice', 0))
+                                if price > 0:
+                                    self.price_cache[ticker] = (price, now)
+                                    self._save_cache()  # Save to persistent cache
+                                    return ticker, price, False
+                    except Exception as e:
+                        logger.debug(f"Failed to get fallback price for {ticker}: {e}")
+                    
+                    return ticker, None, False
                 except Exception as e:
                     logger.warning(f"Could not fetch price for {ticker}: {e}")
                     return ticker, None, False
@@ -355,16 +367,21 @@ class PortfolioAnalyzer:
         try:
             stock = yf.Ticker(ticker)
             data = stock.history(period=period)
-            if not data.empty:
+            if data is not None and not data.empty:
                 self.market_data_cache[cache_key] = (data, now)
-            return data
+                return data
+            else:
+                return pd.DataFrame()
         except Exception as e:
             logger.warning(f"Failed to fetch market data for {ticker}: {e}")
             return pd.DataFrame()
     
     def calculate_technical_indicators(self, data: pd.DataFrame) -> Dict:
         """Calculate technical indicators."""
-        if data.empty or len(data) < 20:
+        if data is None or data.empty or len(data) < 20:
+            return {}
+        
+        if 'Close' not in data.columns:
             return {}
         
         indicators = {}
@@ -401,7 +418,7 @@ class PortfolioAnalyzer:
             # Use same period as data
             data_period = "1y" if len(data) < 252 else "2y" if len(data) < 504 else "5y"
             spy_data = spy.history(period=data_period)
-            if not spy_data.empty:
+            if spy_data is not None and not spy_data.empty and 'Close' in spy_data.columns:
                 # Align data lengths
                 min_len = min(len(data), len(spy_data))
                 spy_returns = spy_data['Close'].pct_change().dropna().tail(min_len)
@@ -570,7 +587,7 @@ class PortfolioAnalyzer:
         
         # Get market data
         data = self.get_market_data(ticker)
-        if not data.empty:
+        if data is not None and not data.empty:
             analysis["technical_indicators"] = self.calculate_technical_indicators(data)
         
         # Get news sentiment

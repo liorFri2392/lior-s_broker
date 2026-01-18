@@ -290,10 +290,13 @@ class DepositAdvisor:
             price_found = False
             if market_status:
                 try:
-                    price = float(stock.fast_info.get('lastPrice', 0))
-                    if price > 0:
-                        analysis["current_price"] = price
-                        price_found = True
+                    if hasattr(stock, 'fast_info') and stock.fast_info is not None:
+                        fast_info = stock.fast_info
+                        if hasattr(fast_info, 'get'):
+                            price = float(fast_info.get('lastPrice', 0))
+                            if price > 0:
+                                analysis["current_price"] = price
+                                price_found = True
                 except Exception as e:
                     logger.debug(f"Failed to get real-time price for {ticker}: {e}")
                     pass  # Fall through to historical data
@@ -302,19 +305,28 @@ class DepositAdvisor:
             if not price_found:
                 try:
                     hist = stock.history(period="1d")
-                    if not hist.empty:
+                    if hist is not None and not hist.empty and 'Close' in hist.columns:
                         analysis["current_price"] = float(hist['Close'].iloc[-1])
                     else:
                         # Try longer period if 1d fails (for delisted ETFs)
                         hist = stock.history(period="5d")
-                        if not hist.empty:
+                        if hist is not None and not hist.empty and 'Close' in hist.columns:
                             analysis["current_price"] = float(hist['Close'].iloc[-1])
                         else:
                             try:
-                                analysis["current_price"] = float(stock.fast_info.get('lastPrice', 0))
-                                if analysis["current_price"] == 0:
-                                    logger.warning(f"{ticker}: Possibly delisted - no price data found")
-                                    return analysis
+                                if hasattr(stock, 'fast_info') and stock.fast_info is not None:
+                                    fast_info = stock.fast_info
+                                    if hasattr(fast_info, 'get'):
+                                        analysis["current_price"] = float(fast_info.get('lastPrice', 0))
+                                        if analysis["current_price"] == 0:
+                                            logger.warning(f"{ticker}: Possibly delisted - no price data found")
+                                            return analysis
+                                    else:
+                                        logger.warning(f"{ticker}: Possibly delisted - no price data available")
+                                        return analysis  # Return early if no price data
+                                else:
+                                    logger.warning(f"{ticker}: Possibly delisted - no price data available")
+                                    return analysis  # Return early if no price data
                             except Exception:
                                 logger.warning(f"{ticker}: Possibly delisted - no price data available")
                                 return analysis  # Return early if no price data

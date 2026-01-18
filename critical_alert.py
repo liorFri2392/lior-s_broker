@@ -36,7 +36,7 @@ class CriticalAlertSystem:
             
             # Try to get today's data
             hist = spy.history(period="5d")
-            if not hist.empty:
+            if hist is not None and not hist.empty:
                 last_date = hist.index[-1].date()
                 # If last trading day is today or yesterday, market is likely open
                 days_diff = (today - last_date).days
@@ -254,7 +254,7 @@ class CriticalAlertSystem:
                                         import yfinance as yf
                                         stock = yf.Ticker(best_trend_etf["ticker"])
                                         hist = stock.history(period="1d")
-                                        if not hist.empty:
+                                        if hist is not None and not hist.empty and 'Close' in hist.columns:
                                             buy_price = float(hist['Close'].iloc[-1])
                                             buy_shares = int(sell_amount / buy_price)
                                             buy_amount = buy_shares * buy_price
@@ -763,7 +763,7 @@ class CriticalAlertSystem:
                                 import yfinance as yf
                                 stock = yf.Ticker(best_alternative)
                                 hist = stock.history(period="1d")
-                                if not hist.empty:
+                                if hist is not None and not hist.empty and 'Close' in hist.columns:
                                     buy_price = float(hist['Close'].iloc[-1])
                                     buy_shares = int(sell_amount / buy_price)
                                     buy_amount = buy_shares * buy_price
@@ -819,7 +819,7 @@ class CriticalAlertSystem:
             spy = yf.Ticker("SPY")
             hist = spy.history(period="5d")
             
-            if not hist.empty and len(hist) >= 2:
+            if hist is not None and not hist.empty and 'Close' in hist.columns and len(hist) >= 2:
                 recent_return = (hist['Close'].iloc[-1] / hist['Close'].iloc[-2] - 1) * 100
                 
                 # Extreme market drop (>3% in one day)
