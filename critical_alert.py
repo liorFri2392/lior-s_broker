@@ -276,33 +276,67 @@ class CriticalAlertSystem:
                                         buy_amount = 0
                                         remaining_cash = 0
                                 
-                                critical_items.append({
-                                    "type": "REPLACE",
-                                    "priority": "HIGH",
-                                    "sell_ticker": weakest_ticker,
-                                    "sell_score": weakest_score,
-                                    "sell_amount": sell_amount,
-                                    "sell_shares": shares_to_sell,
-                                    "buy_ticker": best_trend_etf["ticker"],
-                                    "buy_price": buy_price,
-                                    "buy_shares": buy_shares,
-                                    "buy_amount": buy_amount,
-                                    "remaining_cash": remaining_cash,
-                                    "buy_score": best_trend_etf["score"],
-                                    "buy_category": category,
-                                    "reason": f"🔄 REPLACE: Sell {weakest_ticker} (Score: {weakest_score:.1f}/100) → Buy {best_trend_etf['ticker']} from 🔥 {category} trend (Score: {best_trend_etf['score']:.1f}/100, {momentum:.1f}% momentum)",
-                                    "momentum": momentum,
-                                    "return": return_pct,
-                                    "details": f"Replace weak holding with hot trend: {category} showing {momentum:.1f}% momentum and {return_pct:.1f}% return"
-                                })
-                                print(f"   🔄 REPLACE: {weakest_ticker} (Score: {weakest_score:.1f}) → {best_trend_etf['ticker']} from {category} (Score: {best_trend_etf['score']:.1f})")
-                                continue  # Skip adding as separate EMERGING_TREND if we already added REPLACE
+                                # Only recommend REPLACE if we can actually buy at least 1 share
+                                if buy_shares > 0 and buy_price > 0:
+                                    critical_items.append({
+                                        "type": "REPLACE",
+                                        "priority": "HIGH",
+                                        "sell_ticker": weakest_ticker,
+                                        "sell_score": weakest_score,
+                                        "sell_amount": sell_amount,
+                                        "sell_shares": shares_to_sell,
+                                        "buy_ticker": best_trend_etf["ticker"],
+                                        "buy_price": buy_price,
+                                        "buy_shares": buy_shares,
+                                        "buy_amount": buy_amount,
+                                        "remaining_cash": remaining_cash,
+                                        "buy_score": best_trend_etf["score"],
+                                        "buy_category": category,
+                                        "reason": f"🔄 REPLACE: Sell {weakest_ticker} (Score: {weakest_score:.1f}/100) → Buy {best_trend_etf['ticker']} from 🔥 {category} trend (Score: {best_trend_etf['score']:.1f}/100, {momentum:.1f}% momentum)",
+                                        "momentum": momentum,
+                                        "return": return_pct,
+                                        "details": f"Replace weak holding with hot trend: {category} showing {momentum:.1f}% momentum and {return_pct:.1f}% return"
+                                    })
+                                    print(f"   🔄 REPLACE: {weakest_ticker} (Score: {weakest_score:.1f}) → {best_trend_etf['ticker']} from {category} (Score: {best_trend_etf['score']:.1f})")
+                                    continue  # Skip adding as separate EMERGING_TREND if we already added REPLACE
+                                else:
+                                    # Can't buy enough shares, skip this replacement
+                                    logger.debug(f"Skipping REPLACE {weakest_ticker} → {best_trend_etf['ticker']}: sell_amount ${sell_amount:.2f} insufficient for buy_price ${buy_price:.2f}")
                 
                 # Only add emerging trend alerts if:
                 # 1. We have cash available (>$100) to potentially buy, OR
                 # 2. We already have other specific recommendations (BUY/SELL/REPLACE)
                 has_specific_actions = any(item.get("type") in ["BUY", "SELL", "REPLACE"] for item in critical_items)
-                has_cash_for_trend = cash_available > 100
+                
+                # Check if we have enough cash to buy at least 1 share of the cheapest ETF in the trend
+                has_cash_for_trend = False
+                if cash_available > 100 and trend_etfs:
+                    # Try to get price of cheapest ETF in trend
+                    try:
+                        import yfinance as yf
+                        min_price = float('inf')
+                        for etf_ticker in trend_etfs[:3]:  # Check first 3 ETFs
+                            try:
+                                stock = yf.Ticker(etf_ticker)
+                                hist = stock.history(period="1d")
+                                if hist is not None and not hist.empty and 'Close' in hist.columns:
+                                    price = float(hist['Close'].iloc[-1])
+                                    min_price = min(min_price, price)
+                            except Exception:
+                                continue
+                        
+                        # If we found a price and have enough cash, we can potentially buy
+                        if min_price != float('inf') and cash_available >= min_price:
+                            has_cash_for_trend = True
+                        elif min_price != float('inf'):
+                            logger.debug(f"Trend {category}: cash ${cash_available:.2f} insufficient for cheapest ETF (${min_price:.2f})")
+                    except Exception as e:
+                        logger.debug(f"Failed to check trend ETF prices: {e}")
+                        # Fallback: use simple cash check
+                        has_cash_for_trend = cash_available > 100
+                elif cash_available > 100:
+                    # Fallback: if we can't check prices, use simple threshold
+                    has_cash_for_trend = True
                 
                 if has_cash_for_trend or has_specific_actions:
                     # If no replacement recommended, add as regular emerging trend alert
@@ -318,7 +352,7 @@ class CriticalAlertSystem:
                     })
                     print(f"   🔥 {category}: {momentum:.1f}% momentum, {return_pct:.1f}% return - ETFs: {', '.join(trend_etfs)}")
                 else:
-                    print(f"   🔥 {category}: {momentum:.1f}% momentum detected, but no cash available (${cash_available:.2f}) - skipping alert")
+                    print(f"   🔥 {category}: {momentum:.1f}% momentum detected, but insufficient cash (${cash_available:.2f}) - skipping alert")
         else:
             print("   No strong emerging trends detected at this time")
         
