@@ -298,18 +298,27 @@ class CriticalAlertSystem:
                                 print(f"   🔄 REPLACE: {weakest_ticker} (Score: {weakest_score:.1f}) → {best_trend_etf['ticker']} from {category} (Score: {best_trend_etf['score']:.1f})")
                                 continue  # Skip adding as separate EMERGING_TREND if we already added REPLACE
                 
-                # If no replacement recommended, add as regular emerging trend alert
-                critical_items.append({
-                    "type": "EMERGING_TREND",
-                    "category": category,
-                    "priority": "HIGH",
-                    "reason": f"🔥 EMERGING TREND: {category} showing strong momentum ({momentum:.1f}% in 20 days, {return_pct:.1f}% in 6mo)",
-                    "etfs": trend_etfs,
-                    "momentum": momentum,
-                    "return": return_pct,
-                    "score": trend.get("score", 50)
-                })
-                print(f"   🔥 {category}: {momentum:.1f}% momentum, {return_pct:.1f}% return - ETFs: {', '.join(trend_etfs)}")
+                # Only add emerging trend alerts if:
+                # 1. We have cash available (>$100) to potentially buy, OR
+                # 2. We already have other specific recommendations (BUY/SELL/REPLACE)
+                has_specific_actions = any(item.get("type") in ["BUY", "SELL", "REPLACE"] for item in critical_items)
+                has_cash_for_trend = cash_available > 100
+                
+                if has_cash_for_trend or has_specific_actions:
+                    # If no replacement recommended, add as regular emerging trend alert
+                    critical_items.append({
+                        "type": "EMERGING_TREND",
+                        "category": category,
+                        "priority": "HIGH",
+                        "reason": f"🔥 EMERGING TREND: {category} showing strong momentum ({momentum:.1f}% in 20 days, {return_pct:.1f}% in 6mo)",
+                        "etfs": trend_etfs,
+                        "momentum": momentum,
+                        "return": return_pct,
+                        "score": trend.get("score", 50)
+                    })
+                    print(f"   🔥 {category}: {momentum:.1f}% momentum, {return_pct:.1f}% return - ETFs: {', '.join(trend_etfs)}")
+                else:
+                    print(f"   🔥 {category}: {momentum:.1f}% momentum detected, but no cash available (${cash_available:.2f}) - skipping alert")
         else:
             print("   No strong emerging trends detected at this time")
         
@@ -390,9 +399,14 @@ class CriticalAlertSystem:
         priority_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2}
         critical_items.sort(key=lambda x: priority_order.get(x.get("priority", "MEDIUM"), 3))
         
+        # has_critical should be True only if there are specific actionable recommendations
+        # (BUY/SELL/REPLACE), not just trends
+        specific_action_types = ["BUY", "SELL", "REPLACE"]
+        has_specific_actions = any(item.get("type") in specific_action_types for item in critical_items)
+        
         return {
             "critical_items": critical_items,
-            "has_critical": len(critical_items) > 0,
+            "has_critical": has_specific_actions,  # Only true if specific actions exist
             "portfolio_value": portfolio_analysis.get("portfolio_metrics", {}).get("total_value", 0) if portfolio_analysis else 0,
             "market_status": market_message,
             "timestamp": datetime.now().isoformat()
@@ -865,7 +879,16 @@ class CriticalAlertSystem:
             replace_count = sum(1 for item in critical_items if item.get("type") == "REPLACE")
             trend_count = sum(1 for item in critical_items if item.get("type") == "EMERGING_TREND")
             
-            # Build subject line
+            # Only send email if there are specific actionable recommendations (BUY/SELL/REPLACE)
+            # Trends alone are not actionable without cash or specific recommendations
+            has_specific_actions = buy_count > 0 or sell_count > 0 or replace_count > 0
+            
+            if not has_specific_actions:
+                print("\n✅ No specific actionable recommendations (only trends detected, but no cash or weak holdings to replace).")
+                print("   Email not sent - trends are informational only when no actions are available.")
+                return False
+            
+            # Build subject line (only for specific actions)
             actions = []
             if replace_count > 0:
                 actions.append(f"{replace_count} Replace{'s' if replace_count != 1 else ''}")
@@ -873,8 +896,6 @@ class CriticalAlertSystem:
                 actions.append(f"{buy_count} Buy{'s' if buy_count != 1 else ''}")
             if sell_count > 0:
                 actions.append(f"{sell_count} Sell{'s' if sell_count != 1 else ''}")
-            if trend_count > 0 and not actions:  # Only add if no other actions
-                actions.append(f"{trend_count} Hot Trend{'s' if trend_count != 1 else ''}")
             
             subject = f"URGENT: {', '.join(actions)} Required" if actions else "Portfolio Alert"
             
@@ -895,14 +916,33 @@ class CriticalAlertSystem:
         """Main function to run critical alert check."""
         results = self.check_critical_opportunities()
         
-        if results.get("has_critical"):
-            print(f"\n⚠️  Found {len(results['critical_items'])} critical action(s) requiring immediate attention:")
-            for item in results["critical_items"]:
+        critical_items = results.get("critical_items", [])
+        specific_action_types = ["BUY", "SELL", "REPLACE"]
+        specific_actions = [item for item in critical_items if item.get("type") in specific_action_types]
+        trends_only = [item for item in critical_items if item.get("type") == "EMERGING_TREND"]
+        
+        if results.get("has_critical") and specific_actions:
+            print(f"\n⚠️  Found {len(specific_actions)} critical action(s) requiring immediate attention:")
+            for item in specific_actions:
                 print(f"\n   [{item.get('priority', 'MEDIUM')}] {item.get('type', 'ACTION')}: {item.get('ticker', item.get('title', 'N/A'))}")
                 print(f"      Reason: {item.get('reason', 'N/A')}")
             
+            # Also show trends if any (as informational)
+            if trends_only:
+                print(f"\n📊 Also detected {len(trends_only)} hot trend(s) (included in email):")
+                for item in trends_only:
+                    print(f"   🔥 {item.get('category', 'N/A')}: {item.get('momentum', 0):.1f}% momentum")
+            
             # Send email alerts
             self.send_alerts(results)
+        elif trends_only:
+            print(f"\n📊 Detected {len(trends_only)} hot trend(s), but no specific actionable recommendations:")
+            for item in trends_only:
+                print(f"   🔥 {item.get('category', 'N/A')}: {item.get('momentum', 0):.1f}% momentum - ETFs: {', '.join(item.get('etfs', []))}")
+            print("\n   ℹ️  No email sent - trends are informational only when:")
+            print("      • No cash available for purchases (<$100)")
+            print("      • No weak holdings to replace with trend ETFs")
+            print("      • Portfolio is balanced and performing well")
         else:
             print("\n✅ No critical actions required. Portfolio is in good shape.")
             print("   (No email sent - only critical alerts trigger emails)")
