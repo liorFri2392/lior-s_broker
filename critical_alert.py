@@ -834,27 +834,32 @@ class CriticalAlertSystem:
                                 buy_amount = 0
                                 remaining_cash = 0
                         
-                        replacement_opportunities.append({
-                            "type": "REPLACE",
-                            "priority": priority,
-                            "sell_ticker": ticker,
-                            "sell_score": current_score,
-                            "sell_amount": sell_amount,
-                            "sell_shares": shares_to_sell,
-                            "sell_category": category_name,
-                            "buy_ticker": best_alternative,
-                            "buy_price": buy_price,
-                            "buy_shares": buy_shares,
-                            "buy_amount": buy_amount,
-                            "remaining_cash": remaining_cash,
-                            "buy_score": best_score,
-                            "buy_category": category_name,
-                            "score_improvement": score_diff,
-                            "reason": f"🔄 OPTIMIZE: {ticker} (Score: {current_score:.1f}/100) → {best_alternative} (Score: {best_score:.1f}/100, +{score_diff:.1f} points) - Better performance for {category_name} allocation",
-                            "details": f"Replace {replace_percentage*100:.0f}% of {ticker} with {best_alternative} to improve {category_name} allocation. Expected return: {expected_return:.1f}% vs {current_return:.1f}%",
-                            "strategy": "80/20 Balanced Growth"
-                        })
-                        print(f"   🔄 {ticker} (Score: {current_score:.1f}) → {best_alternative} (Score: {best_score:.1f}, +{score_diff:.1f})")
+                        # Only recommend REPLACE if we can actually buy at least 1 share
+                        if buy_shares > 0 and buy_price > 0:
+                            replacement_opportunities.append({
+                                "type": "REPLACE",
+                                "priority": priority,
+                                "sell_ticker": ticker,
+                                "sell_score": current_score,
+                                "sell_amount": sell_amount,
+                                "sell_shares": shares_to_sell,
+                                "sell_category": category_name,
+                                "buy_ticker": best_alternative,
+                                "buy_price": buy_price,
+                                "buy_shares": buy_shares,
+                                "buy_amount": buy_amount,
+                                "remaining_cash": remaining_cash,
+                                "buy_score": best_score,
+                                "buy_category": category_name,
+                                "score_improvement": score_diff,
+                                "reason": f"🔄 OPTIMIZE: {ticker} (Score: {current_score:.1f}/100) → {best_alternative} (Score: {best_score:.1f}/100, +{score_diff:.1f} points) - Better performance for {category_name} allocation",
+                                "details": f"Replace {replace_percentage*100:.0f}% of {ticker} with {best_alternative} to improve {category_name} allocation. Expected return: {expected_return:.1f}% vs {current_return:.1f}%",
+                                "strategy": "80/20 Balanced Growth"
+                            })
+                            print(f"   🔄 {ticker} (Score: {current_score:.1f}) → {best_alternative} (Score: {best_score:.1f}, +{score_diff:.1f})")
+                        else:
+                            # Can't buy enough shares, skip this replacement
+                            logger.debug(f"Skipping REPLACE {ticker} → {best_alternative}: sell_amount ${sell_amount:.2f} insufficient for buy_price ${buy_price:.2f} (would buy {buy_shares} shares)")
         
         return replacement_opportunities
     
