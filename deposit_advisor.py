@@ -350,84 +350,130 @@ class DepositAdvisor:
             # Calculate metrics
             returns = data['Close'].pct_change().dropna()
             
-            # Score calculation
-            score = 50  # Base score
+            # === NORMALIZED SCORING SYSTEM ===
+            # Each factor produces a sub-score in [0, 1] range
+            # Weighted combination based on financial theory
+            # Weights: Risk-adjusted return (30%), Momentum (20%), Volatility (15%),
+            #          Liquidity (10%), Expense (10%), Trend (15%)
+            sub_scores = {}
             
-            # 1. Performance (30 points)
+            # 1. Risk-adjusted return (Sharpe-based) — weight: 0.30
             annual_return = (data['Close'].iloc[-1] / data['Close'].iloc[0] - 1) * 100
-            if annual_return > 20:
-                score += 20
-                analysis["reasons"].append(f"Strong annual return: {annual_return:.1f}%")
-            elif annual_return > 10:
-                score += 10
-                analysis["reasons"].append(f"Good annual return: {annual_return:.1f}%")
-            elif annual_return < -10:
-                score -= 15
-                analysis["reasons"].append(f"Negative annual return: {annual_return:.1f}%")
-            
-            # 2. Volatility (20 points) - Adjusted for leveraged ETFs
             volatility = returns.std() * np.sqrt(252) * 100
             
-            # Leveraged ETFs have inherently higher volatility - adjust expectations
+            try:
+                risk_free_rate = self.advanced_analyzer.get_risk_free_rate()
+            except Exception:
+                risk_free_rate = 0.045
+            
+            if volatility > 0:
+                sharpe = (annual_return / 100 - risk_free_rate) / (volatility / 100)
+            else:
+                sharpe = 0
+            
+            # Normalize Sharpe: map [-1, 3] -> [0, 1] with sigmoid-like clamping
+            sharpe_norm = max(0.0, min(1.0, (sharpe + 1) / 4.0))
+            sub_scores['risk_adjusted_return'] = sharpe_norm
+            
+            if sharpe > 1.5:
+                analysis["reasons"].append(f"Excellent risk-adjusted return (Sharpe: {sharpe:.2f}, Return: {annual_return:.1f}%)")
+            elif sharpe > 0.5:
+                analysis["reasons"].append(f"Good risk-adjusted return (Sharpe: {sharpe:.2f}, Return: {annual_return:.1f}%)")
+            elif sharpe < -0.5:
+                analysis["reasons"].append(f"Poor risk-adjusted return (Sharpe: {sharpe:.2f}, Return: {annual_return:.1f}%)")
+            
+            # 2. Momentum (multi-timeframe) — weight: 0.20
+            recent_return = (data['Close'].iloc[-1] / data['Close'].iloc[-20] - 1) * 100 if len(data) >= 20 else 0
+            mid_return = (data['Close'].iloc[-1] / data['Close'].iloc[-60] - 1) * 100 if len(data) >= 60 else recent_return
+            
+            # Blend: 60% short-term (20d) + 40% mid-term (60d)
+            blended_momentum = 0.6 * recent_return + 0.4 * mid_return
+            # Normalize: map [-15, 15] -> [0, 1]
+            momentum_norm = max(0.0, min(1.0, (blended_momentum + 15) / 30.0))
+            sub_scores['momentum'] = momentum_norm
+            
+            if blended_momentum > 5:
+                analysis["reasons"].append(f"Strong momentum: {recent_return:.1f}% (20d), {mid_return:.1f}% (60d)")
+            elif blended_momentum < -5:
+                analysis["reasons"].append(f"Negative momentum: {recent_return:.1f}% (20d), {mid_return:.1f}% (60d)")
+            
+            # 3. Volatility (lower is better for non-leveraged) — weight: 0.15
             if analysis["is_leveraged"]:
                 leverage = abs(analysis["leverage_multiplier"])
-                # For leveraged ETFs, multiply volatility threshold by leverage
-                volatility_threshold_low = 15 * leverage
-                volatility_threshold_high = 30 * leverage
-                
-                if volatility < volatility_threshold_low:
-                    score += 10
-                    analysis["reasons"].append(f"Relatively low volatility for {leverage}x leveraged ETF: {volatility:.1f}%")
-                elif volatility > volatility_threshold_high:
-                    score -= 15  # More penalty for high volatility in leveraged ETFs
-                    analysis["reasons"].append(f"⚠️ Very high volatility for {leverage}x leveraged ETF: {volatility:.1f}%")
-                else:
-                    analysis["reasons"].append(f"Expected high volatility for {leverage}x leveraged ETF: {volatility:.1f}%")
+                adjusted_vol = volatility / leverage
             else:
-                if volatility < 15:
-                    score += 10
-                    analysis["reasons"].append(f"Low volatility: {volatility:.1f}%")
-                elif volatility > 30:
-                    score -= 10
-                    analysis["reasons"].append(f"High volatility: {volatility:.1f}%")
+                adjusted_vol = volatility
             
-            # 3. Momentum (20 points)
-            recent_return = (data['Close'].iloc[-1] / data['Close'].iloc[-20] - 1) * 100 if len(data) >= 20 else 0
-            if recent_return > 5:
-                score += 15
-                analysis["reasons"].append(f"Positive momentum: {recent_return:.1f}%")
-            elif recent_return < -5:
-                score -= 15
-                analysis["reasons"].append(f"Negative momentum: {recent_return:.1f}%")
+            # Normalize: map [5, 40] -> [1, 0] (inverse — lower vol = higher score)
+            vol_norm = max(0.0, min(1.0, 1.0 - (adjusted_vol - 5) / 35.0))
+            sub_scores['volatility'] = vol_norm
             
-            # 4. Expense ratio (10 points)
-            if analysis["expense_ratio"] < 0.1:
-                score += 10
-                analysis["reasons"].append(f"Low expense ratio: {analysis['expense_ratio']:.2f}%")
-            elif analysis["expense_ratio"] > 0.5:
-                score -= 5
-                analysis["reasons"].append(f"High expense ratio: {analysis['expense_ratio']:.2f}%")
+            if analysis["is_leveraged"]:
+                analysis["reasons"].append(f"Volatility: {volatility:.1f}% ({leverage}x leveraged, adjusted: {adjusted_vol:.1f}%)")
+            elif volatility < 15:
+                analysis["reasons"].append(f"Low volatility: {volatility:.1f}%")
+            elif volatility > 30:
+                analysis["reasons"].append(f"High volatility: {volatility:.1f}%")
             
-            # 5. Volume/Liquidity (10 points)
+            # 4. Expense ratio — weight: 0.10
+            exp_ratio = analysis["expense_ratio"]
+            # Normalize: map [0, 1.0] -> [1, 0] (lower expense = higher score)
+            expense_norm = max(0.0, min(1.0, 1.0 - exp_ratio / 1.0))
+            sub_scores['expense_ratio'] = expense_norm
+            
+            if exp_ratio < 0.1:
+                analysis["reasons"].append(f"Low expense ratio: {exp_ratio:.2f}%")
+            elif exp_ratio > 0.5:
+                analysis["reasons"].append(f"High expense ratio: {exp_ratio:.2f}%")
+            
+            # 5. Volume/Liquidity — weight: 0.10
             avg_volume = data['Volume'].mean()
+            # Normalize: log scale, map [50k, 10M] -> [0, 1]
+            if avg_volume > 0:
+                log_vol = np.log10(avg_volume)
+                liquidity_norm = max(0.0, min(1.0, (log_vol - np.log10(50_000)) / (np.log10(10_000_000) - np.log10(50_000))))
+            else:
+                liquidity_norm = 0.0
+            sub_scores['liquidity'] = liquidity_norm
+            
             if avg_volume > 1_000_000:
-                score += 10
                 analysis["reasons"].append("High liquidity")
             elif avg_volume < 100_000:
-                score -= 5
                 analysis["reasons"].append("Low liquidity")
             
-            # 6. Technical indicators (10 points)
+            # 6. Trend (MA alignment) — weight: 0.15
             sma_20 = data['Close'].tail(20).mean()
             sma_50 = data['Close'].tail(min(50, len(data))).mean()
             current_price = data['Close'].iloc[-1]
             
+            # Normalized trend: how far above/below MA structure
+            if sma_50 > 0:
+                trend_strength = ((current_price / sma_50) - 1) * 100
+                trend_norm = max(0.0, min(1.0, (trend_strength + 10) / 20.0))
+            else:
+                trend_norm = 0.5
+            sub_scores['trend'] = trend_norm
+            
             if current_price > sma_20 > sma_50:
-                score += 10
                 analysis["reasons"].append("Bullish trend (price above moving averages)")
             elif current_price < sma_20 < sma_50:
-                score -= 10
                 analysis["reasons"].append("Bearish trend (price below moving averages)")
+            
+            # === WEIGHTED SCORE COMBINATION ===
+            weights_map = {
+                'risk_adjusted_return': 0.30,
+                'momentum': 0.20,
+                'volatility': 0.15,
+                'expense_ratio': 0.10,
+                'liquidity': 0.10,
+                'trend': 0.15
+            }
+            
+            weighted_score = sum(sub_scores.get(k, 0.5) * w for k, w in weights_map.items())
+            # Map [0, 1] -> [0, 100] for the final score
+            score = weighted_score * 100
+            
+            analysis["sub_scores"] = sub_scores
             
             # 7. Industry trend analysis (15 points)
             etf_category = None

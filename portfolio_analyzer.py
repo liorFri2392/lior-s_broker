@@ -406,28 +406,46 @@ class PortfolioAnalyzer:
         # Momentum
         indicators['momentum'] = (closes.iloc[-1] / closes.iloc[-20] - 1) * 100 if len(closes) >= 20 else 0
         
-        # Sharpe ratio (simplified)
+        # Sharpe ratio (with dynamic risk-free rate)
+        try:
+            risk_free_rate = self.advanced_analyzer.get_risk_free_rate()
+        except Exception:
+            risk_free_rate = 0.045  # Fallback
+        daily_rf = risk_free_rate / 252
+        
         if returns.std() > 0:
-            indicators['sharpe'] = (returns.mean() * 252) / (returns.std() * np.sqrt(252))
+            excess_returns = returns - daily_rf
+            indicators['sharpe'] = (excess_returns.mean() * 252) / (returns.std() * np.sqrt(252))
         else:
             indicators['sharpe'] = 0
+        indicators['risk_free_rate'] = risk_free_rate * 100
         
-        # Beta (market correlation) - simplified
+        # Sortino ratio (penalizes only downside deviation)
+        downside_returns = returns[returns < daily_rf]
+        if len(downside_returns) > 0 and downside_returns.std() > 0:
+            indicators['sortino'] = ((returns.mean() - daily_rf) * 252) / (downside_returns.std() * np.sqrt(252))
+        else:
+            indicators['sortino'] = indicators['sharpe']
+        
+        # Beta (market correlation) - proper date alignment via merge
         try:
             spy = yf.Ticker("SPY")
-            # Use same period as data
             data_period = "1y" if len(data) < 252 else "2y" if len(data) < 504 else "5y"
             spy_data = spy.history(period=data_period)
             if spy_data is not None and not spy_data.empty and 'Close' in spy_data.columns:
-                # Align data lengths
-                min_len = min(len(data), len(spy_data))
-                spy_returns = spy_data['Close'].pct_change().dropna().tail(min_len)
-                asset_returns = returns.dropna().tail(min_len)
-                if len(spy_returns) == len(asset_returns) and len(asset_returns) > 10:
-                    covariance = np.cov(asset_returns, spy_returns)[0][1]
-                    spy_variance = np.var(spy_returns)
+                # Create DataFrames with date index, then inner-join to align dates
+                asset_ret_df = returns.dropna().to_frame(name='asset')
+                spy_ret_df = spy_data['Close'].pct_change().dropna().to_frame(name='spy')
+                
+                # Align by date index (inner join ensures matching dates only)
+                aligned = asset_ret_df.join(spy_ret_df, how='inner')
+                aligned = aligned.dropna()
+                
+                if len(aligned) > 10:
+                    covariance = np.cov(aligned['asset'], aligned['spy'])[0][1]
+                    spy_variance = np.var(aligned['spy'])
                     if spy_variance > 0:
-                        indicators['beta'] = covariance / spy_variance
+                        indicators['beta'] = float(covariance / spy_variance)
                     else:
                         indicators['beta'] = 1.0
                 else:
@@ -593,41 +611,61 @@ class PortfolioAnalyzer:
         # Get news sentiment
         analysis["news_sentiment"] = self.get_news_sentiment(ticker)
         
-        # Calculate recommendation score
-        score = 50  # Neutral base
+        # === NORMALIZED SCORING (consistent with deposit_advisor) ===
+        sub_scores = {}
         
         if analysis["technical_indicators"]:
             ti = analysis["technical_indicators"]
             
-            # RSI analysis
-            if ti.get('rsi', 50) < 30:
-                score += 15  # Oversold, potential buy
-            elif ti.get('rsi', 50) > 70:
-                score -= 15  # Overbought, potential sell
+            # RSI sub-score: map oversold (buy signal) / overbought (sell signal)
+            rsi = ti.get('rsi', 50)
+            # For existing holdings: oversold = higher score (recovery potential)
+            # overbought = lower score (profit-taking)
+            rsi_norm = max(0.0, min(1.0, (100 - rsi) / 100.0))  # Invert: low RSI = high score
+            sub_scores['rsi'] = rsi_norm
             
-            # Momentum analysis
-            if ti.get('momentum', 0) > 5:
-                score += 10
-            elif ti.get('momentum', 0) < -5:
-                score -= 10
+            # Momentum sub-score
+            momentum = ti.get('momentum', 0)
+            momentum_norm = max(0.0, min(1.0, (momentum + 15) / 30.0))
+            sub_scores['momentum'] = momentum_norm
             
-            # Sharpe ratio
-            if ti.get('sharpe', 0) > 1:
-                score += 10
-            elif ti.get('sharpe', 0) < 0:
-                score -= 10
+            # Sharpe sub-score
+            sharpe = ti.get('sharpe', 0)
+            sharpe_norm = max(0.0, min(1.0, (sharpe + 1) / 4.0))
+            sub_scores['sharpe'] = sharpe_norm
+            
+            # Sortino sub-score (if available)
+            sortino = ti.get('sortino', sharpe)
+            sortino_norm = max(0.0, min(1.0, (sortino + 1) / 4.0))
+            sub_scores['sortino'] = sortino_norm
+            
+            # Volatility sub-score (lower is better)
+            vol = ti.get('volatility', 20)
+            vol_norm = max(0.0, min(1.0, 1.0 - (vol - 5) / 35.0))
+            sub_scores['volatility'] = vol_norm
+            
+            # Trend sub-score
+            trend = ti.get('trend', 'NEUTRAL')
+            trend_norm = 0.75 if trend == 'BULLISH' else (0.25 if trend == 'BEARISH' else 0.5)
+            sub_scores['trend'] = trend_norm
         
-        # News sentiment (enhanced)
+        # News sentiment sub-score (normalized)
         news_sentiment = analysis["news_sentiment"]
-        if news_sentiment.get("sentiment_analysis") == "POSITIVE":
-            score += 15
-        elif news_sentiment.get("sentiment_analysis") == "NEGATIVE":
-            score -= 15
+        sentiment_score = news_sentiment.get("score", 50)
+        sentiment_norm = max(0.0, min(1.0, sentiment_score / 100.0))
+        sub_scores['sentiment'] = sentiment_norm
         
-        if news_sentiment["score"] > 60:
-            score += 5
-        elif news_sentiment["score"] < 40:
-            score -= 5
+        # Weighted combination
+        # Risk-adjusted (Sharpe+Sortino): 30%, Momentum: 20%, Volatility: 15%,
+        # Trend: 15%, Sentiment: 10%, RSI: 10%
+        holding_weights = {
+            'sharpe': 0.15, 'sortino': 0.15,
+            'momentum': 0.20, 'volatility': 0.15,
+            'trend': 0.15, 'sentiment': 0.10, 'rsi': 0.10
+        }
+        
+        weighted_score = sum(sub_scores.get(k, 0.5) * w for k, w in holding_weights.items())
+        score = weighted_score * 100  # Map [0,1] -> [0,100]
         
         # Industry trend analysis (if available from deposit_advisor)
         etf_category = None

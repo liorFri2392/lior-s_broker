@@ -4,6 +4,7 @@ numpy>=1.24.0
 python-dotenv>=1.0.0
 newsapi-python>=0.2.7
 scikit-learn>=1.3.0
+scipy>=1.11.0
 tensorflow>=2.13.0  # Optional - for LSTM predictions
 requests>=2.31.0  # For GitHub API
 PyNaCl>=1.5.0  # For GitHub Secrets encryption

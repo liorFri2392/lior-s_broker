@@ -77,8 +77,30 @@ class AdvancedAnalyzer:
         
         return patterns
     
+    def get_risk_free_rate(self) -> float:
+        """Get current risk-free rate from 3-month Treasury yield (^IRX).
+        Falls back to 4.5% if unavailable."""
+        try:
+            irx = yf.Ticker("^IRX")
+            hist = irx.history(period="5d")
+            if hist is not None and not hist.empty and 'Close' in hist.columns:
+                # ^IRX is quoted as percentage (e.g. 4.5 means 4.5%)
+                rate = float(hist['Close'].iloc[-1]) / 100.0
+                if 0 < rate < 0.15:  # Sanity: between 0% and 15%
+                    return rate
+        except Exception as e:
+            logger.debug(f"Failed to fetch risk-free rate: {e}")
+        return 0.045  # Default fallback
+
     def calculate_statistical_forecast(self, data: pd.DataFrame, periods: int = 60) -> Dict:
-        """Calculate statistical forecast using regression models with error handling."""
+        """
+        Calculate statistical forecast using Geometric Brownian Motion (GBM).
+        
+        Uses log returns (stationary) instead of raw price levels (non-stationary).
+        GBM: S(t) = S(0) * exp((mu - sigma^2/2)*t + sigma*W(t))
+        where mu = drift (annualized mean log return), sigma = annualized volatility.
+        Monte Carlo simulation provides confidence intervals.
+        """
         if data.empty or len(data) < 30:
             return {}
         
@@ -87,85 +109,87 @@ class AdvancedAnalyzer:
             if len(closes) < 30:
                 return {}
             
-            dates = np.arange(len(closes))
-            
-            # Linear regression
-            X = dates.reshape(-1, 1)
-            y = closes
-            
-            # Simple linear regression
-            lr = LinearRegression()
-            lr.fit(X, y)
-            linear_forecast = lr.predict(np.array([[len(closes) + periods]]))[0]
-            
-            # Polynomial regression (degree 2) - more accurate for trends
-            try:
-                poly_features = PolynomialFeatures(degree=2)
-                X_poly = poly_features.fit_transform(X)
-                poly_lr = LinearRegression()
-                poly_lr.fit(X_poly, y)
-                X_future = poly_features.transform(np.array([[len(closes) + periods]]))
-                poly_forecast = poly_lr.predict(X_future)[0]
-            except Exception as e:
-                logger.debug(f"Polynomial regression failed, using linear: {e}")
-                # Fallback to linear if polynomial fails
-                poly_forecast = linear_forecast
-            
-            # Calculate confidence intervals
-            residuals = y - lr.predict(X)
-            std_error = np.std(residuals) if len(residuals) > 0 else 0
-            confidence_interval = 1.96 * std_error if std_error > 0 else 0  # 95% confidence
-            
-            # Calculate expected return
             current_price = closes[-1]
-            if current_price > 0:
-                expected_return_linear = (linear_forecast / current_price - 1) * 100
-                expected_return_poly = (poly_forecast / current_price - 1) * 100
-                
-                # Sanity check: if forecast is unrealistic, use historical average instead
-                # For 3-year forecast, realistic range is -50% to +50% annualized
-                # For total 3-year return, realistic range is roughly -80% to +200%
-                max_realistic_return = 200  # 200% over 3 years is very optimistic but possible
-                min_realistic_return = -80  # -80% over 3 years is very pessimistic
-                
-                # If polynomial forecast is unrealistic, fall back to linear or historical
-                if expected_return_poly > max_realistic_return or expected_return_poly < min_realistic_return:
-                    # Use linear if it's more reasonable
-                    if min_realistic_return <= expected_return_linear <= max_realistic_return:
-                        expected_return_poly = expected_return_linear
-                    else:
-                        # Fall back to historical average annualized return
-                        historical_returns = (closes[-1] / closes[0] - 1) * 100 if len(closes) > 0 else 0
-                        years_of_data = len(closes) / 252  # Approximate years
-                        if years_of_data > 0:
-                            annualized_return = ((1 + historical_returns / 100) ** (1 / years_of_data) - 1) * 100
-                            # Project to 3 years
-                            expected_return_poly = ((1 + annualized_return / 100) ** 3 - 1) * 100
-                            # Cap at realistic range
-                            expected_return_poly = max(min_realistic_return, min(max_realistic_return, expected_return_poly))
-                        else:
-                            expected_return_poly = 10  # Default to 10% if no data
-                
-                # Cap both returns at realistic range
-                expected_return_linear = max(min_realistic_return, min(max_realistic_return, expected_return_linear))
-                expected_return_poly = max(min_realistic_return, min(max_realistic_return, expected_return_poly))
-            else:
-                expected_return_linear = 0
-                expected_return_poly = 0
+            if current_price <= 0:
+                return {}
+            
+            # Use LOG RETURNS (stationary, proper for financial time series)
+            log_returns = np.diff(np.log(closes))
+            
+            # Annualized parameters
+            mu_daily = np.mean(log_returns)
+            sigma_daily = np.std(log_returns, ddof=1)
+            mu_annual = mu_daily * 252
+            sigma_annual = sigma_daily * np.sqrt(252)
+            
+            # Time horizon in years
+            t = periods / 252.0
+            
+            # GBM expected price: E[S(t)] = S(0) * exp(mu * t)
+            # GBM median price: S(0) * exp((mu - sigma^2/2) * t)
+            drift = mu_annual - 0.5 * sigma_annual ** 2
+            expected_price = current_price * np.exp(mu_annual * t)
+            median_price = current_price * np.exp(drift * t)
+            
+            # Monte Carlo simulation for confidence intervals (1000 paths)
+            n_simulations = 1000
+            np.random.seed(42)  # Reproducible
+            random_shocks = np.random.normal(0, 1, n_simulations)
+            simulated_log_returns = drift * t + sigma_annual * np.sqrt(t) * random_shocks
+            simulated_prices = current_price * np.exp(simulated_log_returns)
+            
+            # Confidence intervals from simulation
+            ci_5 = float(np.percentile(simulated_prices, 5))
+            ci_25 = float(np.percentile(simulated_prices, 25))
+            ci_75 = float(np.percentile(simulated_prices, 75))
+            ci_95 = float(np.percentile(simulated_prices, 95))
+            
+            # Expected returns (using median for "expected_return_polynomial" for backward compat)
+            expected_return_median = (median_price / current_price - 1) * 100
+            expected_return_mean = (expected_price / current_price - 1) * 100
+            
+            # Linear regression on log prices for trend-based forecast (backward compat)
+            log_closes = np.log(closes)
+            X = np.arange(len(closes)).reshape(-1, 1)
+            lr = LinearRegression()
+            lr.fit(X, log_closes)
+            log_forecast = lr.predict(np.array([[len(closes) + periods]]))[0]
+            linear_forecast = np.exp(log_forecast)
+            expected_return_linear = (linear_forecast / current_price - 1) * 100
+            
+            # Cap at realistic range
+            max_realistic_return = 200
+            min_realistic_return = -80
+            expected_return_linear = max(min_realistic_return, min(max_realistic_return, expected_return_linear))
+            expected_return_median = max(min_realistic_return, min(max_realistic_return, expected_return_median))
             
             return {
-                "current_price": current_price,
-                "forecast_linear": linear_forecast,
-                "forecast_polynomial": poly_forecast,
-                "expected_return_linear": expected_return_linear,
-                "expected_return_polynomial": expected_return_poly,
-                "confidence_interval": confidence_interval,
-                "forecast_periods": periods
+                "current_price": float(current_price),
+                "forecast_linear": float(linear_forecast),
+                "forecast_polynomial": float(median_price),  # Backward compat: use GBM median
+                "expected_return_linear": float(expected_return_linear),
+                "expected_return_polynomial": float(expected_return_median),  # Backward compat
+                "expected_return_mean": float(expected_return_mean),
+                "confidence_interval": float(ci_95 - ci_5),
+                "confidence_interval_95": (float(ci_5), float(ci_95)),
+                "confidence_interval_50": (float(ci_25), float(ci_75)),
+                "forecast_periods": periods,
+                "annualized_drift": float(mu_annual * 100),
+                "annualized_volatility": float(sigma_annual * 100),
+                "method": "GBM_MonteCarlo"
             }
         except Exception as e:
             logger.warning(f"Failed to calculate statistical forecast: {e}")
             return {}
     
+    def _calculate_temporal_max_drawdown(self, prices: np.ndarray) -> float:
+        """Calculate proper temporal max drawdown (peak-to-trough in chronological order)."""
+        if len(prices) < 2:
+            return 0.0
+        cumulative_max = np.maximum.accumulate(prices)
+        drawdowns = (prices - cumulative_max) / cumulative_max
+        return float(np.min(drawdowns) * 100)
+
     def analyze_bonds(self, ticker: str) -> Dict:
         """Advanced bond analysis focusing on yield and risk."""
         try:
@@ -195,21 +219,22 @@ class AdvancedAnalyzer:
             # Yield stability
             yield_volatility = returns.std() * np.sqrt(252) * 100
             
-            # Risk-adjusted yield (Sharpe-like for bonds)
-            risk_free_rate = 0.03  # Approximate 3% risk-free rate
+            # Dynamic risk-free rate
+            risk_free_rate = self.get_risk_free_rate()
             excess_return = (annual_yield / 100) - risk_free_rate
-            risk_adjusted_yield = (excess_return / (yield_volatility / 100)) * 100 if yield_volatility > 0 else 0
+            risk_adjusted_yield = (excess_return / (yield_volatility / 100)) if yield_volatility > 0 else 0
             
             analysis["yield_analysis"] = {
                 "current_yield": current_yield,
                 "annual_yield": annual_yield,
                 "yield_volatility": yield_volatility,
-                "risk_adjusted_yield": risk_adjusted_yield
+                "risk_adjusted_yield": risk_adjusted_yield,
+                "risk_free_rate_used": risk_free_rate * 100
             }
             
-            # Risk metrics
-            max_drawdown = ((data['Close'].min() / data['Close'].max()) - 1) * 100
-            price_stability = 1 - (yield_volatility / 100)  # Higher is better
+            # Risk metrics — proper temporal max drawdown
+            max_drawdown = self._calculate_temporal_max_drawdown(data['Close'].values)
+            price_stability = max(0.0, 1 - (yield_volatility / 100))  # Clamp >= 0
             
             analysis["risk_metrics"] = {
                 "max_drawdown": max_drawdown,
@@ -310,8 +335,16 @@ class AdvancedAnalyzer:
         return optimized
     
     def calculate_portfolio_optimization(self, holdings: List[Dict], target_return: float = 0.10) -> Dict:
-        """Calculate optimal portfolio allocation for target return using Modern Portfolio Theory."""
-        if not holdings:
+        """
+        Calculate optimal portfolio allocation using Modern Portfolio Theory.
+        
+        Performs actual mean-variance optimization:
+        1. Monte Carlo simulation to map the efficient frontier
+        2. Maximum Sharpe Ratio portfolio (tangency portfolio)
+        3. Minimum Variance portfolio
+        4. Optimal weights for each asset
+        """
+        if not holdings or len(holdings) < 2:
             return {}
         
         # Get historical returns for all holdings
@@ -328,40 +361,148 @@ class AdvancedAnalyzer:
                 logger.debug(f"Failed to get returns data for {ticker}: {e}")
                 continue
         
-        if not returns_data:
+        if len(returns_data) < 2:
             return {}
         
-        # Create returns matrix
+        # Create returns matrix aligned by date (proper join)
         returns_df = pd.DataFrame(returns_data)
         returns_df = returns_df.dropna()
         
         if len(returns_df) < 30:
             return {}
         
-        # Calculate mean returns and covariance matrix
+        n_assets = len(returns_df.columns)
+        tickers = list(returns_df.columns)
+        
+        # Annualized parameters
         mean_returns = returns_df.mean() * 252
         cov_matrix = returns_df.cov() * 252
         
-        # Simple optimization: maximize Sharpe ratio
-        # For each asset, calculate expected return and risk
+        # Dynamic risk-free rate
+        risk_free_rate = self.get_risk_free_rate()
+        
+        # Individual asset metrics
         portfolio_metrics = {}
-        for ticker in returns_data.keys():
+        for ticker in tickers:
             mean_ret = mean_returns[ticker]
             std_ret = np.sqrt(cov_matrix.loc[ticker, ticker])
-            sharpe = mean_ret / std_ret if std_ret > 0 else 0
+            sharpe = (mean_ret - risk_free_rate) / std_ret if std_ret > 0 else 0
+            
+            # Sortino ratio (downside deviation only)
+            daily_returns = returns_df[ticker]
+            downside_returns = daily_returns[daily_returns < 0]
+            downside_std = downside_returns.std() * np.sqrt(252) if len(downside_returns) > 0 else std_ret
+            sortino = (mean_ret - risk_free_rate) / downside_std if downside_std > 0 else 0
             
             portfolio_metrics[ticker] = {
-                "expected_return": mean_ret * 100,
-                "volatility": std_ret * 100,
-                "sharpe_ratio": sharpe
+                "expected_return": float(mean_ret * 100),
+                "volatility": float(std_ret * 100),
+                "sharpe_ratio": float(sharpe),
+                "sortino_ratio": float(sortino)
             }
         
-        # Calculate correlation matrix
+        # Monte Carlo optimization: find max Sharpe and min variance portfolios
+        n_simulations = 5000
+        results = np.zeros((n_simulations, 3 + n_assets))  # return, vol, sharpe, weights...
+        
+        for i in range(n_simulations):
+            # Random weights (sum to 1, no shorting)
+            weights = np.random.dirichlet(np.ones(n_assets))
+            
+            # Portfolio return and volatility
+            port_return = np.dot(weights, mean_returns.values)
+            port_vol = np.sqrt(np.dot(weights.T, np.dot(cov_matrix.values, weights)))
+            port_sharpe = (port_return - risk_free_rate) / port_vol if port_vol > 0 else 0
+            
+            results[i, 0] = port_return
+            results[i, 1] = port_vol
+            results[i, 2] = port_sharpe
+            results[i, 3:] = weights
+        
+        # Maximum Sharpe Ratio portfolio
+        max_sharpe_idx = np.argmax(results[:, 2])
+        max_sharpe_weights = results[max_sharpe_idx, 3:]
+        max_sharpe_return = results[max_sharpe_idx, 0]
+        max_sharpe_vol = results[max_sharpe_idx, 1]
+        max_sharpe_ratio = results[max_sharpe_idx, 2]
+        
+        # Minimum Variance portfolio
+        min_vol_idx = np.argmin(results[:, 1])
+        min_vol_weights = results[min_vol_idx, 3:]
+        min_vol_return = results[min_vol_idx, 0]
+        min_vol_vol = results[min_vol_idx, 1]
+        
+        # Current weights (from holdings)
+        total_value = sum(h.get("current_value", h.get("quantity", 0) * h.get("current_price", 0)) for h in holdings)
+        current_weights = {}
+        for h in holdings:
+            t = h.get("ticker")
+            if t in tickers:
+                val = h.get("current_value", h.get("quantity", 0) * h.get("current_price", 0))
+                current_weights[t] = val / total_value if total_value > 0 else 1.0 / n_assets
+        
+        # Current portfolio metrics
+        cw = np.array([current_weights.get(t, 0) for t in tickers])
+        if np.sum(cw) > 0:
+            cw = cw / np.sum(cw)  # Normalize
+            current_return = float(np.dot(cw, mean_returns.values))
+            current_vol = float(np.sqrt(np.dot(cw.T, np.dot(cov_matrix.values, cw))))
+            current_sharpe = float((current_return - risk_free_rate) / current_vol) if current_vol > 0 else 0
+        else:
+            current_return = 0
+            current_vol = 0
+            current_sharpe = 0
+        
+        # Build optimal weights dict
+        optimal_weights = {tickers[i]: float(max_sharpe_weights[i]) for i in range(n_assets)}
+        min_var_weights_dict = {tickers[i]: float(min_vol_weights[i]) for i in range(n_assets)}
+        
+        # Correlation matrix
         correlation_matrix = returns_df.corr()
         
         return {
             "portfolio_metrics": portfolio_metrics,
             "correlation_matrix": correlation_matrix.to_dict(),
-            "recommendation": "Diversify based on low correlation assets"
+            "risk_free_rate": float(risk_free_rate * 100),
+            "current_portfolio": {
+                "weights": {t: float(w) for t, w in current_weights.items()},
+                "expected_return": float(current_return * 100),
+                "volatility": float(current_vol * 100),
+                "sharpe_ratio": float(current_sharpe)
+            },
+            "max_sharpe_portfolio": {
+                "weights": optimal_weights,
+                "expected_return": float(max_sharpe_return * 100),
+                "volatility": float(max_sharpe_vol * 100),
+                "sharpe_ratio": float(max_sharpe_ratio)
+            },
+            "min_variance_portfolio": {
+                "weights": min_var_weights_dict,
+                "expected_return": float(min_vol_return * 100),
+                "volatility": float(min_vol_vol * 100)
+            },
+            "recommendation": self._generate_optimization_recommendation(
+                current_weights, optimal_weights, tickers, current_sharpe, max_sharpe_ratio
+            )
         }
+    
+    def _generate_optimization_recommendation(self, current_weights: Dict, optimal_weights: Dict, 
+                                                tickers: List[str], current_sharpe: float, 
+                                                optimal_sharpe: float) -> str:
+        """Generate actionable recommendation from optimization results."""
+        if optimal_sharpe <= current_sharpe * 1.05:
+            return "Portfolio is near-optimal. No significant rebalancing needed."
+        
+        changes = []
+        for t in tickers:
+            curr = current_weights.get(t, 0)
+            opt = optimal_weights.get(t, 0)
+            diff = opt - curr
+            if abs(diff) > 0.05:  # Only flag >5% differences
+                direction = "Increase" if diff > 0 else "Decrease"
+                changes.append(f"{direction} {t} from {curr*100:.1f}% to {opt*100:.1f}%")
+        
+        if changes:
+            return f"Rebalance to improve Sharpe from {current_sharpe:.2f} to {optimal_sharpe:.2f}: " + "; ".join(changes)
+        return "Portfolio allocation is close to optimal."
 
