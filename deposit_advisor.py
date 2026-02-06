@@ -470,12 +470,14 @@ class DepositAdvisor:
             }
             
             weighted_score = sum(sub_scores.get(k, 0.5) * w for k, w in weights_map.items())
-            # Map [0, 1] -> [0, 100] for the final score
-            score = weighted_score * 100
+            # Map [0, 1] -> [0, 80] — reserve 20 points for refinement factors
+            score = weighted_score * 80
             
             analysis["sub_scores"] = sub_scores
             
-            # 7. Industry trend analysis (15 points)
+            # === REFINEMENT FACTORS (up to ±20 points total) ===
+            
+            # 7. Industry trend analysis (up to ±5 points)
             etf_category = None
             for cat, etfs in self.ETF_CATEGORIES.items():
                 if ticker in etfs:
@@ -486,19 +488,17 @@ class DepositAdvisor:
                 industry_trend = self.analyze_industry_trends(etf_category)
                 analysis["industry_trend"] = industry_trend
                 
-                # Add industry trend to score
                 if industry_trend["trend"] == "STRONG_UPTREND":
-                    score += 15
+                    score += 5
                     analysis["reasons"].append(f"🔥 Hot industry: {industry_trend['reason']}")
                 elif industry_trend["trend"] == "UPTREND":
-                    score += 10
+                    score += 3
                     analysis["reasons"].append(f"📈 Growing industry: {industry_trend['reason']}")
                 elif industry_trend["trend"] == "DOWNTREND":
-                    score -= 10
+                    score -= 5
                     analysis["reasons"].append(f"📉 Declining industry: {industry_trend['reason']}")
             
-            # 8. Statistical forecast for mid-term yield (will be optimized later in batch)
-            # Note: Full optimization happens in recommend_etfs() for efficiency
+            # 8. Statistical forecast for mid-term yield (up to ±5 points)
             try:
                 forecast = self.advanced_analyzer.calculate_statistical_forecast(data, periods=252*3)
                 if forecast and forecast.get("expected_return_polynomial") is not None:
@@ -508,31 +508,33 @@ class DepositAdvisor:
                         "forecast_price": forecast.get("forecast_polynomial", 0)
                     }
                     
-                    # Preliminary score boost (full optimization in batch later)
                     if expected_return > 15:
-                        score += 15
+                        score += 5
                         analysis["reasons"].append(f"🎯 Excellent mid-term yield potential: {expected_return:.1f}% (3yr forecast)")
                     elif expected_return > 10:
-                        score += 10
+                        score += 3
                         analysis["reasons"].append(f"📊 Strong mid-term yield potential: {expected_return:.1f}% (3yr forecast)")
+                    elif expected_return < -10:
+                        score -= 5
+                        analysis["reasons"].append(f"📉 Weak mid-term yield potential: {expected_return:.1f}% (3yr forecast)")
             except Exception as e:
                 logger.debug(f"Failed to calculate statistical forecast for {ticker}: {e}")
                 pass
             
-            # 9. Candlestick patterns (5 points)
+            # 9. Candlestick patterns (up to ±2 points)
             try:
                 patterns = self.advanced_analyzer.detect_candlestick_patterns(data)
                 if patterns:
                     analysis["candlestick_patterns"] = patterns
                     bullish = [p for p in patterns if p.get('signal') == 'BULLISH']
                     if bullish:
-                        score += 5
+                        score += 2
                         analysis["reasons"].append(f"📈 Bullish candlestick pattern detected: {bullish[0].get('pattern')}")
             except Exception as e:
                 logger.debug(f"Failed to detect candlestick patterns for {ticker}: {e}")
                 pass
             
-            # 10. Bond analysis (if applicable)
+            # 10. Bond analysis (up to ±5 points, if applicable)
             if etf_category in ["BONDS", "HIGH_YIELD", "TIPS"]:
                 try:
                     bond_analysis = self.advanced_analyzer.analyze_bonds(ticker)
@@ -542,10 +544,10 @@ class DepositAdvisor:
                         risk_adj_yield = bond_analysis["yield_analysis"].get("risk_adjusted_yield", 0)
                         
                         if risk_adj_yield > 2:
-                            score += 15
+                            score += 5
                             analysis["reasons"].append(f"💰 Excellent bond yield: {current_yield:.2f}% (risk-adjusted: {risk_adj_yield:.2f})")
                         elif risk_adj_yield > 1:
-                            score += 10
+                            score += 3
                             analysis["reasons"].append(f"💵 Good bond yield: {current_yield:.2f}%")
                 except Exception as e:
                     logger.debug(f"Failed to analyze bonds for {ticker}: {e}")
@@ -554,7 +556,7 @@ class DepositAdvisor:
             # Adjust score for leveraged ETFs - reduce score due to high risk
             if analysis["is_leveraged"]:
                 leverage = abs(analysis["leverage_multiplier"])
-                risk_penalty = 10 * leverage  # Penalty: 10 points for 2x, 20 for 3x
+                risk_penalty = 5 * leverage  # Penalty: 5 points for 2x, 10 for 3x
                 score -= risk_penalty
                 analysis["reasons"].append(f"⚠️ LEVERAGED ETF: {leverage}x leverage - High risk! Score reduced by {risk_penalty} points")
                 if analysis["leverage_multiplier"] < 0:

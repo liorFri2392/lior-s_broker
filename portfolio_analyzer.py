@@ -665,9 +665,11 @@ class PortfolioAnalyzer:
         }
         
         weighted_score = sum(sub_scores.get(k, 0.5) * w for k, w in holding_weights.items())
-        score = weighted_score * 100  # Map [0,1] -> [0,100]
+        score = weighted_score * 80  # Map [0,1] -> [0,80], reserve 20 pts for refinements
         
-        # Industry trend analysis (if available from deposit_advisor)
+        # === REFINEMENT FACTORS (up to ±20 points total) ===
+        
+        # Industry trend analysis (up to ±5 points)
         etf_category = None
         if advisor:  # Use provided advisor instead of creating new one
             try:
@@ -681,18 +683,17 @@ class PortfolioAnalyzer:
                     industry_trend = advisor.analyze_industry_trends(etf_category)
                     analysis["industry_trend"] = industry_trend
                     
-                    # Add industry trend to score
                     if industry_trend.get("trend") == "STRONG_UPTREND":
-                        score += 15
+                        score += 5
                     elif industry_trend.get("trend") == "UPTREND":
-                        score += 10
+                        score += 3
                     elif industry_trend.get("trend") == "DOWNTREND":
-                        score -= 10
+                        score -= 5
             except Exception as e:
                 logger.debug(f"Failed to analyze industry trend: {e}")
                 pass  # Industry trend analysis is optional
         
-        # Statistical forecast (mid-term yield) - from technical indicators
+        # Statistical forecast (up to ±5 points)
         if analysis["technical_indicators"] and "forecast" in analysis["technical_indicators"]:
             forecast = analysis["technical_indicators"]["forecast"]
             if forecast and forecast.get("expected_return_polynomial") is not None:
@@ -702,26 +703,25 @@ class PortfolioAnalyzer:
                     "forecast_price": forecast.get("forecast_polynomial", 0)
                 }
                 
-                # Add forecast to score
                 if expected_return > 15:
-                    score += 15
+                    score += 5
                 elif expected_return > 10:
-                    score += 10
+                    score += 3
                 elif expected_return < -10:
-                    score -= 10
+                    score -= 5
         
-        # Candlestick patterns - from technical indicators
+        # Candlestick patterns (up to ±2 points)
         if analysis["technical_indicators"] and "candlestick_patterns" in analysis["technical_indicators"]:
             patterns = analysis["technical_indicators"]["candlestick_patterns"]
             if patterns:
                 bullish = [p for p in patterns if p.get('signal') == 'BULLISH']
                 bearish = [p for p in patterns if p.get('signal') == 'BEARISH']
                 if bullish:
-                    score += 5
+                    score += 2
                 elif bearish:
-                    score -= 5
+                    score -= 2
         
-        # Bond analysis (if applicable)
+        # Bond analysis (up to ±5 points, if applicable)
         if etf_category in ["BONDS", "HIGH_YIELD", "TIPS"]:
             try:
                 bond_analysis = self.advanced_analyzer.analyze_bonds(ticker)
@@ -734,11 +734,11 @@ class PortfolioAnalyzer:
                     risk_adj_yield = current_yield - (yield_volatility / 2) if yield_volatility > 0 else current_yield
                     
                     if risk_adj_yield > 2:
-                        score += 15
+                        score += 5
                     elif risk_adj_yield > 1:
-                        score += 10
+                        score += 3
                     elif risk_adj_yield < 0.5:
-                        score -= 10
+                        score -= 5
             except Exception as e:
                 logger.debug(f"Failed to analyze bonds: {e}")
                 pass
