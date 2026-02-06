@@ -782,6 +782,8 @@ class PortfolioAnalyzer:
         cumulative_return = None
         cumulative_return_pct = None
         days_since_start = None
+        hours_since_start = None
+        minutes_since_start = None
         
         if baseline_value and baseline_value > 0:
             cumulative_return = total_value - baseline_value
@@ -792,7 +794,13 @@ class PortfolioAnalyzer:
                     start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
                     if start_dt.tzinfo is None:
                         start_dt = start_dt.replace(tzinfo=timezone.utc)
-                    days_since_start = (datetime.now(timezone.utc) - start_dt).days
+                    time_diff = datetime.now(timezone.utc) - start_dt
+                    days_since_start = time_diff.days
+                    # If same day, calculate hours/minutes
+                    if days_since_start == 0:
+                        hours_since_start = int(time_diff.total_seconds() / 3600)
+                        if hours_since_start < 1:
+                            minutes_since_start = int(time_diff.total_seconds() / 60)
                 except Exception as e:
                     logger.debug(f"Failed to parse start_date: {e}")
         
@@ -807,6 +815,8 @@ class PortfolioAnalyzer:
             "cumulative_return": cumulative_return,
             "cumulative_return_pct": cumulative_return_pct,
             "days_since_start": days_since_start,
+            "hours_since_start": hours_since_start,
+            "minutes_since_start": minutes_since_start,
             "start_date": start_date
         }
     
@@ -2323,6 +2333,11 @@ class PortfolioAnalyzer:
                 print("-" * 60)
                 print(f"Baseline Value: ₪{baseline_ils:,.2f} (${baseline:,.2f})")
                 print(f"Start Date: {start_date_str}")
+                
+                # Format period - show minutes/hours if same day, otherwise days/months/years
+                hours_since_start = metrics.get("hours_since_start")
+                minutes_since_start = metrics.get("minutes_since_start")
+                
                 if days_since_start is not None:
                     months = days_since_start / 30.44
                     if days_since_start < 30:
@@ -2333,6 +2348,12 @@ class PortfolioAnalyzer:
                         years = days_since_start / 365.25
                         period_str = f"{years:.1f} years ({days_since_start} days)"
                     print(f"Period: {period_str}")
+                elif hours_since_start is not None and hours_since_start > 0:
+                    print(f"Period: {hours_since_start} hour{'s' if hours_since_start != 1 else ''}")
+                elif minutes_since_start is not None and minutes_since_start > 0:
+                    print(f"Period: {minutes_since_start} minute{'s' if minutes_since_start != 1 else ''}")
+                else:
+                    print(f"Period: Just started")
                 
                 # Color code the return
                 if cumulative_return_pct >= 0:
