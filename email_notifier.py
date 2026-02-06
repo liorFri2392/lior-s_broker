@@ -33,7 +33,7 @@ class EmailNotifier:
             logger.error("EMAIL_SENDER and EMAIL_PASSWORD must be set in environment variables")
             raise ValueError("EMAIL_SENDER and EMAIL_PASSWORD must be set in .env file or environment variables")
     
-    def send_critical_alert(self, subject: str, critical_items: List[Dict], portfolio_value: float = None) -> bool:
+    def send_critical_alert(self, subject: str, critical_items: List[Dict], portfolio_value: float = None, portfolio_metrics: Dict = None) -> bool:
         """Send critical alert email with urgent actions."""
         try:
             # Create message
@@ -53,6 +53,7 @@ class EmailNotifier:
                     .buy {{ background-color: #d4edda; padding: 10px; margin: 10px 0; border-left: 4px solid #28a745; }}
                     .sell {{ background-color: #f8d7da; padding: 10px; margin: 10px 0; border-left: 4px solid #dc3545; }}
                     .info {{ background-color: #d1ecf1; padding: 10px; margin: 10px 0; border-left: 4px solid #17a2b8; }}
+                    .performance {{ background-color: #e8f5e9; padding: 15px; margin: 15px 0; border-left: 4px solid #4caf50; }}
                     h2 {{ color: #d32f2f; }}
                     table {{ border-collapse: collapse; width: 100%; margin: 10px 0; }}
                     th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
@@ -65,7 +66,60 @@ class EmailNotifier:
             """
             
             if portfolio_value:
-                body += f'<p><strong>Portfolio Value:</strong> ${portfolio_value:,.2f}</p>'
+                body += f'<p><strong>Current Portfolio Value:</strong> ${portfolio_value:,.2f}</p>'
+            
+            # Add cumulative performance if available
+            if portfolio_metrics:
+                baseline_value = portfolio_metrics.get("baseline_value")
+                cumulative_return = portfolio_metrics.get("cumulative_return")
+                cumulative_return_pct = portfolio_metrics.get("cumulative_return_pct")
+                days_since_start = portfolio_metrics.get("days_since_start")
+                start_date = portfolio_metrics.get("start_date")
+                
+                if baseline_value and baseline_value > 0 and cumulative_return is not None:
+                    # Format start date
+                    start_date_str = "N/A"
+                    if start_date:
+                        try:
+                            start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+                            start_date_str = start_dt.strftime("%Y-%m-%d")
+                        except:
+                            pass
+                    
+                    # Format period
+                    period_str = ""
+                    if days_since_start is not None:
+                        if days_since_start < 30:
+                            period_str = f"{days_since_start} days"
+                        elif days_since_start < 365:
+                            months = days_since_start / 30.44
+                            period_str = f"{months:.1f} months"
+                        else:
+                            years = days_since_start / 365.25
+                            period_str = f"{years:.1f} years"
+                    
+                    # Color for return
+                    return_color = "#4caf50" if cumulative_return_pct >= 0 else "#d32f2f"
+                    return_icon = "📈" if cumulative_return_pct >= 0 else "📉"
+                    
+                    body += f"""
+                    <div class="performance">
+                        <h3>📊 Cumulative Performance (Since Start)</h3>
+                        <p><strong>Baseline Value:</strong> ${baseline_value:,.2f}</p>
+                        <p><strong>Start Date:</strong> {start_date_str}</p>
+                        {f'<p><strong>Period:</strong> {period_str}</p>' if period_str else ''}
+                        <p><strong style="color: {return_color};">{return_icon} Cumulative Return:</strong> <span style="color: {return_color}; font-weight: bold;">${cumulative_return:+,.2f} ({cumulative_return_pct:+.2f}%)</span></p>
+                    """
+                    
+                    # Annualized return if available
+                    if days_since_start and days_since_start >= 30 and baseline_value > 0:
+                        try:
+                            annualized_return = ((portfolio_value / baseline_value) ** (365.25 / days_since_start) - 1) * 100
+                            body += f'<p><strong>📊 Annualized Return:</strong> <span style="color: {return_color}; font-weight: bold;">{annualized_return:+.2f}%</span></p>'
+                        except:
+                            pass
+                    
+                    body += "</div>"
             
             body += "<h2>⚠️ URGENT ACTIONS REQUIRED:</h2>"
             

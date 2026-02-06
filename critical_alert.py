@@ -438,10 +438,14 @@ class CriticalAlertSystem:
         specific_action_types = ["BUY", "SELL", "REPLACE"]
         has_specific_actions = any(item.get("type") in specific_action_types for item in critical_items)
         
+        # Get portfolio metrics including cumulative return
+        portfolio_metrics = portfolio_analysis.get("portfolio_metrics", {}) if portfolio_analysis else {}
+        
         return {
             "critical_items": critical_items,
             "has_critical": has_specific_actions,  # Only true if specific actions exist
-            "portfolio_value": portfolio_analysis.get("portfolio_metrics", {}).get("total_value", 0) if portfolio_analysis else 0,
+            "portfolio_value": portfolio_metrics.get("total_value", 0),
+            "portfolio_metrics": portfolio_metrics,  # Include full metrics for email
             "market_status": market_message,
             "timestamp": datetime.now().isoformat()
         }
@@ -911,6 +915,7 @@ class CriticalAlertSystem:
             
             critical_items = results.get("critical_items", [])
             portfolio_value = results.get("portfolio_value", 0)
+            portfolio_metrics = results.get("portfolio_metrics", {})
             
             # Count by type
             buy_count = sum(1 for item in critical_items if item.get("type") == "BUY")
@@ -938,7 +943,7 @@ class CriticalAlertSystem:
             
             subject = f"URGENT: {', '.join(actions)} Required" if actions else "Portfolio Alert"
             
-            success = notifier.send_critical_alert(subject, critical_items, portfolio_value)
+            success = notifier.send_critical_alert(subject, critical_items, portfolio_value, portfolio_metrics)
             
             if success:
                 print(f"\n✅ Critical alert email sent with {len(critical_items)} urgent action(s)")
