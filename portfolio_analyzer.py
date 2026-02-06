@@ -776,13 +776,38 @@ class PortfolioAnalyzer:
         # Average recommendation score
         avg_score = np.mean([a["recommendation_score"] for a in analyses]) if analyses else 50
         
+        # Calculate cumulative return since start (baseline tracking)
+        baseline_value = portfolio.get("baseline_value")
+        start_date = portfolio.get("start_date")
+        cumulative_return = None
+        cumulative_return_pct = None
+        days_since_start = None
+        
+        if baseline_value and baseline_value > 0:
+            cumulative_return = total_value - baseline_value
+            cumulative_return_pct = (cumulative_return / baseline_value) * 100
+            
+            if start_date:
+                try:
+                    start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+                    if start_dt.tzinfo is None:
+                        start_dt = start_dt.replace(tzinfo=timezone.utc)
+                    days_since_start = (datetime.now(timezone.utc) - start_dt).days
+                except Exception as e:
+                    logger.debug(f"Failed to parse start_date: {e}")
+        
         return {
             "total_value": total_value,
             "cash": portfolio.get("cash", 0),
             "holdings_value": holdings_value,
             "diversification_score": diversification_score,
             "average_recommendation_score": avg_score,
-            "weights": weights
+            "weights": weights,
+            "baseline_value": baseline_value,
+            "cumulative_return": cumulative_return,
+            "cumulative_return_pct": cumulative_return_pct,
+            "days_since_start": days_since_start,
+            "start_date": start_date
         }
     
     def find_best_etfs_to_buy(self, amount_usd: float, current_holdings: List[str], exclude_tickers: List[str] = None) -> List[Dict]:
@@ -1920,6 +1945,19 @@ class PortfolioAnalyzer:
         tickers = [h["ticker"] for h in portfolio["holdings"]]
         prices, market_status, market_message = self.get_current_prices(tickers)
         
+        # Initialize baseline tracking if not exists (first time using the app)
+        if "baseline_value" not in portfolio or portfolio.get("baseline_value") is None:
+            # Calculate current total value as baseline
+            baseline_value = portfolio.get("cash", 0)
+            for h in portfolio["holdings"]:
+                price = prices.get(h["ticker"], h.get("last_price", 0))
+                baseline_value += h["quantity"] * price
+            
+            portfolio["baseline_value"] = baseline_value
+            portfolio["start_date"] = datetime.now(timezone.utc).isoformat()
+            self.save_portfolio(portfolio)
+            logger.info(f"📊 Initialized baseline tracking: ${baseline_value:,.2f} on {portfolio['start_date']}")
+        
         # Display market status
         print(f"\n📊 Market Status: {market_message}")
         if market_status:
@@ -2258,6 +2296,62 @@ class PortfolioAnalyzer:
         print(f"Exchange Rate: {exchange_rate} ILS/USD")
         print(f"Diversification Score: {metrics['diversification_score']:.2f} (1.0 = perfect diversification)")
         print(f"Average Recommendation Score: {metrics['average_recommendation_score']:.1f}/100")
+        
+        # Display cumulative return since start
+        if metrics.get("baseline_value") and metrics.get("baseline_value") > 0:
+            baseline = metrics["baseline_value"]
+            cumulative_return = metrics.get("cumulative_return")
+            cumulative_return_pct = metrics.get("cumulative_return_pct")
+            days_since_start = metrics.get("days_since_start")
+            start_date = metrics.get("start_date")
+            
+            if cumulative_return is not None and cumulative_return_pct is not None:
+                baseline_ils = baseline * exchange_rate
+                cumulative_return_ils = cumulative_return * exchange_rate
+                
+                # Format start date nicely
+                start_date_str = "N/A"
+                if start_date:
+                    try:
+                        start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+                        start_date_str = start_dt.strftime("%Y-%m-%d")
+                    except:
+                        pass
+                
+                print("\n" + "-" * 60)
+                print("📈 CUMULATIVE PERFORMANCE (Since Start)")
+                print("-" * 60)
+                print(f"Baseline Value: ₪{baseline_ils:,.2f} (${baseline:,.2f})")
+                print(f"Start Date: {start_date_str}")
+                if days_since_start is not None:
+                    months = days_since_start / 30.44
+                    if days_since_start < 30:
+                        period_str = f"{days_since_start} days"
+                    elif days_since_start < 365:
+                        period_str = f"{months:.1f} months ({days_since_start} days)"
+                    else:
+                        years = days_since_start / 365.25
+                        period_str = f"{years:.1f} years ({days_since_start} days)"
+                    print(f"Period: {period_str}")
+                
+                # Color code the return
+                if cumulative_return_pct >= 0:
+                    return_icon = "📈"
+                    return_color = ""
+                else:
+                    return_icon = "📉"
+                    return_color = ""
+                
+                print(f"{return_icon} Cumulative Return: {return_color}₪{cumulative_return_ils:+,.2f} (${cumulative_return:+,.2f})")
+                print(f"{return_icon} Return Percentage: {return_color}{cumulative_return_pct:+.2f}%")
+                
+                # Annualized return if we have enough days
+                if days_since_start and days_since_start >= 30 and baseline > 0:
+                    try:
+                        annualized_return = ((metrics['total_value'] / baseline) ** (365.25 / days_since_start) - 1) * 100
+                        print(f"📊 Annualized Return: {annualized_return:+.2f}%")
+                    except Exception as e:
+                        logger.debug(f"Failed to calculate annualized return: {e}")
         
         # Show 80/20 balance status
         balance_info = results["rebalancing"].get("balance_80_20", {})
