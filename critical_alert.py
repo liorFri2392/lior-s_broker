@@ -904,6 +904,224 @@ class CriticalAlertSystem:
         
         return anomalies
     
+    def apply_recommendations_to_portfolio(self, critical_items: List[Dict], auto_apply: bool = True) -> bool:
+        """
+        Apply recommendations from critical_items to portfolio.json.
+        
+        Args:
+            critical_items: List of recommendation dictionaries
+            auto_apply: If True, apply automatically. If False, ask for confirmation.
+                      Default is True - automatically apply when email is sent.
+        
+        Returns:
+            True if portfolio was updated, False otherwise
+        """
+        # Filter only actionable items (REPLACE, SELL, BUY)
+        actionable_items = [item for item in critical_items if item.get("type") in ["REPLACE", "SELL", "BUY"]]
+        
+        if not actionable_items:
+            return False
+        
+        # Load current portfolio
+        try:
+            with open(self.portfolio_file, 'r', encoding='utf-8') as f:
+                portfolio = json.load(f)
+        except Exception as e:
+            logger.error(f"Failed to load portfolio: {e}")
+            print(f"❌ Error loading portfolio: {e}")
+            return False
+        
+        # Ask for confirmation only if explicitly disabled
+        if not auto_apply:
+            print("\n" + "="*60)
+            print("APPLY RECOMMENDATIONS TO PORTFOLIO?")
+            print("="*60)
+            print(f"Found {len(actionable_items)} actionable recommendation(s):")
+            for item in actionable_items:
+                action_type = item.get("type")
+                if action_type == "REPLACE":
+                    print(f"  🔄 REPLACE: {item.get('sell_ticker')} → {item.get('buy_ticker')}")
+                elif action_type == "SELL":
+                    print(f"  🔴 SELL: {item.get('ticker')} ({item.get('shares', 0)} shares)")
+                elif action_type == "BUY":
+                    print(f"  🟢 BUY: {item.get('ticker')} (${item.get('amount', 0):,.2f})")
+            
+            response = input("\nApply these recommendations to portfolio.json? (yes/no): ").strip().lower()
+            if response not in ['yes', 'y', 'כן']:
+                print("❌ Portfolio update cancelled.")
+                return False
+        
+        # Apply each recommendation
+        print("\n📝 Auto-applying recommendations to portfolio...")
+        
+        for item in actionable_items:
+            action_type = item.get("type")
+            
+            if action_type == "REPLACE":
+                # Handle REPLACE: Sell one ticker, buy another
+                sell_ticker = item.get("sell_ticker")
+                buy_ticker = item.get("buy_ticker")
+                sell_shares = item.get("sell_shares", 0)
+                sell_amount = item.get("sell_amount", 0)
+                buy_shares = item.get("buy_shares", 0)
+                buy_price = item.get("buy_price", 0)
+                buy_amount = item.get("buy_amount", 0)
+                remaining_cash = item.get("remaining_cash", 0)
+                
+                # Find and update sell_ticker
+                sell_holding = None
+                for holding in portfolio.get("holdings", []):
+                    if holding.get("ticker") == sell_ticker:
+                        sell_holding = holding
+                        break
+                
+                if sell_holding:
+                    old_qty = sell_holding.get("quantity", 0)
+                    new_qty = max(0, old_qty - sell_shares)
+                    sell_holding["quantity"] = new_qty
+                    if new_qty > 0:
+                        sell_holding["current_value"] = new_qty * sell_holding.get("last_price", 0)
+                    else:
+                        sell_holding["current_value"] = 0
+                    print(f"  ✅ SELL: {sell_ticker} - {old_qty} → {new_qty} shares")
+                else:
+                    print(f"  ⚠️  Warning: {sell_ticker} not found in portfolio")
+                
+                # Find or create buy_ticker
+                buy_holding = None
+                for holding in portfolio.get("holdings", []):
+                    if holding.get("ticker") == buy_ticker:
+                        buy_holding = holding
+                        break
+                
+                if buy_holding:
+                    old_qty = buy_holding.get("quantity", 0)
+                    buy_holding["quantity"] = old_qty + buy_shares
+                    buy_holding["last_price"] = buy_price
+                    buy_holding["current_value"] = buy_holding["quantity"] * buy_price
+                    print(f"  ✅ BUY: {buy_ticker} - {old_qty} → {buy_holding['quantity']} shares @ ${buy_price:.2f}")
+                else:
+                    # Create new holding
+                    new_holding = {
+                        "ticker": buy_ticker,
+                        "quantity": buy_shares,
+                        "last_price": buy_price,
+                        "current_value": buy_shares * buy_price
+                    }
+                    portfolio.setdefault("holdings", []).append(new_holding)
+                    print(f"  ✅ BUY: {buy_ticker} - NEW holding: {buy_shares} shares @ ${buy_price:.2f}")
+                
+                # Update cash: add sell_amount, subtract buy_amount
+                portfolio["cash"] = portfolio.get("cash", 0) + sell_amount - buy_amount
+                
+            elif action_type == "SELL":
+                # Handle SELL
+                ticker = item.get("ticker")
+                shares_to_sell = item.get("shares", 0)
+                sell_amount = item.get("amount", 0)
+                
+                sell_holding = None
+                for holding in portfolio.get("holdings", []):
+                    if holding.get("ticker") == ticker:
+                        sell_holding = holding
+                        break
+                
+                if sell_holding:
+                    old_qty = sell_holding.get("quantity", 0)
+                    new_qty = max(0, old_qty - shares_to_sell)
+                    sell_holding["quantity"] = new_qty
+                    if new_qty > 0:
+                        sell_holding["current_value"] = new_qty * sell_holding.get("last_price", 0)
+                    else:
+                        sell_holding["current_value"] = 0
+                    portfolio["cash"] = portfolio.get("cash", 0) + sell_amount
+                    print(f"  ✅ SELL: {ticker} - {old_qty} → {new_qty} shares (+${sell_amount:.2f} cash)")
+                else:
+                    print(f"  ⚠️  Warning: {ticker} not found in portfolio")
+            
+            elif action_type == "BUY":
+                # Handle BUY
+                ticker = item.get("ticker")
+                buy_amount = item.get("amount", 0)
+                # Try to get shares and price from item
+                buy_shares = item.get("shares", 0)
+                buy_price = item.get("price", 0)
+                
+                if buy_shares == 0 and buy_price > 0:
+                    buy_shares = int(buy_amount / buy_price)
+                elif buy_price == 0 and buy_shares > 0:
+                    buy_price = buy_amount / buy_shares if buy_shares > 0 else 0
+                
+                if buy_shares > 0 and buy_price > 0:
+                    buy_holding = None
+                    for holding in portfolio.get("holdings", []):
+                        if holding.get("ticker") == ticker:
+                            buy_holding = holding
+                            break
+                    
+                    if buy_holding:
+                        old_qty = buy_holding.get("quantity", 0)
+                        buy_holding["quantity"] = old_qty + buy_shares
+                        buy_holding["last_price"] = buy_price
+                        buy_holding["current_value"] = buy_holding["quantity"] * buy_price
+                        print(f"  ✅ BUY: {ticker} - {old_qty} → {buy_holding['quantity']} shares @ ${buy_price:.2f}")
+                    else:
+                        # Create new holding
+                        new_holding = {
+                            "ticker": ticker,
+                            "quantity": buy_shares,
+                            "last_price": buy_price,
+                            "current_value": buy_shares * buy_price
+                        }
+                        portfolio.setdefault("holdings", []).append(new_holding)
+                        print(f"  ✅ BUY: {ticker} - NEW holding: {buy_shares} shares @ ${buy_price:.2f}")
+                    
+                    portfolio["cash"] = max(0, portfolio.get("cash", 0) - buy_amount)
+        
+        # Remove holdings with 0 quantity
+        portfolio["holdings"] = [h for h in portfolio.get("holdings", []) if h.get("quantity", 0) > 0]
+        
+        # Recalculate total value
+        total_value = portfolio.get("cash", 0)
+        for holding in portfolio.get("holdings", []):
+            total_value += holding.get("current_value", 0)
+        portfolio["total_value"] = total_value
+        
+        # Update timestamp
+        portfolio["last_updated"] = datetime.now().isoformat()
+        
+        # Save portfolio
+        try:
+            with open(self.portfolio_file, 'w', encoding='utf-8') as f:
+                json.dump(portfolio, f, indent=2, ensure_ascii=False)
+            print(f"\n✅ Portfolio updated and saved to {self.portfolio_file}")
+            print(f"   Total Portfolio Value: ${total_value:,.2f}")
+            print(f"   Cash: ${portfolio.get('cash', 0):,.2f}")
+            
+            # Try to update GitHub secret
+            try:
+                import subprocess
+                portfolio_json_str = json.dumps(portfolio, ensure_ascii=False, indent=2)
+                process = subprocess.Popen(
+                    ["gh", "secret", "set", "PORTFOLIO_JSON", "--repo", "liorFri2392/lior-s_broker"],
+                    stdin=subprocess.PIPE,
+                    text=True
+                )
+                process.communicate(input=portfolio_json_str)
+                if process.returncode == 0:
+                    print("✅ GitHub secret updated successfully!")
+                else:
+                    print("⚠️  GitHub secret update failed (run 'make update-secret' manually)")
+            except Exception as e:
+                logger.debug(f"Failed to update GitHub secret: {e}")
+                print("⚠️  GitHub secret update skipped (run 'make update-secret' manually)")
+            
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save portfolio: {e}")
+            print(f"❌ Error saving portfolio: {e}")
+            return False
+    
     def send_alerts(self, results: Dict) -> bool:
         """Send email alerts if critical items found."""
         if not results.get("has_critical"):
@@ -978,7 +1196,14 @@ class CriticalAlertSystem:
                     print(f"   🔥 {item.get('category', 'N/A')}: {item.get('momentum', 0):.1f}% momentum")
             
             # Send email alerts
-            self.send_alerts(results)
+            email_sent = self.send_alerts(results)
+            
+            # After sending email, automatically apply recommendations to portfolio
+            if email_sent and specific_actions:
+                print("\n" + "="*60)
+                print("AUTO-UPDATING PORTFOLIO FROM EMAIL RECOMMENDATIONS")
+                print("="*60)
+                self.apply_recommendations_to_portfolio(specific_actions, auto_apply=True)
         elif trends_only:
             print(f"\n📊 Detected {len(trends_only)} hot trend(s), but no specific actionable recommendations:")
             for item in trends_only:
