@@ -1715,6 +1715,10 @@ class PortfolioAnalyzer:
                 
                 sell_value_usd = analysis["current_value"] * sell_percentage
                 sell_shares = int(analysis["quantity"] * sell_percentage)
+                # If fractional shares round to 0 (e.g. 25% of 1 share), recommend selling 1 share so the action is valid
+                if sell_shares == 0 and analysis["quantity"] >= 1 and sell_value_usd > 0:
+                    sell_shares = 1
+                    sell_value_usd = analysis["current_price"] * sell_shares
                 total_sell_amount += sell_value_usd
                 
                 reason = f"{underperformer['recommendation']} - Score: {current_score:.1f}/100. Poor performance"
@@ -1723,13 +1727,15 @@ class PortfolioAnalyzer:
                     reason += f" | Better alternative: {best_alternative['ticker']} (Score: {best_alternative['score']:.1f}/100, +{best_alternative['score_difference']:.1f} points)"
                     # Add buy recommendation for the better alternative
                     if best_alternative["current_price"] > 0:
-                        buy_shares = int(sell_value_usd / best_alternative["current_price"])
+                        buy_shares = max(1, int(sell_value_usd / best_alternative["current_price"]))
+                        buy_amount = buy_shares * best_alternative["current_price"]
                         rebalancing["buy_recommendations"].append({
                             "ticker": best_alternative["ticker"],
                             "name": best_alternative["name"],
                             "shares": buy_shares,
                             "price": best_alternative["current_price"],
-                            "amount": buy_shares * best_alternative["current_price"],
+                            "amount": buy_amount,
+                            "allocation_amount": buy_amount,
                             "reason": f"Replace {ticker} (Score: {current_score:.1f}) with {best_alternative['ticker']} (Score: {best_alternative['score']:.1f}) - Better performance"
                         })
                 else:
