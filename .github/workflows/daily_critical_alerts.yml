@@ -51,6 +51,15 @@ jobs:
             echo "EMAIL_RECIPIENT=$EMAIL_SENDER" >> $GITHUB_ENV
           fi
       
+      - name: Check 30-day analyze reminder
+        env:
+          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT || secrets.EMAIL_SENDER }}
+        run: |
+          python send_analyze_reminder.py
+        continue-on-error: true
+      
       - name: Run Portfolio Analysis
         run: |
           echo "📊 Running portfolio analysis..."

@@ -310,3 +310,21 @@ class EmailNotifier:
             print(f"❌ Error sending daily summary: {e}")
             return False
 
+    def send_simple_reminder(self, subject: str, body_plain: str) -> bool:
+        """Send a simple text reminder email."""
+        try:
+            msg = MIMEMultipart()
+            msg['From'] = self.sender_email
+            msg['To'] = self.recipient_email
+            msg['Subject'] = subject
+            msg.attach(MIMEText(body_plain, 'plain'))
+            with smtplib.SMTP('smtp.gmail.com', 587) as server:
+                server.starttls()
+                server.login(self.sender_email, self.sender_password)
+                server.send_message(msg)
+            logger.info(f"Reminder email sent to {self.recipient_email}")
+            return True
+        except Exception as e:
+            logger.error(f"Error sending reminder email: {e}", exc_info=True)
+            return False
+

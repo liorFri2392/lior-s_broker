@@ -6,6 +6,7 @@ Analyzes portfolio holdings, provides recommendations, and suggests rebalancing.
 
 import json
 import os
+import sys
 import logging
 import subprocess
 import base64
@@ -198,6 +199,22 @@ class PortfolioAnalyzer:
         
         # If both methods fail, silently return False
         return False
+    
+    def _run_update_secret(self) -> None:
+        """Run make update-secret so GitHub secret is updated (runs every time user confirms 'yes')."""
+        try:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            result = subprocess.run(
+                [sys.executable, os.path.join(script_dir, "update_github_secret.py")],
+                cwd=script_dir,
+                timeout=15,
+                capture_output=False,
+            )
+            if result.returncode == 0:
+                print("   ✅ GitHub secret updated automatically!")
+        except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
+            logger.debug(f"update-secret run failed: {e}")
+            print("   ⚠️  Run 'make update-secret' manually to sync the GitHub secret.")
     
     def _update_secret_via_api(self, token: str, portfolio: Dict) -> bool:
         """Update GitHub secret using GitHub API with token."""
@@ -1948,6 +1965,11 @@ class PortfolioAnalyzer:
     
     def analyze(self) -> Dict:
         """Main analysis function."""
+        # Record that analyze was run (for 30-day reminder in GitHub Actions)
+        portfolio = self.load_portfolio()
+        portfolio["last_analyze_run_date"] = datetime.now().strftime("%Y-%m-%d")
+        self.save_portfolio(portfolio)
+        
         print("=" * 60)
         print("Portfolio Analysis Starting...")
         print("=" * 60)
@@ -2114,6 +2136,7 @@ class PortfolioAnalyzer:
             if confirmed:
                 self.update_portfolio_from_rebalancing(portfolio, rebalancing, analyses)
                 print("\n✅ Portfolio updated successfully based on rebalancing actions!\n")
+                self._run_update_secret()
             else:
                 print("\n❌ Portfolio not updated. No changes were made.\n")
         
@@ -2123,6 +2146,7 @@ class PortfolioAnalyzer:
             if confirmed:
                 self.update_portfolio_from_replacements(portfolio, rebalancing["replacement_opportunities"], analyses)
                 print("\n✅ Portfolio updated successfully based on replacement recommendations!\n")
+                self._run_update_secret()
             else:
                 print("\n❌ Portfolio not updated. No changes were made.\n")
         

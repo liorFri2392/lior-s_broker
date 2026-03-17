@@ -1051,11 +1051,27 @@ class DepositAdvisor:
         
         # Try to update GitHub secret automatically
         self._try_update_github_secret(portfolio)
+        self._run_update_secret()
         
         print(f"\n✅ Portfolio updated successfully!")
         print(f"   Total spent: ${total_spent_usd:,.2f} (₪{total_spent_usd * exchange_rate:,.2f})")
         print(f"   Remaining cash: ${new_cash_usd:,.2f} (₪{new_cash_usd * exchange_rate:,.2f})")
         print(f"   Portfolio saved to {self.portfolio_file}\n")
+    
+    def _run_update_secret(self) -> None:
+        """Run update-secret script so GitHub secret is updated (every time user confirms 'yes')."""
+        try:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            result = subprocess.run(
+                [sys.executable, os.path.join(script_dir, "update_github_secret.py")],
+                cwd=script_dir,
+                timeout=15,
+                capture_output=False,
+            )
+            if result.returncode == 0:
+                print("   ✅ GitHub secret updated automatically!")
+        except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
+            print("   ⚠️  Run 'make update-secret' manually to sync the GitHub secret.")
     
     def _try_update_github_secret(self, portfolio: Dict):
         """Try to update GitHub secret automatically (silently, no errors if fails)."""
