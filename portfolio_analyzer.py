@@ -53,8 +53,10 @@ class PortfolioAnalyzer:
         self.price_cache = {}  # Cache for prices: {ticker: (price, timestamp)}
         self.market_data_cache = {}  # Cache for market data: {ticker: (data, timestamp)}
         self.news_cache = {}  # Cache for news: {ticker: (sentiment, timestamp)}
-        self.cache_timeout = timedelta(minutes=5)  # Cache timeout
+        self.cache_timeout = timedelta(hours=4)   # Cache when market closed: 4 hours for stability
+        self.cache_timeout_market_open = timedelta(minutes=60)  # When market open: 60 min to reduce noise
         self.cache_file = ".cache.json"  # Persistent cache file
+        self.rebalancing_cooldown_days = 30  # Don't recommend rebalancing for underperformers more than once per 30 days
         self.advanced_analyzer = AdvancedAnalyzer()  # Advanced analysis module
         self._load_cache()  # Load persistent cache on init
     
@@ -72,6 +74,7 @@ class PortfolioAnalyzer:
                             if data and isinstance(data, dict) and 'timestamp' in data and 'price' in data:
                                 try:
                                     cached_time = datetime.fromisoformat(data['timestamp'])
+                                    # Use same timeout as runtime (4h closed / 60min open - we use 4h when loading)
                                     if now - cached_time < self.cache_timeout:
                                         self.price_cache[ticker] = (data['price'], cached_time)
                                 except (ValueError, KeyError) as e:
@@ -282,8 +285,8 @@ class PortfolioAnalyzer:
         for ticker in tickers:
             if ticker in self.price_cache:
                 cached_data, cached_time = self.price_cache[ticker]
-                # If market is open, use shorter cache (1 minute), otherwise 5 minutes
-                cache_timeout = timedelta(minutes=1) if market_status else self.cache_timeout
+                # When market open: 60 min cache for stability. When closed: 4 hours.
+                cache_timeout = self.cache_timeout_market_open if market_status else self.cache_timeout
                 if now - cached_time < cache_timeout:
                     prices[ticker] = cached_data
                 else:
@@ -1650,6 +1653,21 @@ class PortfolioAnalyzer:
                     "moderate": True
                 })
         
+        # Rebalancing cooldown: avoid recommending rebalancing for moderate underperformers too often
+        portfolio = self.load_portfolio()
+        last_rebal = portfolio.get("last_rebalancing_date")
+        if last_rebal:
+            try:
+                last_d = datetime.strptime(last_rebal, "%Y-%m-%d").date()
+                if (datetime.now().date() - last_d).days < self.rebalancing_cooldown_days:
+                    # Within cooldown: only recommend for severe underperformers (STRONG SELL / score < 25)
+                    underperforming_holdings = [
+                        u for u in underperforming_holdings
+                        if u.get("recommendation") == "STRONG SELL" or u.get("score", 50) < 25
+                    ]
+            except (ValueError, TypeError):
+                pass
+        
         # For each underperforming holding, try to find better alternatives
         if underperforming_holdings:
             from deposit_advisor import DepositAdvisor
@@ -1982,10 +2000,11 @@ class PortfolioAnalyzer:
             print("   📅 Using LAST CLOSE prices")
         
         # Show cache usage info
-        cached_prices = sum(1 for t in tickers if t in self.price_cache and 
-                           datetime.now() - self.price_cache[t][1] < (timedelta(minutes=1) if market_status else self.cache_timeout))
+        cache_used = self.cache_timeout_market_open if market_status else self.cache_timeout
+        cached_prices = sum(1 for t in tickers if t in self.price_cache and
+                           datetime.now() - self.price_cache[t][1] < cache_used)
         if cached_prices > 0:
-            print(f"   💾 Using cached prices for {cached_prices}/{len(tickers)} tickers (cache: {'1 min' if market_status else '5 min'})")
+            print(f"   💾 Using cached prices for {cached_prices}/{len(tickers)} tickers (cache: {'60 min' if market_status else '4 hr'})")
         print()
         
         # Create DepositAdvisor once (to avoid loading cache multiple times)
@@ -2083,6 +2102,12 @@ class PortfolioAnalyzer:
         # Print results
         self.print_analysis_results(results)
         
+        # Read-only mode: never ask to update portfolio (for "make analyze-preview")
+        read_only = os.environ.get("ANALYZE_READONLY", "").strip().lower() in ("1", "true", "yes")
+        if read_only:
+            print("\n📋 Read-only mode: portfolio was not modified. Run 'make analyze' (without read-only) to update after you execute trades.\n")
+            return results
+        
         # Ask for confirmation if rebalancing is needed
         if rebalancing["needed"] and (rebalancing["recommendations"] or rebalancing["buy_recommendations"]):
             confirmed = self.ask_rebalancing_confirmation()
@@ -2104,9 +2129,11 @@ class PortfolioAnalyzer:
         return results
     
     def ask_rebalancing_confirmation(self) -> bool:
-        """Ask user for confirmation to execute rebalancing."""
+        """Ask user for confirmation: did you already execute these exact trades in your broker?"""
+        print("\n⚠️  Answer YES only if you already did these exact sell/buy trades in your broker.")
+        print("   Answer NO to keep portfolio.json unchanged (recommendations are for reference only).")
         while True:
-            response = input("\nDid you execute the rebalancing actions (sell/buy)? (yes/no): ").strip().lower()
+            response = input("\nDid you execute these exact rebalancing trades in your broker? (yes/no): ").strip().lower()
             if response in ['yes', 'y', 'כן', 'י']:
                 return True
             elif response in ['no', 'n', 'לא', 'ל']:
@@ -2115,9 +2142,10 @@ class PortfolioAnalyzer:
                 print("Please enter 'yes' or 'no' (כן/לא)")
     
     def ask_replacement_confirmation(self) -> bool:
-        """Ask user for confirmation to execute replacement recommendations."""
+        """Ask user: did you already execute these replacement trades in your broker?"""
+        print("\n⚠️  Answer YES only if you already did these exact replacement trades in your broker.")
         while True:
-            response = input("\nDid you execute the replacement actions (sell/buy)? (yes/no): ").strip().lower()
+            response = input("\nDid you execute these exact replacement trades in your broker? (yes/no): ").strip().lower()
             if response in ['yes', 'y', 'כן', 'י']:
                 return True
             elif response in ['no', 'n', 'לא', 'ל']:
@@ -2194,6 +2222,9 @@ class PortfolioAnalyzer:
         for holding in portfolio.get("holdings", []):
             total_value += holding.get("current_value", 0)
         portfolio["total_value"] = total_value
+        
+        # Record rebalancing date so we don't recommend again too soon (cooldown)
+        portfolio["last_rebalancing_date"] = datetime.now().strftime("%Y-%m-%d")
         
         # Save updated portfolio
         self.save_portfolio(portfolio)

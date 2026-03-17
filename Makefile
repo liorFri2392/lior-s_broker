@@ -13,7 +13,8 @@ help:
 	@echo "  make venv       - Create virtual environment"
 	@echo "  make install    - Install required Python packages"
 	@echo "  make setup      - Initial setup (create venv, install packages, create portfolio.json)"
-	@echo "  make analyze    - Analyze current portfolio and provide recommendations"
+	@echo "  make analyze    - Analyze portfolio; asks to update portfolio.json if you executed the recommended trades"
+	@echo "  make analyze-preview - Same as analyze but never updates portfolio (read-only)"
 	@echo "  make deposit    - Get recommendations for depositing funds"
 	@echo "  make alerts     - Check for critical portfolio actions (requires .env with email credentials)"
 	@echo "  make backtest    - Run backtesting on historical data"
@@ -51,6 +52,10 @@ setup: install
 analyze: venv
 	@echo "Running portfolio analysis..."
 	@$(PYTHON) portfolio_analyzer.py
+
+analyze-preview: venv
+	@echo "Running portfolio analysis (read-only - portfolio.json will not be changed)..."
+	@ANALYZE_READONLY=1 $(PYTHON) portfolio_analyzer.py
 
 deposit: venv
 	@echo "Deposit Advisory System"
