@@ -1670,20 +1670,27 @@ class PortfolioAnalyzer:
                     "moderate": True
                 })
         
-        # Rebalancing cooldown: avoid recommending rebalancing for moderate underperformers too often
+        # Rebalancing cooldown: if last rebalance OR last make analyze was < 30 days ago,
+        # only recommend for really unique opportunities (severe underperformers: STRONG SELL / score < 25)
         portfolio = self.load_portfolio()
-        last_rebal = portfolio.get("last_rebalancing_date")
-        if last_rebal:
+        today = datetime.now().date()
+        within_cooldown = False
+        for date_key in ("last_rebalancing_date", "last_analyze_run_date"):
+            last_d_str = portfolio.get(date_key)
+            if not last_d_str:
+                continue
             try:
-                last_d = datetime.strptime(last_rebal, "%Y-%m-%d").date()
-                if (datetime.now().date() - last_d).days < self.rebalancing_cooldown_days:
-                    # Within cooldown: only recommend for severe underperformers (STRONG SELL / score < 25)
-                    underperforming_holdings = [
-                        u for u in underperforming_holdings
-                        if u.get("recommendation") == "STRONG SELL" or u.get("score", 50) < 25
-                    ]
+                last_d = datetime.strptime(last_d_str, "%Y-%m-%d").date()
+                if (today - last_d).days < self.rebalancing_cooldown_days:
+                    within_cooldown = True
+                    break
             except (ValueError, TypeError):
                 pass
+        if within_cooldown:
+            underperforming_holdings = [
+                u for u in underperforming_holdings
+                if u.get("recommendation") == "STRONG SELL" or u.get("score", 50) < 25
+            ]
         
         # For each underperforming holding, try to find better alternatives
         if underperforming_holdings:
@@ -2124,8 +2131,11 @@ class PortfolioAnalyzer:
         # Print results
         self.print_analysis_results(results)
         
-        # Read-only mode: never ask to update portfolio (for "make analyze-preview")
-        read_only = os.environ.get("ANALYZE_READONLY", "").strip().lower() in ("1", "true", "yes")
+        # Read-only mode: never ask to update portfolio (CI, make analyze-preview, or no TTY)
+        read_only = (
+            os.environ.get("ANALYZE_READONLY", "").strip().lower() in ("1", "true", "yes")
+            or not sys.stdin.isatty()
+        )
         if read_only:
             print("\n📋 Read-only mode: portfolio was not modified. Run 'make analyze' (without read-only) to update after you execute trades.\n")
             return results

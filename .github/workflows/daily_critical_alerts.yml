@@ -61,6 +61,8 @@ jobs:
         continue-on-error: true
       
       - name: Run Portfolio Analysis
+        env:
+          ANALYZE_READONLY: "1"
         run: |
           echo "📊 Running portfolio analysis..."
           python portfolio_analyzer.py > analysis_output.txt 2>&1 || true
@@ -74,6 +76,7 @@ jobs:
       
       - name: Run Critical Alert Check
         env:
+          ANALYZE_READONLY: "1"
           EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT || secrets.EMAIL_SENDER }}
