@@ -33,14 +33,25 @@ class EmailNotifier:
             logger.error("EMAIL_SENDER and EMAIL_PASSWORD must be set in environment variables")
             raise ValueError("EMAIL_SENDER and EMAIL_PASSWORD must be set in .env file or environment variables")
     
-    def send_critical_alert(self, subject: str, critical_items: List[Dict], portfolio_value: float = None, portfolio_metrics: Dict = None) -> bool:
+    def send_critical_alert(
+        self,
+        subject: str,
+        critical_items: List[Dict],
+        portfolio_value: float = None,
+        portfolio_metrics: Dict = None,
+        email_options: Dict = None,
+    ) -> bool:
         """Send critical alert email with urgent actions."""
+        email_options = email_options or {}
+        within_cd = email_options.get("within_review_cooldown", False)
+        any_critical_sell = email_options.get("any_critical_sell", True)
         try:
             # Create message
             msg = MIMEMultipart()
             msg['From'] = self.sender_email
             msg['To'] = self.recipient_email
-            msg['Subject'] = f"🚨 CRITICAL ALERT: {subject}"
+            prefix = "📋 Portfolio review:" if (within_cd and not any_critical_sell) else "🚨 CRITICAL ALERT:"
+            msg['Subject'] = f"{prefix} {subject}"
             
             # Build email body
             body = f"""
@@ -61,9 +72,16 @@ class EmailNotifier:
                 </style>
             </head>
             <body>
-                <h1 class="critical">🚨 CRITICAL PORTFOLIO ALERT</h1>
+                <h1 class="critical">{'📋 Portfolio review (not all items are urgent)' if within_cd else '🚨 CRITICAL PORTFOLIO ALERT'}</h1>
                 <p><strong>Time:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
             """
+            if within_cd:
+                body += """
+                <div class="info">
+                    <p><strong>30-day review window:</strong> You recently ran analysis or rebalanced. This email lists ideas to consider;
+                    you do not need to act immediately unless you choose to. Full rebalance reviews are typically every ~30 days.</p>
+                </div>
+                """
             
             if portfolio_value:
                 body += f'<p><strong>Current Portfolio Value:</strong> ${portfolio_value:,.2f}</p>'
@@ -111,17 +129,21 @@ class EmailNotifier:
                         <p><strong style="color: {return_color};">{return_icon} Cumulative Return:</strong> <span style="color: {return_color}; font-weight: bold;">${cumulative_return:+,.2f} ({cumulative_return_pct:+.2f}%)</span></p>
                     """
                     
-                    # Annualized return if available
+                    # Annualized return if available (skip absurd values for short track records)
                     if days_since_start and days_since_start >= 30 and baseline_value > 0:
                         try:
                             annualized_return = ((portfolio_value / baseline_value) ** (365.25 / days_since_start) - 1) * 100
-                            body += f'<p><strong>📊 Annualized Return:</strong> <span style="color: {return_color}; font-weight: bold;">{annualized_return:+.2f}%</span></p>'
-                        except:
+                            if days_since_start < 180 and abs(annualized_return) > 150:
+                                body += '<p><strong>📊 Annualized Return:</strong> <em>Not meaningful yet (very short period — ignore headline %)</em></p>'
+                            else:
+                                body += f'<p><strong>📊 Annualized Return:</strong> <span style="color: {return_color}; font-weight: bold;">{annualized_return:+.2f}%</span></p>'
+                        except Exception:
                             pass
                     
                     body += "</div>"
             
-            body += "<h2>⚠️ URGENT ACTIONS REQUIRED:</h2>"
+            actions_heading = "⚠️ URGENT ACTIONS REQUIRED:" if any_critical_sell else "📋 Suggested actions (review when convenient):"
+            body += f"<h2>{actions_heading}</h2>"
             
             for item in critical_items:
                 action_type = item.get("type", "ACTION")
@@ -156,14 +178,19 @@ class EmailNotifier:
                     </div>
                     """
                 elif action_type == "SELL":
+                    sc = item.get("score", 0)
+                    try:
+                        sc_disp = f"{float(sc):.1f}"
+                    except (TypeError, ValueError):
+                        sc_disp = str(sc)
                     body += f"""
                     <div class="sell">
-                        <h3>🔴 SELL NOW: {item.get('ticker', 'N/A')}</h3>
+                        <h3>🔴 Consider selling: {item.get('ticker', 'N/A')}</h3>
                         <p><strong>Reason:</strong> {item.get('reason', 'N/A')}</p>
                         <p><strong>Priority:</strong> {priority}</p>
                         <p><strong>Recommended Amount:</strong> ${item.get('amount', 0):,.2f}</p>
                         <p><strong>Shares to Sell:</strong> {item.get('shares', 0)}</p>
-                        <p><strong>Current Score:</strong> {item.get('score', 0)}/100</p>
+                        <p><strong>Current Score:</strong> {sc_disp}/100</p>
                     </div>
                     """
                 elif action_type == "REPLACE":

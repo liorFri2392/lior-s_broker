@@ -9,7 +9,7 @@ import os
 import sys
 import logging
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from portfolio_analyzer import PortfolioAnalyzer
 from deposit_advisor import DepositAdvisor
 from email_notifier import EmailNotifier
@@ -26,6 +26,93 @@ class CriticalAlertSystem:
         self.advisor = DepositAdvisor(portfolio_file)
         self.critical_threshold = 75  # Score threshold for critical buy
         self.urgent_sell_threshold = 25  # Score threshold for urgent sell
+        self.review_cooldown_days = 30  # Align with rebalance: fewer urgent emails soon after analyze/rebalance
+    
+    def _within_review_cooldown(self, portfolio: Dict) -> bool:
+        """True if last analyze or rebalance was within review_cooldown_days."""
+        today = datetime.now().date()
+        for key in ("last_analyze_run_date", "last_rebalancing_date"):
+            s = portfolio.get(key)
+            if not s:
+                continue
+            try:
+                d = datetime.strptime(str(s)[:10], "%Y-%m-%d").date()
+                if (today - d).days < self.review_cooldown_days:
+                    return True
+            except (ValueError, TypeError):
+                continue
+        return False
+    
+    def _refine_critical_items(
+        self,
+        items: List[Dict],
+        portfolio: Dict,
+        total_value: float,
+    ) -> Tuple[List[Dict], bool]:
+        """
+        Dedupe SELL by ticker, fix 0-share math, drop empty concentration rows,
+        and during cooldown skip urgent sells for tiny positions unless score is very low.
+        Returns (refined_items, any_critical_priority).
+        """
+        within_cd = self._within_review_cooldown(portfolio)
+        holdings_by_ticker = {h["ticker"].upper(): h for h in portfolio.get("holdings", [])}
+        priority_rank = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
+        
+        non_sell: List[Dict] = []
+        sells: List[Dict] = []
+        for item in items:
+            if item.get("type") != "SELL":
+                non_sell.append(item)
+                continue
+            reason = item.get("reason", "")
+            # Drop bogus concentration lines (0 shares, ~0 amount)
+            if "Over-concentration" in reason and item.get("shares", 0) == 0 and item.get("amount", 0) < 1:
+                continue
+            t = (item.get("ticker") or "").upper()
+            h = holdings_by_ticker.get(t, {})
+            qty = int(h.get("quantity", 0) or 0)
+            price = float(item.get("current_price") or h.get("last_price", 0) or 0)
+            pos_value = float(h.get("current_value", 0) or (qty * price if price else 0))
+            weight = (pos_value / total_value) if total_value and total_value > 0 else 0
+            score = float(item.get("score", 50))
+            
+            if "STRONG SELL" in reason or "Risk of significant loss" in reason:
+                if within_cd and weight < 0.01 and score >= 15:
+                    continue
+                if qty > 0 and price > 0:
+                    sh = max(1, round(qty * 0.5))
+                    item["shares"] = sh
+                    item["amount"] = round(sh * price, 2)
+            elif qty > 0 and price > 0 and item.get("shares", 0) == 0 and item.get("amount", 0) > 0:
+                item["shares"] = max(1, int(item["amount"] / price))
+                item["amount"] = round(item["shares"] * price, 2)
+            
+            sells.append(item)
+        
+        # One SELL per ticker: keep best priority (CRITICAL over HIGH); prefer STRONG SELL over concentration
+        best_by_ticker: Dict[str, Dict] = {}
+        for item in sells:
+            t = (item.get("ticker") or "").upper()
+            if not t:
+                continue
+            cur = best_by_ticker.get(t)
+            if cur is None:
+                best_by_ticker[t] = item
+                continue
+            r_new = priority_rank.get(item.get("priority", "MEDIUM"), 3)
+            r_old = priority_rank.get(cur.get("priority", "MEDIUM"), 3)
+            if r_new < r_old:
+                best_by_ticker[t] = item
+            elif r_new == r_old and "STRONG SELL" in item.get("reason", "") and "STRONG SELL" not in cur.get("reason", ""):
+                best_by_ticker[t] = item
+        
+        merged_sells = list(best_by_ticker.values())
+        merged = non_sell + merged_sells
+        any_critical = any(
+            i.get("type") == "SELL" and i.get("priority") == "CRITICAL"
+            for i in merged_sells
+        )
+        return merged, any_critical
     
     def is_market_trading_day(self) -> bool:
         """Check if today is a US market trading day (excludes holidays)."""
@@ -104,15 +191,20 @@ class CriticalAlertSystem:
                 current_value = holding.get("current_value", 0)
                 
                 if recommendation == "STRONG SELL" or score < self.urgent_sell_threshold:
+                    qty = int(holding.get("quantity", 0) or 0)
+                    price = float(holding.get("current_price", 0) or 0)
+                    shares = max(1, round(qty * 0.5)) if qty else 0
+                    amt = round(shares * price, 2) if price else 0
                     critical_items.append({
                         "type": "SELL",
                         "ticker": ticker,
                         "priority": "CRITICAL",
                         "reason": f"STRONG SELL signal - Score: {score:.1f}/100. Risk of significant loss.",
-                        "amount": current_value * 0.5,  # Recommend selling 50%
-                        "shares": int(holding.get("quantity", 0) * 0.5),
-                        "score": score,
-                        "current_price": holding.get("current_price", 0)
+                        "amount": amt,
+                        "shares": shares,
+                        "score": round(score, 1),
+                        "current_price": price,
+                        "quantity": qty,
                     })
             
             # Check for rebalancing needs (over-concentration)
@@ -127,7 +219,8 @@ class CriticalAlertSystem:
                             "reason": f"Over-concentration: {rec.get('current_weight', 0)*100:.1f}% of portfolio. Diversification needed.",
                             "amount": rec.get("reduce_amount_usd", 0),
                             "shares": rec.get("reduce_shares", 0),
-                            "score": next((h.get("recommendation_score", 50) for h in holdings_analysis if h.get("ticker") == rec.get("ticker")), 50)
+                            "score": round(next((h.get("recommendation_score", 50) for h in holdings_analysis if h.get("ticker") == rec.get("ticker")), 50), 1),
+                            "current_price": next((h.get("current_price", 0) for h in holdings_analysis if h.get("ticker") == rec.get("ticker")), 0),
                         })
         
         # 2. Scan for critical buy opportunities (high-yield ETFs)
@@ -429,6 +522,12 @@ class CriticalAlertSystem:
         anomalies = self.check_market_anomalies()
         critical_items.extend(anomalies)
         
+        # Dedupe SELLs, fix share math, align urgency with 30-day review cooldown
+        portfolio_metrics = portfolio_analysis.get("portfolio_metrics", {}) if portfolio_analysis else {}
+        portfolio = self.analyzer.load_portfolio()
+        total_val = float(portfolio_metrics.get("total_value", 0) or portfolio.get("total_value", 0) or 1)
+        critical_items, any_critical_sell = self._refine_critical_items(critical_items, portfolio, total_val)
+        
         # Sort by priority (CRITICAL > HIGH > MEDIUM)
         priority_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2}
         critical_items.sort(key=lambda x: priority_order.get(x.get("priority", "MEDIUM"), 3))
@@ -438,16 +537,15 @@ class CriticalAlertSystem:
         specific_action_types = ["BUY", "SELL", "REPLACE"]
         has_specific_actions = any(item.get("type") in specific_action_types for item in critical_items)
         
-        # Get portfolio metrics including cumulative return
-        portfolio_metrics = portfolio_analysis.get("portfolio_metrics", {}) if portfolio_analysis else {}
-        
         return {
             "critical_items": critical_items,
             "has_critical": has_specific_actions,  # Only true if specific actions exist
             "portfolio_value": portfolio_metrics.get("total_value", 0),
             "portfolio_metrics": portfolio_metrics,  # Include full metrics for email
             "market_status": market_message,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now().isoformat(),
+            "within_review_cooldown": self._within_review_cooldown(portfolio),
+            "any_critical_sell": any_critical_sell,
         }
     
     def scan_critical_buy_opportunities(self) -> List[Dict]:
@@ -1159,9 +1257,23 @@ class CriticalAlertSystem:
             if sell_count > 0:
                 actions.append(f"{sell_count} Sell{'s' if sell_count != 1 else ''}")
             
-            subject = f"URGENT: {', '.join(actions)} Required" if actions else "Portfolio Alert"
+            within_cd = results.get("within_review_cooldown", False)
+            any_crit = results.get("any_critical_sell", True)
+            if within_cd and not any_crit:
+                subject = f"Review: {', '.join(actions)} suggested" if actions else "Portfolio review"
+            else:
+                subject = f"URGENT: {', '.join(actions)} Required" if actions else "Portfolio Alert"
             
-            success = notifier.send_critical_alert(subject, critical_items, portfolio_value, portfolio_metrics)
+            success = notifier.send_critical_alert(
+                subject,
+                critical_items,
+                portfolio_value,
+                portfolio_metrics,
+                email_options={
+                    "within_review_cooldown": within_cd,
+                    "any_critical_sell": any_crit,
+                },
+            )
             
             if success:
                 print(f"\n✅ Critical alert email sent with {len(critical_items)} urgent action(s)")
