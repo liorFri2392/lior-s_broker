@@ -2,9 +2,8 @@ name: Daily Critical Portfolio Alerts
 
 on:
   schedule:
-    # Run Monday-Friday at 2:00 PM EST (19:00 UTC) - once per day during trading hours
-    # Adjust timezone as needed - EST is UTC-5, EDT is UTC-4
-    - cron: '0 19 * * 1-5'  # 2 PM EST on weekdays
+    # Run Monday-Friday at 12:00 PM EST / 1:00 PM EDT (17:00 UTC) - 2h earlier than prior 19:00 UTC
+    - cron: '0 17 * * 1-5'  # 17:00 UTC weekdays
   workflow_dispatch:  # Allow manual trigger
 
 jobs:
