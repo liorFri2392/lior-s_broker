@@ -68,7 +68,8 @@ class DepositAdvisor:
         "OIL_GAS": ["XOP", "XES", "IEZ"],
         "GOLD": ["GLD", "IAU", "SGOL"],
         "SILVER": ["SLV", "SIVR", "PSLV"],
-        "COMMODITIES": ["DBC", "GSG", "PDBC"],
+        # DBC/PDBC/COMT trade on many brokers; GSG is often missing outside the US.
+        "COMMODITIES": ["DBC", "COMT", "PDBC"],
         
         # Consumer & Retail
         "CONSUMER": ["XLY", "VCR", "IYC"],
