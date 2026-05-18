@@ -115,28 +115,17 @@ class DepositAdvisor:
         self.portfolio_file = portfolio_file
         self.analyzer = PortfolioAnalyzer(portfolio_file)
         self.advanced_analyzer = AdvancedAnalyzer()
-        self.exchange_rate_usd_ils = 3.7  # Approximate, should be fetched from API
-    
+        self.exchange_rate_usd_ils = 1.0 / 0.34  # ILS per USD (~2.94 when 1 ILS = 0.34 USD)
+
     def load_portfolio(self) -> Dict:
         """Load portfolio from JSON file."""
         return self.analyzer.load_portfolio()
-    
+
     def get_exchange_rate(self) -> float:
-        """Get current USD/ILS exchange rate."""
-        try:
-            # Try to get real-time exchange rate from yfinance
-            usd_ils = yf.Ticker("USDILS=X")
-            hist = usd_ils.history(period="1d")
-            if not hist.empty:
-                rate = float(hist['Close'].iloc[-1])
-                self.exchange_rate_usd_ils = rate
-                return rate
-            else:
-                # Fallback to approximate rate
-                return self.exchange_rate_usd_ils
-        except Exception as e:
-            print(f"Warning: Could not fetch exchange rate, using default: {e}")
-            return self.exchange_rate_usd_ils
+        """Get ILS per 1 USD (same logic as portfolio analyzer)."""
+        rate = self.analyzer.get_exchange_rate()
+        self.exchange_rate_usd_ils = rate
+        return rate
     
     def analyze_industry_trends(self, category: str) -> Dict:
         """Analyze industry trends for a category by comparing all ETFs in that category."""
@@ -629,10 +618,11 @@ class DepositAdvisor:
         print("📊 Strategy: 80/20 Balanced Growth (80% Stocks, 20% Bonds)")
         print("   Optimized for family stability with growth potential\n")
         
-        # Convert to USD
+        # Convert ILS deposit to USD using live FX (or ILS_PER_USD env override)
         exchange_rate = self.get_exchange_rate()
         deposit_amount_usd = deposit_amount_ils / exchange_rate
-        
+
+        print(f"💱 Exchange rate: 1 USD = {exchange_rate:.4f} ILS  (1 ILS = {1/exchange_rate:.4f} USD)")
         print(f"Deposit amount in USD: ${deposit_amount_usd:,.2f}")
         
         # Analyze current portfolio to understand current allocation
@@ -1223,7 +1213,7 @@ class DepositAdvisor:
         market_status, market_message = self.analyzer.is_market_open()
         
         print(f"\nDeposit Amount: ₪{deposit_amount_ils:,.2f} (${deposit_amount_usd:,.2f})")
-        print(f"Exchange Rate: {exchange_rate} ILS/USD")
+        print(f"Exchange Rate: 1 USD = {exchange_rate:.4f} ILS  (1 ILS = {1/exchange_rate:.4f} USD)")
         print(f"📊 {market_message}")
         
         if not recommendations:

@@ -15,7 +15,7 @@ help:
 	@echo "  make setup      - Initial setup (create venv, install packages, create portfolio.json)"
 	@echo "  make analyze    - Analyze portfolio; asks to update portfolio.json if you executed the recommended trades"
 	@echo "  make analyze-preview - Same as analyze but never updates portfolio (read-only)"
-	@echo "  make deposit    - Refresh prices, then get deposit recommendations"
+	@echo "  make deposit    - Refresh prices + live USD/ILS rate, then deposit recommendations"
 	@echo "  make refresh-prices - Update portfolio.json prices from market (no trade prompts)"
 	@echo "  make alerts     - Check for critical portfolio actions (requires .env with email credentials)"
 	@echo "  make backtest    - Run backtesting on historical data"

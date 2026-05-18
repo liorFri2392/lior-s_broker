@@ -49,8 +49,9 @@ class PortfolioAnalyzer:
         self.portfolio_file = portfolio_file
         self.news_api_key = os.getenv("NEWS_API_KEY", "")
         self.alpha_vantage_key = os.getenv("ALPHA_VANTAGE_KEY", "")
-        self.exchange_rate_usd_ils = 3.7  # Default, will be updated
+        self.exchange_rate_usd_ils = 1.0 / 0.34  # ILS per USD (~2.94 when 1 ILS = 0.34 USD)
         self.exchange_rate_cache_time = None  # Cache for exchange rate
+        self.exchange_rate_cache_timeout = timedelta(minutes=30)  # Refresh FX more often than stock prices
         self.price_cache = {}  # Cache for prices: {ticker: (price, timestamp)}
         self.market_data_cache = {}  # Cache for market data: {ticker: (data, timestamp)}
         self.news_cache = {}  # Cache for news: {ticker: (sentiment, timestamp)}
@@ -116,29 +117,53 @@ class PortfolioAnalyzer:
         except Exception as e:
             logger.warning(f"Failed to save cache: {e}")
     
+    @staticmethod
+    def normalize_ils_per_usd(raw_rate: float) -> float:
+        """
+        Return how many ILS equal 1 USD.
+        Quotes like '1 ILS = 0.34 USD' are USD-per-ILS (< 1) and must be inverted.
+        Quotes like '1 USD = 2.94 ILS' are already ILS-per-USD (>= 1).
+        """
+        if raw_rate <= 0:
+            return 1.0 / 0.34
+        if raw_rate < 1.0:
+            return 1.0 / raw_rate
+        return raw_rate
+
     def get_exchange_rate(self) -> float:
-        """Get current USD/ILS exchange rate with caching."""
-        now = datetime.now()
-        
-        # Check cache first
-        if (self.exchange_rate_cache_time and 
-            now - self.exchange_rate_cache_time < self.cache_timeout):
-            return self.exchange_rate_usd_ils
-        
-        # Fetch new rate
-        try:
-            usd_ils = yf.Ticker("USDILS=X")
-            hist = usd_ils.history(period="1d")
-            if not hist.empty:
-                rate = float(hist['Close'].iloc[-1])
+        """Get ILS per 1 USD (for USD→ILS multiply, for ILS→USD divide)."""
+        override = os.getenv("ILS_PER_USD") or os.getenv("EXCHANGE_RATE_ILS_PER_USD")
+        if override:
+            try:
+                rate = self.normalize_ils_per_usd(float(override))
                 self.exchange_rate_usd_ils = rate
-                self.exchange_rate_cache_time = now
-                self._save_cache()  # Save to persistent cache
                 return rate
+            except ValueError:
+                logger.warning(f"Invalid ILS_PER_USD override: {override!r}")
+
+        now = datetime.now()
+
+        if (
+            self.exchange_rate_cache_time
+            and now - self.exchange_rate_cache_time < self.exchange_rate_cache_timeout
+        ):
             return self.exchange_rate_usd_ils
-        except Exception as e:
-            logger.warning(f"Failed to fetch exchange rate: {e}")
-            return self.exchange_rate_usd_ils
+
+        for symbol in ("ILSUSD=X", "USDILS=X"):
+            try:
+                hist = yf.Ticker(symbol).history(period="1d")
+                if not hist.empty:
+                    raw = float(hist["Close"].iloc[-1])
+                    rate = self.normalize_ils_per_usd(raw)
+                    self.exchange_rate_usd_ils = rate
+                    self.exchange_rate_cache_time = now
+                    self._save_cache()
+                    return rate
+            except Exception as e:
+                logger.debug(f"Failed to fetch {symbol}: {e}")
+
+        logger.warning("Failed to fetch exchange rate, using default (1 ILS = 0.34 USD)")
+        return self.exchange_rate_usd_ils
         
     def load_portfolio(self) -> Dict:
         """Load portfolio from JSON file."""
@@ -2410,7 +2435,7 @@ class PortfolioAnalyzer:
         print(f"\nTotal Portfolio Value: ₪{total_value_ils:,.2f} (${metrics['total_value']:,.2f})")
         print(f"Cash: ₪{cash_ils:,.2f} (${metrics['cash']:,.2f})")
         print(f"Holdings Value: ₪{holdings_value_ils:,.2f} (${metrics['holdings_value']:,.2f})")
-        print(f"Exchange Rate: {exchange_rate} ILS/USD")
+        print(f"Exchange Rate: 1 USD = {exchange_rate:.4f} ILS  (1 ILS = {1/exchange_rate:.4f} USD)")
         print(f"Diversification Score: {metrics['diversification_score']:.2f} (1.0 = perfect diversification)")
         print(f"Average Recommendation Score: {metrics['average_recommendation_score']:.1f}/100")
         
