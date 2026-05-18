@@ -1,4 +1,4 @@
-.PHONY: analyze deposit setup install venv clean backtest risk tax alerts
+.PHONY: analyze deposit refresh-prices setup install venv clean backtest risk tax alerts
 
 # Virtual environment directory
 VENV = venv
@@ -15,7 +15,8 @@ help:
 	@echo "  make setup      - Initial setup (create venv, install packages, create portfolio.json)"
 	@echo "  make analyze    - Analyze portfolio; asks to update portfolio.json if you executed the recommended trades"
 	@echo "  make analyze-preview - Same as analyze but never updates portfolio (read-only)"
-	@echo "  make deposit    - Get recommendations for depositing funds"
+	@echo "  make deposit    - Refresh prices, then get deposit recommendations"
+	@echo "  make refresh-prices - Update portfolio.json prices from market (no trade prompts)"
 	@echo "  make alerts     - Check for critical portfolio actions (requires .env with email credentials)"
 	@echo "  make backtest    - Run backtesting on historical data"
 	@echo "  make risk       - Check portfolio risk and get risk management report"
@@ -56,6 +57,10 @@ analyze: venv
 analyze-preview: venv
 	@echo "Running portfolio analysis (read-only - portfolio.json will not be changed)..."
 	@ANALYZE_READONLY=1 $(PYTHON) portfolio_analyzer.py
+
+refresh-prices: venv
+	@echo "Refreshing portfolio prices..."
+	@$(PYTHON) -c "from portfolio_analyzer import PortfolioAnalyzer; PortfolioAnalyzer().refresh_portfolio_prices(verbose=True)"
 
 deposit: venv
 	@echo "Deposit Advisory System"

@@ -152,15 +152,51 @@ class PortfolioAnalyzer:
             "total_value": 0
         }
     
-    def save_portfolio(self, portfolio: Dict):
+    def save_portfolio(self, portfolio: Dict, sync_github_secret: bool = True):
         """Save portfolio to JSON file locally."""
         portfolio["last_updated"] = datetime.now().isoformat()
         portfolio_path = os.path.abspath(self.portfolio_file)
         with open(portfolio_path, 'w', encoding='utf-8') as f:
             json.dump(portfolio, f, indent=2, ensure_ascii=False)
         
-        # Try to update GitHub secret automatically (if GitHub CLI is available)
-        self._try_update_github_secret(portfolio)
+        if sync_github_secret:
+            # Try to update GitHub secret automatically (if GitHub CLI is available)
+            self._try_update_github_secret(portfolio)
+
+    def refresh_portfolio_prices(self, verbose: bool = False, sync_github_secret: bool = False) -> Dict:
+        """Refresh last_price and current_value from live market data (no trade prompts)."""
+        portfolio = self.load_portfolio()
+        holdings = portfolio.get("holdings", [])
+        if not holdings:
+            return portfolio
+
+        tickers = [h["ticker"] for h in holdings]
+        prices, market_status, market_message = self.get_current_prices(tickers)
+
+        if verbose:
+            print(f"\n🔄 Refreshing portfolio prices...")
+            print(f"   📊 {market_message}")
+
+        total_value = portfolio.get("cash", 0)
+        refreshed = 0
+        for holding in holdings:
+            ticker = holding["ticker"]
+            price = prices.get(ticker) or holding.get("last_price", 0)
+            if price <= 0:
+                total_value += holding.get("current_value", 0)
+                continue
+            holding["last_price"] = price
+            holding["current_value"] = holding.get("quantity", 0) * price
+            total_value += holding["current_value"]
+            refreshed += 1
+
+        portfolio["total_value"] = total_value
+        self.save_portfolio(portfolio, sync_github_secret=sync_github_secret)
+
+        if verbose:
+            print(f"   ✅ Updated {refreshed}/{len(holdings)} holdings — portfolio value: ${total_value:,.2f}\n")
+
+        return portfolio
     
     def _try_update_github_secret(self, portfolio: Dict):
         """Try to update GitHub secret automatically (silently, no errors if fails)."""

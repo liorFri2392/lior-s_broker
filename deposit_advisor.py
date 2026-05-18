@@ -1175,17 +1175,8 @@ class DepositAdvisor:
         print("DEPOSIT ADVISORY SYSTEM")
         print("=" * 60)
         
-        # Check and display market status
-        market_status, market_message = self.analyzer.is_market_open()
-        print(f"\n📊 Market Status: {market_message}")
-        if market_status:
-            print("   ⚡ Using REAL-TIME prices for recommendations")
-        else:
-            print("   📅 Using LAST CLOSE prices for recommendations")
-        print()
-        
-        # Load portfolio
-        portfolio = self.load_portfolio()
+        # Refresh prices before deposit advice (same data source as make analyze, without trade prompts)
+        portfolio = self.analyzer.refresh_portfolio_prices(verbose=True)
         
         if not os.path.exists(self.portfolio_file):
             print("Warning: Portfolio file not found. Creating new portfolio structure.")
