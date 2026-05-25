@@ -1086,19 +1086,28 @@ class DepositAdvisor:
                     break
             
             if existing_holding is not None:
-                # Update existing holding
-                portfolio["holdings"][existing_holding]["quantity"] += shares_to_add
-                portfolio["holdings"][existing_holding]["last_price"] = current_price
-                portfolio["holdings"][existing_holding]["current_value"] = (
-                    portfolio["holdings"][existing_holding]["quantity"] * current_price
-                )
+                # Cost-average: weighted mean of (old shares · old cost_basis)
+                # and (new shares · current_price). This is the textbook average-
+                # cost method; tax authorities typically allow this for ETFs
+                # absent specific-lot identification.
+                h = portfolio["holdings"][existing_holding]
+                old_qty = h.get("quantity", 0)
+                old_cb = h.get("cost_basis") or h.get("purchase_price") or h.get("last_price", current_price)
+                new_qty = old_qty + shares_to_add
+                if new_qty > 0:
+                    new_cb = (old_qty * old_cb + shares_to_add * current_price) / new_qty
+                    h["cost_basis"] = round(new_cb, 4)
+                h["quantity"] = new_qty
+                h["last_price"] = current_price
+                h["current_value"] = new_qty * current_price
             else:
-                # Add new holding
+                # Add new holding — cost_basis is the price we just paid.
                 new_holding = {
                     "ticker": ticker,
                     "quantity": shares_to_add,
+                    "cost_basis": round(current_price, 4),
                     "last_price": current_price,
-                    "current_value": shares_to_add * current_price
+                    "current_value": shares_to_add * current_price,
                 }
                 portfolio["holdings"].append(new_holding)
         

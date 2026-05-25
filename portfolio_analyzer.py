@@ -2318,20 +2318,28 @@ class PortfolioAnalyzer:
                         break
                 
                 if existing_holding:
-                    # Update existing holding
-                    existing_holding["quantity"] += shares_to_buy
+                    old_qty = existing_holding.get("quantity", 0)
+                    old_cb = (existing_holding.get("cost_basis")
+                              or existing_holding.get("purchase_price")
+                              or existing_holding.get("last_price", price))
+                    new_qty = old_qty + shares_to_buy
+                    if new_qty > 0:
+                        existing_holding["cost_basis"] = round(
+                            (old_qty * old_cb + shares_to_buy * price) / new_qty, 4
+                        )
+                    existing_holding["quantity"] = new_qty
                     existing_holding["last_price"] = price
-                    existing_holding["current_value"] = existing_holding["quantity"] * price
+                    existing_holding["current_value"] = new_qty * price
                 else:
-                    # Add new holding
                     new_holding = {
                         "ticker": ticker,
                         "quantity": shares_to_buy,
+                        "cost_basis": round(price, 4),
                         "last_price": price,
-                        "current_value": shares_to_buy * price
+                        "current_value": shares_to_buy * price,
                     }
                     portfolio.setdefault("holdings", []).append(new_holding)
-                
+
                 # Subtract from cash
                 portfolio["cash"] = max(0, portfolio.get("cash", 0) - buy_amount)
         
@@ -2405,17 +2413,25 @@ class PortfolioAnalyzer:
                         break
                 
                 if existing_holding:
-                    # Update existing holding
-                    existing_holding["quantity"] += shares_to_buy
+                    old_qty = existing_holding.get("quantity", 0)
+                    old_cb = (existing_holding.get("cost_basis")
+                              or existing_holding.get("purchase_price")
+                              or existing_holding.get("last_price", buy_price))
+                    new_qty = old_qty + shares_to_buy
+                    if new_qty > 0:
+                        existing_holding["cost_basis"] = round(
+                            (old_qty * old_cb + shares_to_buy * buy_price) / new_qty, 4
+                        )
+                    existing_holding["quantity"] = new_qty
                     existing_holding["last_price"] = buy_price
-                    existing_holding["current_value"] = existing_holding["quantity"] * buy_price
+                    existing_holding["current_value"] = new_qty * buy_price
                 else:
-                    # Add new holding
                     new_holding = {
                         "ticker": buy_ticker,
                         "quantity": shares_to_buy,
+                        "cost_basis": round(buy_price, 4),
                         "last_price": buy_price,
-                        "current_value": shares_to_buy * buy_price
+                        "current_value": shares_to_buy * buy_price,
                     }
                     portfolio.setdefault("holdings", []).append(new_holding)
             

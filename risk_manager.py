@@ -134,39 +134,50 @@ class RiskManager:
     def check_stop_loss_take_profit(self, portfolio: Dict = None) -> List[Dict]:
         """
         Check if any holdings hit stop-loss or take-profit levels.
-        
+
+        Requires a tracked cost basis. Will NOT fall back to last_price (which
+        is the *current* market price, not the purchase price) — that fallback
+        previously caused bogus alerts whenever portfolio.json was stale
+        relative to the live quote.
+
+        Cost-basis field: 'cost_basis' (canonical); 'purchase_price' (legacy
+        alias) is also accepted.
+
         Returns:
-            List of actions needed (SELL recommendations)
+            List of actions. Holdings without a tracked cost basis are
+            silently skipped; the count is exposed via skipped_no_cost_basis.
         """
         if portfolio is None:
             portfolio = self.load_portfolio()
-        
+
         actions = []
+        skipped = []
         holdings = portfolio.get("holdings", [])
-        
+
         for holding in holdings:
             ticker = holding.get("ticker")
             quantity = holding.get("quantity", 0)
-            purchase_price = holding.get("purchase_price") or holding.get("last_price", 0)
-            current_price = holding.get("last_price", 0)
-            
-            if purchase_price == 0 or current_price == 0:
+            cost_basis = holding.get("cost_basis") or holding.get("purchase_price")
+            current_price_stored = holding.get("last_price", 0)
+
+            if not cost_basis or cost_basis <= 0:
+                skipped.append(ticker)
                 continue
-            
-            # Get real-time price
+            if current_price_stored == 0:
+                continue
+
+            # Fetch live price (falls back to stored last_price on failure)
+            current_price = current_price_stored
             try:
                 stock = yf.Ticker(ticker)
-                hist = stock.history(period="1d")
+                hist = stock.history(period="1d", auto_adjust=True)
                 if not hist.empty:
                     current_price = float(hist['Close'].iloc[-1])
             except Exception as e:
                 logger.debug(f"Could not get current price for {ticker}: {e}")
-                continue
-            
-            # Calculate return
-            return_pct = (current_price / purchase_price - 1) * 100
-            
-            # Check stop-loss
+
+            return_pct = (current_price / cost_basis - 1) * 100
+
             if return_pct <= -self.stop_loss_percent:
                 actions.append({
                     "action": "SELL",
@@ -175,23 +186,32 @@ class RiskManager:
                     "priority": "CRITICAL",
                     "quantity": quantity,
                     "current_price": current_price,
-                    "purchase_price": purchase_price,
-                    "return_pct": return_pct
+                    "purchase_price": cost_basis,
+                    "return_pct": return_pct,
                 })
-            
-            # Check take-profit
             elif return_pct >= self.take_profit_percent:
                 actions.append({
                     "action": "SELL_PARTIAL",
                     "ticker": ticker,
                     "reason": f"Take-profit reached: {return_pct:.2f}% gain (threshold: {self.take_profit_percent}%)",
                     "priority": "HIGH",
-                    "quantity": int(quantity * 0.5),  # Sell 50% to lock profits
+                    "quantity": int(quantity * 0.5),
                     "current_price": current_price,
-                    "purchase_price": purchase_price,
-                    "return_pct": return_pct
+                    "purchase_price": cost_basis,
+                    "return_pct": return_pct,
                 })
-        
+
+        if skipped:
+            logger.info(
+                f"Stop-loss/take-profit skipped for {len(skipped)} holdings with no "
+                f"cost_basis tracked: {', '.join(skipped[:10])}"
+                + ("…" if len(skipped) > 10 else "")
+            )
+            # Stash for the print path
+            self._skipped_no_cost_basis = skipped
+        else:
+            self._skipped_no_cost_basis = []
+
         return actions
     
     def check_position_sizes(self, portfolio: Dict = None) -> List[Dict]:
@@ -582,6 +602,15 @@ class RiskManager:
                 print(f"      Recommended: Sell {action['quantity']} shares @ ${action['current_price']:.2f}\n")
         else:
             print("✅ No stop-loss or take-profit triggers\n")
+
+        # Disclose any holdings skipped due to missing cost_basis. The previous
+        # implementation silently fell back to last_price (the *current* price)
+        # and fired bogus alerts; we now skip and tell the user instead.
+        skipped = getattr(self, "_skipped_no_cost_basis", []) or []
+        if skipped:
+            print(f"ℹ️  Skipped stop-loss/take-profit for {len(skipped)} holdings without a tracked")
+            print(f"   cost_basis: {', '.join(skipped[:10])}" + ("…" if len(skipped) > 10 else ""))
+            print(f"   Run `make backfill-cost-basis` to set cost_basis = last_price for them.\n")
         
         # Position sizes
         if alerts["position_sizes"]:
@@ -618,17 +647,86 @@ class RiskManager:
                     if cl_key in var_cvar:
                         vc = var_cvar[cl_key]
                         print(f"   {cl_key} Confidence:")
-                        print(f"      Historical VaR: {vc['historical_var_daily']:.3f}% (${vc['historical_var_dollar']:,.2f}/day)")
-                        print(f"      CVaR (Exp. Shortfall): {vc['cvar_daily']:.3f}% (${vc['cvar_dollar']:,.2f}/day)")
-                
+                        print(f"      Historical VaR:        {vc['historical_var_daily']:>7.3f}%  (${vc['historical_var_dollar']:>10,.2f}/day)")
+                        print(f"      Gaussian VaR:          {vc['parametric_var_daily']:>7.3f}%  (${vc['parametric_var_dollar']:>10,.2f}/day)")
+                        if 'student_t_var_daily' in vc:
+                            df_str = f"df≈{vc['student_t_df']:.1f}" if vc.get('student_t_df') else "df=∞"
+                            print(f"      Student-t VaR ({df_str:>7}): {vc['student_t_var_daily']:>7.3f}%  (${vc['student_t_var_dollar']:>10,.2f}/day)")
+                        if 'garch_var_daily' in vc:
+                            print(f"      GARCH(1,1) VaR:        {vc['garch_var_daily']:>7.3f}%  (${vc['garch_var_dollar']:>10,.2f}/day)  ← regime-aware")
+                        print(f"      Historical CVaR:       {vc['cvar_daily']:>7.3f}%  (${vc['cvar_dollar']:>10,.2f}/day)")
+                        if 'student_t_cvar_daily' in vc:
+                            print(f"      Student-t CVaR:        {vc['student_t_cvar_daily']:>7.3f}%  (${vc['student_t_cvar_dollar']:>10,.2f}/day)")
+
                 ann = var_cvar.get("annualized_var")
                 if ann:
                     print(f"   Annualized VaR ({ann['confidence']}): {ann['annual_var_pct']:.2f}% (${ann['annual_var_dollar']:,.2f})")
+                    note = ann.get('scaling')
+                    if note:
+                        print(f"      [{note}]")
+
+                garch = var_cvar.get("garch_1_1")
+                if garch:
+                    print("\n   GARCH(1,1) volatility regime:")
+                    print(f"      α={garch['alpha']:.3f}  β={garch['beta']:.3f}  persistence={garch['persistence']:.3f}")
+                    print(f"      σ_now = {garch['sigma_now_daily_pct']:.2f}%/day  vs  σ_uncond = {garch['unconditional_sigma_daily_pct']:.2f}%/day")
+                    if garch.get('sigma_next_daily_pct') is not None:
+                        print(f"      σ_next (1-day-ahead) = {garch['sigma_next_daily_pct']:.2f}%/day")
+                    print(f"      {garch['interpretation']}")
                 print()
         
         print("=" * 60 + "\n")
 
+def backfill_cost_basis(portfolio_file: str = "portfolio.json", confirm: bool = True) -> int:
+    """Set cost_basis = last_price for every holding that doesn't have one.
+
+    This is a one-time migration for portfolios that pre-date cost-basis
+    tracking. The assumption it makes is: "assume each existing holding was
+    purchased at its most-recent stored last_price". That's not the true
+    historical cost basis, but it gives stop-loss/take-profit a sane baseline
+    going forward, and is opt-in.
+
+    Returns the number of holdings updated.
+    """
+    with open(portfolio_file, 'r', encoding='utf-8') as f:
+        portfolio = json.load(f)
+
+    needs = [
+        h for h in portfolio.get("holdings", [])
+        if not (h.get("cost_basis") or h.get("purchase_price"))
+        and h.get("last_price", 0) > 0
+    ]
+    if not needs:
+        print("All holdings already have a cost_basis tracked. Nothing to do.")
+        return 0
+
+    print(f"Will set cost_basis = last_price for {len(needs)} holdings:")
+    for h in needs:
+        print(f"  {h['ticker']:>6}  cost_basis ← ${h['last_price']:.2f}  (qty {h.get('quantity',0)})")
+
+    if confirm:
+        ans = input("\nProceed? [y/N]: ").strip().lower()
+        if ans not in ("y", "yes"):
+            print("Aborted; portfolio.json not modified.")
+            return 0
+
+    for h in needs:
+        h["cost_basis"] = round(float(h["last_price"]), 4)
+
+    with open(portfolio_file, 'w', encoding='utf-8') as f:
+        json.dump(portfolio, f, indent=2, ensure_ascii=False)
+
+    print(f"\n✅ Updated {len(needs)} holdings in {portfolio_file}.")
+    return len(needs)
+
+
 if __name__ == "__main__":
-    manager = RiskManager()
-    manager.print_risk_report()
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "backfill-cost-basis":
+        # Non-interactive when --yes is passed (useful for CI/scripts).
+        confirm = "--yes" not in sys.argv
+        backfill_cost_basis(confirm=confirm)
+    else:
+        manager = RiskManager()
+        manager.print_risk_report()
 

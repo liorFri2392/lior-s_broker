@@ -1094,17 +1094,25 @@ class CriticalAlertSystem:
                 
                 if buy_holding:
                     old_qty = buy_holding.get("quantity", 0)
-                    buy_holding["quantity"] = old_qty + buy_shares
+                    old_cb = (buy_holding.get("cost_basis")
+                              or buy_holding.get("purchase_price")
+                              or buy_holding.get("last_price", buy_price))
+                    new_qty = old_qty + buy_shares
+                    if new_qty > 0:
+                        buy_holding["cost_basis"] = round(
+                            (old_qty * old_cb + buy_shares * buy_price) / new_qty, 4
+                        )
+                    buy_holding["quantity"] = new_qty
                     buy_holding["last_price"] = buy_price
-                    buy_holding["current_value"] = buy_holding["quantity"] * buy_price
-                    print(f"  ✅ BUY: {buy_ticker} - {old_qty} → {buy_holding['quantity']} shares @ ${buy_price:.2f}")
+                    buy_holding["current_value"] = new_qty * buy_price
+                    print(f"  ✅ BUY: {buy_ticker} - {old_qty} → {new_qty} shares @ ${buy_price:.2f}")
                 else:
-                    # Create new holding
                     new_holding = {
                         "ticker": buy_ticker,
                         "quantity": buy_shares,
+                        "cost_basis": round(buy_price, 4),
                         "last_price": buy_price,
-                        "current_value": buy_shares * buy_price
+                        "current_value": buy_shares * buy_price,
                     }
                     portfolio.setdefault("holdings", []).append(new_holding)
                     print(f"  ✅ BUY: {buy_ticker} - NEW holding: {buy_shares} shares @ ${buy_price:.2f}")

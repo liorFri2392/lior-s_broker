@@ -1,4 +1,4 @@
-.PHONY: analyze deposit refresh-prices setup install venv clean backtest risk tax alerts
+.PHONY: analyze deposit refresh-prices setup install venv clean backtest risk tax alerts backfill-cost-basis
 
 # Virtual environment directory
 VENV = venv
@@ -84,6 +84,11 @@ backtest: venv
 risk: venv
 	@echo "Checking portfolio risk..."
 	@$(PYTHON) -c "from risk_manager import RiskManager; rm = RiskManager(); rm.print_risk_report()"
+
+backfill-cost-basis: venv
+	@echo "Setting cost_basis = last_price for holdings without a tracked cost basis."
+	@echo "This is a one-time migration so stop-loss / take-profit alerts work."
+	@$(PYTHON) risk_manager.py backfill-cost-basis
 
 tax: venv
 	@echo "Analyzing tax implications for current portfolio..."
