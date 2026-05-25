@@ -16,11 +16,32 @@ logger = logging.getLogger(__name__)
 
 class Backtester:
     """Backtest trading strategies on historical data."""
-    
-    def __init__(self, initial_capital: float = 10000):
+
+    def __init__(
+        self,
+        initial_capital: float = 10000,
+        commission_per_trade: float = 0.0,
+        slippage_bps: float = 5.0,
+    ):
+        """
+        commission_per_trade: flat $ commission per buy/sell (most US brokers
+            now charge $0; IB/Schwab/Fidelity/Robinhood ≈ 0).
+        slippage_bps: round-trip slippage in basis points (5 bps = 0.05% per
+            trade is reasonable for liquid ETFs; less liquid funds 10–25 bps).
+        """
         self.initial_capital = initial_capital
+        self.commission_per_trade = float(commission_per_trade)
+        self.slippage_bps = float(slippage_bps)
         self.results = {}
-    
+
+    @staticmethod
+    def _trade_cost(notional: float, slippage_bps: float, commission: float) -> float:
+        """Cost of executing a trade with given notional value.
+
+        slippage_bps is applied to the absolute traded notional (one-side).
+        """
+        return abs(notional) * (slippage_bps / 10_000.0) + commission
+
     def backtest_strategy(
         self,
         tickers: List[str],
@@ -112,35 +133,40 @@ class Backtester:
         if allocation is None:
             allocation = {ticker: 1.0 / len(tickers) for ticker in tickers}
         
-        # Calculate initial positions
+        cash = float(self.initial_capital)
         positions = {}
         prices_start = {}
+        total_costs = 0.0
         for ticker in tickers:
             if ticker in data and len(data[ticker]) > 0:
                 prices_start[ticker] = data[ticker]['Close'].iloc[0]
                 if prices_start[ticker] > 0:
-                    shares = int((self.initial_capital * allocation.get(ticker, 0)) / prices_start[ticker])
+                    target_notional = self.initial_capital * allocation.get(ticker, 0)
+                    shares = int(target_notional / prices_start[ticker])
                     positions[ticker] = shares
-        
-        # Track portfolio value over time
+                    actual_notional = shares * prices_start[ticker]
+                    cost = self._trade_cost(actual_notional, self.slippage_bps,
+                                            self.commission_per_trade if shares > 0 else 0.0)
+                    cash -= actual_notional + cost
+                    total_costs += cost
+
         portfolio_values = []
         daily_returns = []
-        
+
         for date in dates:
-            portfolio_value = 0
+            mark = 0.0
             for ticker, shares in positions.items():
                 if ticker in data and date in data[ticker].index:
-                    price = data[ticker].loc[date, 'Close']
-                    portfolio_value += shares * price
-            
+                    mark += shares * data[ticker].loc[date, 'Close']
+            portfolio_value = cash + mark
             portfolio_values.append(portfolio_value)
-            if len(portfolio_values) > 1:
+            if len(portfolio_values) > 1 and portfolio_values[-2] > 0:
                 daily_return = (portfolio_value / portfolio_values[-2] - 1) * 100
                 daily_returns.append(daily_return)
-        
+
         final_value = portfolio_values[-1] if portfolio_values else self.initial_capital
         total_return = (final_value / self.initial_capital - 1) * 100
-        
+
         return {
             "strategy": "buy_and_hold",
             "initial_capital": self.initial_capital,
@@ -149,7 +175,9 @@ class Backtester:
             "portfolio_values": portfolio_values,
             "daily_returns": daily_returns,
             "positions": positions,
-            "dates": dates.tolist()
+            "dates": dates.tolist(),
+            "total_trading_costs": round(total_costs, 2),
+            "rebalances_executed": 1,
         }
     
     def _backtest_rebalance(
@@ -183,39 +211,61 @@ class Backtester:
             rebalance_dates = dates
         rebalance_dates = pd.DatetimeIndex(rebalance_dates)
         
-        portfolio_value = self.initial_capital
-        portfolio_values = [portfolio_value]
+        # Track cash + share positions explicitly. Every trade debits cash by
+        # |Δshares|·price for shares purchased (or credits for sales), AND by
+        # the trading cost (slippage + commission). The portfolio value is
+        # always cash + Σ positions·price.
+        cash = float(self.initial_capital)
+        positions = {ticker: 0 for ticker in tickers}
+        portfolio_values = []
         daily_returns = []
-        positions = {}
-        
+        total_costs = 0.0
+        rebalances_executed = 0
+
         for i, date in enumerate(dates):
-            # Rebalance if needed
-            if date in rebalance_dates or i == 0:
-                # Calculate new positions based on allocation
-                for ticker in tickers:
-                    if ticker in data and date in data[ticker].index:
-                        price = data[ticker].loc[date, 'Close']
-                        if price > 0:
-                            target_value = portfolio_value * allocation.get(ticker, 0)
-                            positions[ticker] = int(target_value / price)
-            
-            # Calculate current portfolio value
-            current_value = 0
-            for ticker, shares in positions.items():
-                if ticker in data and date in data[ticker].index:
-                    price = data[ticker].loc[date, 'Close']
-                    current_value += shares * price
-            
-            portfolio_value = current_value
+            current_prices = {
+                t: data[t].loc[date, 'Close']
+                for t in tickers if t in data and date in data[t].index
+            }
+
+            if (date in rebalance_dates or i == 0) and current_prices:
+                # Current portfolio value at pre-trade prices
+                mtm = cash + sum(positions[t] * current_prices.get(t, 0) for t in tickers)
+
+                new_positions = {}
+                for t in tickers:
+                    p = current_prices.get(t, 0)
+                    if p > 0:
+                        target_val = mtm * allocation.get(t, 0)
+                        new_positions[t] = int(target_val / p)
+                    else:
+                        new_positions[t] = positions.get(t, 0)
+
+                rebal_cost = 0.0
+                trades_executed = 0
+                net_cash_change = 0.0
+                for t in tickers:
+                    delta = new_positions[t] - positions.get(t, 0)
+                    if delta != 0 and current_prices.get(t, 0) > 0:
+                        notional = delta * current_prices[t]
+                        rebal_cost += self._trade_cost(notional, self.slippage_bps, self.commission_per_trade)
+                        net_cash_change -= notional      # buying debits cash; selling credits
+                        trades_executed += 1
+                cash = cash + net_cash_change - rebal_cost
+                positions = new_positions
+                total_costs += rebal_cost
+                if trades_executed > 0:
+                    rebalances_executed += 1
+
+            portfolio_value = cash + sum(positions[t] * current_prices.get(t, 0) for t in tickers)
             portfolio_values.append(portfolio_value)
-            
-            if len(portfolio_values) > 1:
+            if len(portfolio_values) > 1 and portfolio_values[-2] > 0:
                 daily_return = (portfolio_value / portfolio_values[-2] - 1) * 100
                 daily_returns.append(daily_return)
-        
+
         final_value = portfolio_values[-1] if portfolio_values else self.initial_capital
         total_return = (final_value / self.initial_capital - 1) * 100
-        
+
         return {
             "strategy": "rebalance",
             "rebalance_frequency": frequency,
@@ -224,7 +274,9 @@ class Backtester:
             "total_return": total_return,
             "portfolio_values": portfolio_values,
             "daily_returns": daily_returns,
-            "dates": dates.tolist()
+            "dates": dates.tolist(),
+            "total_trading_costs": round(total_costs, 2),
+            "rebalances_executed": rebalances_executed,
         }
     
     def _backtest_momentum(
@@ -235,62 +287,73 @@ class Backtester:
         """Backtest momentum strategy - buy winners, sell losers."""
         tickers = list(data.keys())
         
-        portfolio_value = self.initial_capital
-        portfolio_values = [portfolio_value]
+        cash = float(self.initial_capital)
+        positions = {t: 0 for t in tickers}
+        portfolio_values = []
         daily_returns = []
-        positions = {}
-        lookback_period = 20  # 20 days for momentum
-        
+        total_costs = 0.0
+        rebalances_executed = 0
+        lookback_period = 20
+
         for i, date in enumerate(dates):
             if i < lookback_period:
                 continue
-            
-            # Calculate momentum for each ticker
+
+            current_prices = {
+                t: data[t].loc[date, 'Close']
+                for t in tickers if t in data and date in data[t].index
+            }
+
             momentum_scores = {}
             for ticker in tickers:
                 if ticker in data and date in data[ticker].index:
                     try:
-                        past_date_idx = data[ticker].index.get_loc(date) - lookback_period
-                        if past_date_idx >= 0:
-                            past_price = data[ticker]['Close'].iloc[past_date_idx]
-                            current_price = data[ticker].loc[date, 'Close']
-                            momentum = (current_price / past_price - 1) * 100
-                            momentum_scores[ticker] = momentum
+                        past_idx = data[ticker].index.get_loc(date) - lookback_period
+                        if past_idx >= 0:
+                            past_price = data[ticker]['Close'].iloc[past_idx]
+                            cur_price = current_prices.get(ticker, 0)
+                            if past_price > 0 and cur_price > 0:
+                                momentum_scores[ticker] = (cur_price / past_price - 1) * 100
                     except (KeyError, IndexError):
                         continue
-            
-            # Buy top momentum tickers
+
             if momentum_scores:
+                mtm = cash + sum(positions[t] * current_prices.get(t, 0) for t in tickers)
                 sorted_tickers = sorted(momentum_scores.items(), key=lambda x: x[1], reverse=True)
-                top_tickers = [t[0] for t in sorted_tickers[:3]]  # Top 3
-                
-                # Equal allocation to top tickers
-                allocation_per_ticker = 1.0 / len(top_tickers)
-                positions = {}
+                top_tickers = [t[0] for t in sorted_tickers[:3]]
+                alloc_each = 1.0 / len(top_tickers)
+
+                new_positions = {t: 0 for t in tickers}
                 for ticker in top_tickers:
-                    if ticker in data and date in data[ticker].index:
-                        price = data[ticker].loc[date, 'Close']
-                        if price > 0:
-                            target_value = portfolio_value * allocation_per_ticker
-                            positions[ticker] = int(target_value / price)
-            
-            # Calculate current portfolio value
-            current_value = 0
-            for ticker, shares in positions.items():
-                if ticker in data and date in data[ticker].index:
-                    price = data[ticker].loc[date, 'Close']
-                    current_value += shares * price
-            
-            portfolio_value = current_value
+                    p = current_prices.get(ticker, 0)
+                    if p > 0:
+                        new_positions[ticker] = int((mtm * alloc_each) / p)
+
+                rebal_cost = 0.0
+                trades_executed = 0
+                net_cash_change = 0.0
+                for t in tickers:
+                    delta = new_positions[t] - positions.get(t, 0)
+                    if delta != 0 and current_prices.get(t, 0) > 0:
+                        notional = delta * current_prices[t]
+                        rebal_cost += self._trade_cost(notional, self.slippage_bps, self.commission_per_trade)
+                        net_cash_change -= notional
+                        trades_executed += 1
+                cash = cash + net_cash_change - rebal_cost
+                positions = new_positions
+                total_costs += rebal_cost
+                if trades_executed > 0:
+                    rebalances_executed += 1
+
+            portfolio_value = cash + sum(positions[t] * current_prices.get(t, 0) for t in tickers)
             portfolio_values.append(portfolio_value)
-            
-            if len(portfolio_values) > 1:
+            if len(portfolio_values) > 1 and portfolio_values[-2] > 0:
                 daily_return = (portfolio_value / portfolio_values[-2] - 1) * 100
                 daily_returns.append(daily_return)
-        
+
         final_value = portfolio_values[-1] if portfolio_values else self.initial_capital
         total_return = (final_value / self.initial_capital - 1) * 100
-        
+
         return {
             "strategy": "momentum",
             "initial_capital": self.initial_capital,
@@ -298,7 +361,9 @@ class Backtester:
             "total_return": total_return,
             "portfolio_values": portfolio_values,
             "daily_returns": daily_returns,
-            "dates": dates.tolist()
+            "dates": dates.tolist(),
+            "total_trading_costs": round(total_costs, 2),
+            "rebalances_executed": rebalances_executed,
         }
     
     def _calculate_metrics(self, results: Dict, start_date: str, end_date: str) -> Dict:
@@ -387,6 +452,13 @@ class Backtester:
         print(f"   Best Day: {results.get('best_day', 0):.2f}%")
         print(f"   Worst Day: {results.get('worst_day', 0):.2f}%")
         print(f"   Total Trading Days: {results.get('total_days', 0)}")
+
+        if 'total_trading_costs' in results:
+            print(f"\n💸 Costs:")
+            print(f"   Total Trading Costs: ${results['total_trading_costs']:,.2f}")
+            print(f"   Rebalances Executed: {results.get('rebalances_executed', 0)}")
+            cost_drag = results['total_trading_costs'] / max(results.get('initial_capital', 1), 1) * 100
+            print(f"   Cost Drag (vs initial capital): {cost_drag:.2f}%")
         
         print(f"\n{'='*60}\n")
 

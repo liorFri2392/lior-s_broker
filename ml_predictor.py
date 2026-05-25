@@ -34,34 +34,55 @@ class MLPredictor:
     
     def prepare_data(
         self, data: pd.DataFrame, lookback: int = 60, train_frac: float = 0.8
-    ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional["MinMaxScaler"]]:
-        """Prepare data for LSTM training.
+    ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[dict]]:
+        """Prepare LSTM training data targeting LOG-RETURNS, not raw prices.
 
-        Fits the MinMax scaler on the TRAINING split only, then transforms both
-        train and (later) test with that scaler. Fitting on the full series leaks
-        future min/max into the training pipeline and overstates held-out metrics.
+        Why log-returns:
+          1. Stationarity. Prices are I(1) random walks; their level has no
+             stable distribution. Log-returns are approximately stationary with
+             mean ≈ 0 and σ ≈ 1% daily — far easier for the network to model.
+          2. No scaler leakage. We standardize by σ estimated on the TRAINING
+             split only.
+          3. No saturation. The previous price-target model with MinMaxScaler
+             could not predict above its training-period max because outputs
+             were learned in [0, 1]; the model under-shot every bull move.
+          4. Scale-invariance. Multiplying prices by a constant leaves the
+             target distribution unchanged.
+
+        Reconstruction at inference time:  Ŝ_{t+h} = S_t · exp(Σ_{k≤h} r̂_{t+k}·σ_train).
         """
-        if data.empty or len(data) < lookback + 1:
+        if data.empty or len(data) < lookback + 2:
             return None, None, None
 
-        prices = data['Close'].values.reshape(-1, 1).astype(float)
+        closes = data['Close'].to_numpy(dtype=float)
+        if (closes <= 0).any():
+            return None, None, None
 
-        # Split prices chronologically before fitting the scaler to avoid leakage
-        split_idx = max(lookback + 1, int(len(prices) * train_frac))
-        if split_idx >= len(prices):
-            split_idx = len(prices) - 1
-        train_prices = prices[:split_idx]
+        # Log-returns; index 0 is the first available return r_1 = log S_1/S_0.
+        log_rets = np.diff(np.log(closes))
+        n = len(log_rets)
 
-        scaler = MinMaxScaler(feature_range=(0, 1))
-        scaler.fit(train_prices)
-        scaled_prices = scaler.transform(prices)
+        # Chronological split BEFORE estimating σ → no peeking at future.
+        split_idx = max(lookback + 1, int(n * train_frac))
+        if split_idx >= n:
+            split_idx = n - 1
+        sigma_train = float(np.std(log_rets[:split_idx], ddof=1))
+        if sigma_train <= 0 or not np.isfinite(sigma_train):
+            return None, None, None
+
+        scaled = log_rets / sigma_train
 
         X, y = [], []
-        for i in range(lookback, len(scaled_prices)):
-            X.append(scaled_prices[i - lookback:i, 0])
-            y.append(scaled_prices[i, 0])
+        for i in range(lookback, n):
+            X.append(scaled[i - lookback:i])
+            y.append(scaled[i])
 
-        return np.array(X), np.array(y), scaler
+        meta = {
+            "sigma_train": sigma_train,
+            "last_close": float(closes[-1]),
+            "split_idx": int(split_idx),
+        }
+        return np.array(X), np.array(y), meta
     
     def build_lstm_model(self, input_shape: Tuple) -> "Sequential":
         """Build LSTM model architecture."""
@@ -99,125 +120,135 @@ class MLPredictor:
         """
         if not self.use_lstm:
             return self._fallback_prediction(ticker, periods)
-        
+
         try:
-            # Get historical data
             stock = yf.Ticker(ticker)
-            data = stock.history(period=training_period)
-            
-            if data.empty or len(data) < lookback + periods:
+            data = stock.history(period=training_period, auto_adjust=True)
+
+            if data.empty or len(data) < lookback + periods + 2:
                 logger.warning(f"Insufficient data for {ticker}, using fallback")
                 return self._fallback_prediction(ticker, periods)
-            
-            # Prepare data
-            X, y, scaler = self.prepare_data(data, lookback)
+
+            X, y, meta = self.prepare_data(data, lookback)
             if X is None:
                 return self._fallback_prediction(ticker, periods)
-            
-            # Reshape for LSTM
+
             X = X.reshape((X.shape[0], X.shape[1], 1))
-            
-            # Split train/test
+
             train_size = int(len(X) * 0.8)
             X_train, X_test = X[:train_size], X[train_size:]
             y_train, y_test = y[:train_size], y[train_size:]
-            
-            # Build and train model
+
             model = self.build_lstm_model((X.shape[1], 1))
-            
-            # Train (with early stopping to avoid overfitting)
+
             try:
                 from tensorflow.keras.callbacks import EarlyStopping
                 early_stop = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
-                
-                history = model.fit(
+                model.fit(
                     X_train, y_train,
-                    epochs=50,
-                    batch_size=32,
-                    validation_data=(X_test, y_test),
-                    callbacks=[early_stop],
-                    verbose=0
+                    epochs=50, batch_size=32,
+                    validation_data=(X_test, y_test) if len(X_test) > 0 else None,
+                    callbacks=[early_stop] if len(X_test) > 0 else None,
+                    verbose=0,
                 )
             except Exception as e:
                 logger.debug(f"Training error: {e}, using simpler training")
                 model.fit(X_train, y_train, epochs=20, batch_size=32, verbose=0)
-            
-            # Predict future
-            last_sequence = data['Close'].tail(lookback).values
-            last_sequence_scaled = scaler.transform(last_sequence.reshape(-1, 1))
-            
-            predictions = []
-            current_sequence = last_sequence_scaled[-lookback:].reshape(1, lookback, 1)
-            
+
+            # Build the seed window from the LAST `lookback` log-returns in the
+            # training-period series (scaled by σ_train, the same units the
+            # model was trained on).
+            log_rets = np.diff(np.log(data['Close'].to_numpy(dtype=float)))
+            sigma_train = meta["sigma_train"]
+            seed_scaled = (log_rets[-lookback:] / sigma_train).reshape(1, lookback, 1)
+
+            # Autoregressive rollout. Errors compound — the model's
+            # uncertainty grows roughly like √h. We don't pretend otherwise.
+            preds_scaled = []
+            current = seed_scaled.copy()
             for _ in range(periods):
-                next_pred = model.predict(current_sequence, verbose=0)[0, 0]
-                predictions.append(next_pred)
-                
-                # Update sequence
-                current_sequence = np.append(current_sequence[:, 1:, :], [[[next_pred]]], axis=1)
-            
-            # Inverse transform
-            predictions = scaler.inverse_transform(np.array(predictions).reshape(-1, 1)).flatten()
-            
-            # Calculate expected return
-            current_price = data['Close'].iloc[-1]
-            predicted_price = predictions[-1]
-            expected_return = (predicted_price / current_price - 1) * 100
-            
-            # Confidence based on HELD-OUT validation accuracy.
-            # Training MAE is trivially small after fitting — using it as a
-            # confidence proxy reports overfitting as certainty.
+                next_scaled = float(model.predict(current, verbose=0)[0, 0])
+                preds_scaled.append(next_scaled)
+                current = np.append(current[:, 1:, :], [[[next_scaled]]], axis=1)
+
+            # Reconstruct prices: S_{t+h} = S_t · exp( Σ r̂_{t+k} · σ_train )
+            preds_log_rets = np.array(preds_scaled) * sigma_train
+            cum_log = np.cumsum(preds_log_rets)
+            current_price = float(data['Close'].iloc[-1])
+            predicted_prices = current_price * np.exp(cum_log)
+            predicted_price = float(predicted_prices[-1])
+            expected_return = (predicted_price / current_price - 1.0) * 100.0
+
+            # Held-out MAE in σ-units. Convert to *daily-return RMSE* for an
+            # interpretable confidence score.
             if len(X_test) > 0:
                 val_pred = model.predict(X_test, verbose=0).flatten()
-                val_mae = float(np.mean(np.abs(val_pred - y_test)))
+                val_mae_sigma = float(np.mean(np.abs(val_pred - y_test)))
+                # MAE/σ ≈ 0.8 is "random walk baseline" (E|Z| = 0.798); below
+                # that the model adds some skill, above it the model is worse
+                # than a constant-σ random walk.
+                skill = max(0.0, 0.8 - val_mae_sigma) / 0.8
+                confidence = float(min(100.0, max(0.0, skill * 100.0)))
             else:
-                val_mae = 1.0
-            # MAE is in [0,1] scaled-price units; map to a 0–100 score by
-            # inversion. This is not a probabilistic confidence but at least
-            # reflects out-of-sample fit and degrades errors honestly.
-            confidence = max(0.0, min(100.0, (1.0 - val_mae) * 100.0))
-            
+                confidence = 0.0
+
             return {
                 "ticker": ticker,
                 "current_price": current_price,
                 "predicted_price": predicted_price,
                 "expected_return": expected_return,
-                "predictions": predictions.tolist(),
+                "predictions": predicted_prices.tolist(),
                 "confidence": confidence,
-                "method": "LSTM",
-                "periods": periods
+                "method": "LSTM_log_returns",
+                "periods": periods,
+                "horizon_uncertainty_pct": float(sigma_train * np.sqrt(periods) * 100),
             }
-            
+
         except Exception as e:
             logger.warning(f"LSTM prediction failed for {ticker}: {e}")
             return self._fallback_prediction(ticker, periods)
     
     def _fallback_prediction(self, ticker: str, periods: int) -> Dict:
-        """Fallback to statistical prediction if LSTM unavailable."""
+        """Fallback to a GBM-style statistical projection.
+
+        Reports the LogNormal MEDIAN as the point forecast (S_0 · exp(m·t),
+        m = mean log-return), which is the right central tendency under GBM.
+        The previous version used (1 + arithmetic_mean)^N which conflated
+        compounding regimes and gave a Jensen-biased projection.
+        """
         try:
             stock = yf.Ticker(ticker)
-            data = stock.history(period="1y")
-            
-            if data.empty:
+            data = stock.history(period="1y", auto_adjust=True)
+
+            if data.empty or len(data) < 30:
                 return {"ticker": ticker, "error": "No data available"}
-            
-            # Simple trend-based prediction
-            returns = data['Close'].pct_change().dropna()
-            avg_return = returns.mean()
-            current_price = data['Close'].iloc[-1]
-            
-            # Project forward
-            predicted_price = current_price * (1 + avg_return) ** periods
-            expected_return = (predicted_price / current_price - 1) * 100
-            
+
+            closes = data['Close'].to_numpy(dtype=float)
+            if (closes <= 0).any():
+                return {"ticker": ticker, "error": "Invalid price series"}
+            log_rets = np.diff(np.log(closes))
+            m_daily = float(np.mean(log_rets))
+            sigma_daily = float(np.std(log_rets, ddof=1))
+            current_price = float(closes[-1])
+
+            # GBM median (mode of the log-return path)
+            predicted_price = current_price * float(np.exp(m_daily * periods))
+            # 1-σ band on log price at horizon
+            sd_log = sigma_daily * np.sqrt(periods)
+            band_low = float(current_price * np.exp(m_daily * periods - sd_log))
+            band_high = float(current_price * np.exp(m_daily * periods + sd_log))
+            expected_return = (predicted_price / current_price - 1.0) * 100.0
+
             return {
                 "ticker": ticker,
                 "current_price": current_price,
                 "predicted_price": predicted_price,
                 "expected_return": expected_return,
-                "confidence": 60,  # Lower confidence for fallback
-                "method": "Statistical (fallback)",
-                "periods": periods
+                "one_sigma_band": (band_low, band_high),
+                "horizon_uncertainty_pct": float(sd_log * 100),
+                "confidence": 60.0,
+                "method": "GBM_median (fallback)",
+                "periods": periods,
             }
         except Exception as e:
             logger.error(f"Fallback prediction failed: {e}")

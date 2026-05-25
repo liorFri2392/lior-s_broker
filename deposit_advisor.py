@@ -139,7 +139,7 @@ class DepositAdvisor:
         for etf in etfs[:3]:  # Analyze top 3 ETFs in category
             try:
                 stock = yf.Ticker(etf)
-                data = stock.history(period="6mo")
+                data = stock.history(period="6mo", auto_adjust=True)
                 if not data.empty and len(data) > 20:
                     # Calculate 6-month return
                     return_6m = (data['Close'].iloc[-1] / data['Close'].iloc[0] - 1) * 100
@@ -324,53 +324,91 @@ class DepositAdvisor:
                     logger.warning(f"{ticker}: Failed to get price data - possibly delisted: {e}")
                     return analysis  # Return early if can't get price
             
-            # Get historical data for analysis
+            # Get historical data for analysis. auto_adjust=True so 'Close'
+            # is the dividend- and split-adjusted total-return series — without
+            # this, dividend-heavy ETFs (BND, VYM, SCHD, AGG) understate Sharpe
+            # by 1–3% per year of distributions.
             try:
-                data = stock.history(period="1y")
+                data = stock.history(period="1y", auto_adjust=True)
                 if data.empty:
-                    # Try shorter period if 1y fails
-                    data = stock.history(period="6mo")
+                    data = stock.history(period="6mo", auto_adjust=True)
                     if data.empty:
                         logger.warning(f"{ticker}: No historical data available - possibly delisted")
                         return analysis
             except Exception as e:
                 logger.warning(f"{ticker}: Failed to get historical data - possibly delisted: {e}")
                 return analysis
-            
-            # Calculate metrics
+
+            # Compute metrics
             returns = data['Close'].pct_change().dropna()
-            
+            T = len(returns)
+            if T < 30:
+                logger.warning(f"{ticker}: Insufficient return observations ({T} days)")
+                return analysis
+
             # === NORMALIZED SCORING SYSTEM ===
-            # Each factor produces a sub-score in [0, 1] range
-            # Weighted combination based on financial theory
-            # Weights: Risk-adjusted return (30%), Momentum (20%), Volatility (15%),
-            #          Liquidity (10%), Expense (10%), Trend (15%)
             sub_scores = {}
-            
+
             # 1. Risk-adjusted return (Sharpe-based) — weight: 0.30
-            annual_return = (data['Close'].iloc[-1] / data['Close'].iloc[0] - 1) * 100
-            volatility = returns.std() * np.sqrt(252) * 100
-            
+            #
+            # The previous code used a *single observation* of the year's
+            # cumulative return for the numerator and an annualized σ for the
+            # denominator. That ratio has SE ≈ 1 (one annual sample of a
+            # noisy quantity); ranking ETFs by it is essentially noise.
+            #
+            # Proper estimator: Sharpe = (E[R_d]·252 − r_f) / (σ_d·√252),
+            # with T~250 daily observations the SE drops to roughly
+            # SE_Sharpe ≈ √((1 + ½·Sharpe²) / T) ≈ 0.06–0.07.
             try:
                 risk_free_rate = self.advanced_analyzer.get_risk_free_rate()
             except Exception:
                 risk_free_rate = 0.045
-            
-            if volatility > 0:
-                sharpe = (annual_return / 100 - risk_free_rate) / (volatility / 100)
+
+            daily_rf = risk_free_rate / 252.0
+            mean_daily = float(returns.mean())
+            std_daily = float(returns.std(ddof=1))
+            annual_return = float(mean_daily * 252 * 100)        # arithmetic, kept for display
+            geometric_annual_return = float(((1.0 + returns).prod() ** (252.0 / T) - 1.0) * 100)
+            volatility = float(std_daily * np.sqrt(252) * 100)
+
+            if std_daily > 0:
+                excess_daily = mean_daily - daily_rf
+                sharpe_raw = (excess_daily * 252) / (std_daily * np.sqrt(252))
             else:
-                sharpe = 0
-            
-            # Normalize Sharpe: map [-1, 3] -> [0, 1] with sigmoid-like clamping
+                sharpe_raw = 0.0
+
+            # SE of Sharpe (Lo, 2002 asymptotic approximation) and a lower
+            # one-sided 95% confidence bound. We score on the lower bound
+            # rather than the point estimate — this is the right way to
+            # avoid being seduced by ETFs whose Sharpe is high but imprecise.
+            se_sharpe = float(np.sqrt(max(1e-12, (1.0 + 0.5 * sharpe_raw ** 2) / T)))
+            sharpe_lower_95 = sharpe_raw - 1.645 * se_sharpe
+
+            # We carry both for transparency. The score uses the lower bound.
+            sharpe = sharpe_lower_95
+            analysis["sharpe_raw"] = round(float(sharpe_raw), 3)
+            analysis["sharpe_se"] = round(se_sharpe, 3)
+            analysis["sharpe_lower_95"] = round(float(sharpe_lower_95), 3)
+            analysis["geometric_annual_return"] = round(geometric_annual_return, 2)
+
             sharpe_norm = max(0.0, min(1.0, (sharpe + 1) / 4.0))
             sub_scores['risk_adjusted_return'] = sharpe_norm
-            
-            if sharpe > 1.5:
-                analysis["reasons"].append(f"Excellent risk-adjusted return (Sharpe: {sharpe:.2f}, Return: {annual_return:.1f}%)")
-            elif sharpe > 0.5:
-                analysis["reasons"].append(f"Good risk-adjusted return (Sharpe: {sharpe:.2f}, Return: {annual_return:.1f}%)")
-            elif sharpe < -0.5:
-                analysis["reasons"].append(f"Poor risk-adjusted return (Sharpe: {sharpe:.2f}, Return: {annual_return:.1f}%)")
+
+            if sharpe_raw > 1.5:
+                analysis["reasons"].append(
+                    f"Excellent risk-adjusted return (Sharpe: {sharpe_raw:.2f}±{se_sharpe:.2f}, "
+                    f"Return: {geometric_annual_return:.1f}%)"
+                )
+            elif sharpe_raw > 0.5:
+                analysis["reasons"].append(
+                    f"Good risk-adjusted return (Sharpe: {sharpe_raw:.2f}±{se_sharpe:.2f}, "
+                    f"Return: {geometric_annual_return:.1f}%)"
+                )
+            elif sharpe_raw < -0.5:
+                analysis["reasons"].append(
+                    f"Poor risk-adjusted return (Sharpe: {sharpe_raw:.2f}±{se_sharpe:.2f}, "
+                    f"Return: {geometric_annual_return:.1f}%)"
+                )
             
             # 2. Momentum (multi-timeframe) — weight: 0.20
             recent_return = (data['Close'].iloc[-1] / data['Close'].iloc[-20] - 1) * 100 if len(data) >= 20 else 0
@@ -432,11 +470,14 @@ class DepositAdvisor:
                 analysis["reasons"].append("Low liquidity")
             
             # 6. Trend (MA alignment) — weight: 0.15
-            sma_20 = data['Close'].tail(20).mean()
-            sma_50 = data['Close'].tail(min(50, len(data))).mean()
-            current_price = data['Close'].iloc[-1]
-            
-            # Normalized trend: how far above/below MA structure
+            # Use rolling means (last point of each rolling series) for SMA20/50
+            # so the metrics are point-in-time MAs, not overlapping-window means.
+            sma_20_series = data['Close'].rolling(20).mean()
+            sma_50_series = data['Close'].rolling(min(50, len(data))).mean()
+            sma_20 = float(sma_20_series.iloc[-1]) if not pd.isna(sma_20_series.iloc[-1]) else float(data['Close'].tail(20).mean())
+            sma_50 = float(sma_50_series.iloc[-1]) if not pd.isna(sma_50_series.iloc[-1]) else float(data['Close'].tail(min(50, len(data))).mean())
+            current_price = float(data['Close'].iloc[-1])
+
             if sma_50 > 0:
                 trend_strength = ((current_price / sma_50) - 1) * 100
                 trend_norm = max(0.0, min(1.0, (trend_strength + 10) / 20.0))
@@ -788,6 +829,32 @@ class DepositAdvisor:
                         analysis["reasons"].append("Already in portfolio - consider increasing")
                     bond_analyses.append(analysis)
         
+        # Selection-bias / multiple-testing adjustment.
+        #
+        # When ranking K candidates by Sharpe, the top's *observed* Sharpe is
+        # biased upward by approximately SE_Sharpe · √(2·ln K) (a standard
+        # extreme-order-statistic result for Gaussian noise). With 1y of daily
+        # data, SE_Sharpe ≈ 0.07; for K=50 candidates the upward bias is
+        # ≈ 0.07 · √(2·ln 50) ≈ 0.20 Sharpe units. We surface a Bonferroni-
+        # equivalent deflated Sharpe for transparency and warn the user.
+        K_total = len(core_analyses) + len(satellite_analyses) + len(bond_analyses)
+        selection_z = float(np.sqrt(2.0 * np.log(max(K_total, 2))))
+        for analysis_list in (core_analyses, satellite_analyses, bond_analyses):
+            for a in analysis_list:
+                if "sharpe_raw" in a and "sharpe_se" in a:
+                    a["sharpe_selection_adjusted"] = round(
+                        a["sharpe_raw"] - selection_z * a["sharpe_se"], 3
+                    )
+
+        print(
+            "ℹ️  Multiple-testing note: ranking {k} ETFs by Sharpe inflates the\n"
+            "    top's observed Sharpe by ≈ {bias:.2f} units in expectation.\n"
+            "    Each ETF reports 'sharpe_selection_adjusted' (Bonferroni-deflated).\n"
+            "    Treat the top-N picks as 'plausibly good', not 'proven best'.\n".format(
+                k=K_total, bias=selection_z * 0.07
+            )
+        )
+
         # Optimize for mid-term yield
         print("🔬 Optimizing for mid-term yield (3-5 years) using statistical models...")
         all_analyses = core_analyses + satellite_analyses + bond_analyses

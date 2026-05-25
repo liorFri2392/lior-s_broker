@@ -8,11 +8,111 @@ import os
 import numpy as np
 import pandas as pd
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import yfinance as yf
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def fit_garch_1_1(returns: np.ndarray) -> Tuple[Dict[str, float], np.ndarray]:
+    """Maximum-likelihood fit of GARCH(1,1) to a 1-D returns series.
+
+    GARCH(1,1):
+        r_t      = μ + ε_t,         ε_t = σ_t · z_t,   z_t ~ N(0, 1)
+        σ²_t     = ω + α·ε²_{t-1} + β·σ²_{t-1}
+    with stationarity α + β < 1 and positivity ω > 0, α ≥ 0, β ≥ 0.
+
+    Returns
+    -------
+    params : dict with mu, omega, alpha, beta, unconditional_variance,
+             sigma2_now (current filtered conditional variance, σ²_T),
+             sigma2_next (one-step-ahead forecast, σ²_{T+1}),
+             persistence (α+β), converged (bool).
+    sigma2 : array of length len(returns) — filtered conditional variances.
+    """
+    from scipy.optimize import minimize
+
+    r = np.asarray(returns, dtype=float)
+    n = r.shape[0]
+    if n < 50:
+        raise ValueError("GARCH fit requires at least 50 observations")
+
+    sample_var = float(np.var(r, ddof=1))
+    sample_mean = float(np.mean(r))
+
+    def _filter(theta: np.ndarray):
+        mu, omega, alpha, beta = theta
+        if omega <= 0 or alpha < 0 or beta < 0 or (alpha + beta) >= 0.9999:
+            return None
+        eps = r - mu
+        sigma2 = np.empty(n, dtype=float)
+        # Initialize with unconditional variance under the parameter values
+        unconditional = omega / (1.0 - alpha - beta)
+        sigma2[0] = max(unconditional, 1e-12)
+        for t in range(1, n):
+            sigma2[t] = omega + alpha * eps[t - 1] ** 2 + beta * sigma2[t - 1]
+            if not np.isfinite(sigma2[t]) or sigma2[t] <= 0:
+                return None
+        return eps, sigma2
+
+    def _neg_log_lik(theta):
+        out = _filter(theta)
+        if out is None:
+            return 1e10
+        eps, sigma2 = out
+        # Gaussian log-lik: −½ Σ ( log(2π σ²) + ε²/σ² )
+        return float(0.5 * np.sum(np.log(2.0 * np.pi * sigma2) + (eps ** 2) / sigma2))
+
+    # Sensible starting values: typical equity GARCH(1,1) lands near
+    # (ω, α, β) = (γ·σ²·(1−α−β), 0.05, 0.92) with low γ. Try a few seeds and
+    # take the best.
+    seeds = [
+        (sample_mean, 0.1 * sample_var, 0.05, 0.90),
+        (sample_mean, 0.05 * sample_var, 0.10, 0.85),
+        (sample_mean, 0.2 * sample_var, 0.15, 0.70),
+    ]
+    best = None
+    for x0 in seeds:
+        try:
+            res = minimize(
+                _neg_log_lik, x0,
+                method='L-BFGS-B',
+                bounds=[(None, None), (1e-12, None), (0.0, 0.999), (0.0, 0.999)],
+                options={'maxiter': 200},
+            )
+            if res.success or res.fun < 1e9:
+                if best is None or res.fun < best.fun:
+                    best = res
+        except Exception:
+            continue
+    if best is None:
+        raise RuntimeError("GARCH(1,1) optimizer failed to converge from any starting point")
+
+    mu, omega, alpha, beta = best.x
+    eps, sigma2 = _filter(best.x)
+    sigma2_now = float(sigma2[-1])
+    # One-step-ahead forecast
+    sigma2_next = float(omega + alpha * eps[-1] ** 2 + beta * sigma2_now)
+    unconditional = float(omega / (1.0 - alpha - beta)) if (alpha + beta) < 1 else float('inf')
+
+    return (
+        {
+            "mu": float(mu),
+            "omega": float(omega),
+            "alpha": float(alpha),
+            "beta": float(beta),
+            "persistence": float(alpha + beta),
+            "unconditional_variance": unconditional,
+            "sigma2_now": sigma2_now,
+            "sigma2_next": sigma2_next,
+            "converged": bool(best.success),
+            "log_likelihood": float(-best.fun),
+            "n_obs": int(n),
+        },
+        sigma2,
+    )
+
 
 class RiskManager:
     """Manage portfolio risk with stop-loss, take-profit, and alerts."""
@@ -228,6 +328,20 @@ class RiskManager:
         except Exception:
             t_df, t_loc, t_scale = float('inf'), mu, sigma
 
+        # GARCH(1,1) conditional volatility. Equity returns exhibit volatility
+        # clustering — calm periods have low σ_t and storms have high σ_t. A
+        # constant-σ VaR overstates risk during calm regimes and understates
+        # it during turbulent ones. The one-step-ahead conditional sigma
+        # adapts to the current regime.
+        garch_info = None
+        garch_sigma_next = None
+        try:
+            garch_params, _ = fit_garch_1_1(portfolio_returns.values)
+            garch_info = garch_params
+            garch_sigma_next = float(np.sqrt(garch_params["sigma2_next"]))
+        except Exception as e:
+            logger.debug(f"GARCH fit skipped: {e}")
+
         for cl in confidence_levels:
             alpha = 1 - cl
             cl_key = f"{int(cl * 100)}%"
@@ -240,6 +354,15 @@ class RiskManager:
             z_score = _stats.norm.ppf(alpha)
             parametric_var = float(mu + z_score * sigma)
             parametric_var_dollar = float(parametric_var * total_value)
+
+            # 2c. GARCH(1,1) one-step-ahead conditional Gaussian VaR.
+            # σ_{t+1|t} reflects current regime; can be very different from σ̂.
+            if garch_sigma_next is not None and garch_info is not None:
+                garch_var = float(garch_info["mu"] + z_score * garch_sigma_next)
+                garch_var_dollar = float(garch_var * total_value)
+            else:
+                garch_var = parametric_var
+                garch_var_dollar = parametric_var_dollar
 
             # 2b. Parametric Student-t VaR (heavy-tailed; closer to reality)
             try:
@@ -281,13 +404,16 @@ class RiskManager:
                 "student_t_var_daily": round(t_var * 100, 3),
                 "student_t_var_dollar": round(abs(t_var_dollar), 2),
                 "student_t_df": round(float(t_df), 2) if np.isfinite(t_df) else None,
+                "garch_var_daily": round(garch_var * 100, 3),
+                "garch_var_dollar": round(abs(garch_var_dollar), 2),
                 "cvar_daily": round(cvar * 100, 3),
                 "cvar_dollar": round(abs(cvar_dollar), 2),
                 "student_t_cvar_daily": round(es_t * 100, 3),
                 "student_t_cvar_dollar": round(abs(es_t_dollar), 2),
                 "interpretation": f"At {cl_key} confidence, historical daily loss is bounded by "
                                   f"${abs(historical_var_dollar):,.2f}; Student-t (df≈{t_df:.1f}) VaR "
-                                  f"is ${abs(t_var_dollar):,.2f}. Conditional shortfall ≈ "
+                                  f"is ${abs(t_var_dollar):,.2f}; GARCH conditional VaR is "
+                                  f"${abs(garch_var_dollar):,.2f}. Conditional shortfall ≈ "
                                   f"${abs(cvar_dollar):,.2f} (hist) / ${abs(es_t_dollar):,.2f} (t)."
             }
         
@@ -310,7 +436,20 @@ class RiskManager:
         
         results["portfolio_value"] = total_value
         results["data_points"] = len(portfolio_returns)
-        
+        if garch_info is not None:
+            results["garch_1_1"] = {
+                "alpha": round(garch_info["alpha"], 4),
+                "beta": round(garch_info["beta"], 4),
+                "persistence": round(garch_info["persistence"], 4),
+                "sigma_now_daily_pct": round(float(np.sqrt(garch_info["sigma2_now"]) * 100), 3),
+                "sigma_next_daily_pct": round(float(garch_sigma_next * 100), 3) if garch_sigma_next else None,
+                "unconditional_sigma_daily_pct": round(float(np.sqrt(garch_info["unconditional_variance"]) * 100), 3)
+                    if np.isfinite(garch_info["unconditional_variance"]) else None,
+                "n_obs": garch_info["n_obs"],
+                "interpretation": "If σ_next > σ_uncond, the portfolio is in an elevated-vol regime; "
+                                  "constant-σ VaR understates current risk. Vice versa for calm regimes."
+            }
+
         return results
 
     def calculate_portfolio_risk_metrics(self, portfolio: Dict = None) -> Dict:
