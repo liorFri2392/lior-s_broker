@@ -467,89 +467,112 @@ class PortfolioAnalyzer:
         
         indicators = {}
         closes = data['Close']
-        
-        # Moving averages
-        indicators['sma_20'] = closes.tail(20).mean()
-        indicators['sma_50'] = closes.tail(min(50, len(closes))).mean()
-        indicators['sma_200'] = closes.tail(min(200, len(closes))).mean()
-        
-        # RSI
+
+        # Rolling moving averages (use the LAST rolling value, not nested .tail().mean()
+        # which produced different windows than .rolling and was harder to reason about).
+        sma_20_series = closes.rolling(window=20).mean()
+        sma_50_series = closes.rolling(window=min(50, len(closes))).mean()
+        sma_200_series = closes.rolling(window=min(200, len(closes))).mean()
+        indicators['sma_20'] = float(sma_20_series.iloc[-1]) if not pd.isna(sma_20_series.iloc[-1]) else float(closes.tail(20).mean())
+        indicators['sma_50'] = float(sma_50_series.iloc[-1]) if not pd.isna(sma_50_series.iloc[-1]) else float(closes.tail(min(50, len(closes))).mean())
+        indicators['sma_200'] = float(sma_200_series.iloc[-1]) if not pd.isna(sma_200_series.iloc[-1]) else float(closes.tail(min(200, len(closes))).mean())
+
+        # Wilder's RSI (the original definition used by Bloomberg/TradingView/MT4).
+        # Wilder smoothing is an EWMA with alpha = 1/14. Equivalent in pandas:
+        # ewm(alpha=1/period, adjust=False). The simple-rolling-mean variant
+        # (a.k.a. "Cutler's RSI") diverges by 5–15% from Wilder over the cycle.
+        period = 14
         delta = closes.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        indicators['rsi'] = 100 - (100 / (1 + rs.iloc[-1])) if not pd.isna(rs.iloc[-1]) else 50
-        
-        # Volatility
-        returns = closes.pct_change()
-        indicators['volatility'] = returns.std() * np.sqrt(252) * 100  # Annualized
-        
-        # Momentum
-        indicators['momentum'] = (closes.iloc[-1] / closes.iloc[-20] - 1) * 100 if len(closes) >= 20 else 0
-        
-        # Sharpe ratio (with dynamic risk-free rate)
+        gain = delta.clip(lower=0)
+        loss = (-delta).clip(lower=0)
+        avg_gain = gain.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
+        avg_loss = loss.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
+        if pd.isna(avg_loss.iloc[-1]) or pd.isna(avg_gain.iloc[-1]):
+            indicators['rsi'] = 50.0
+        elif avg_loss.iloc[-1] == 0:
+            indicators['rsi'] = 100.0
+        else:
+            rs_last = float(avg_gain.iloc[-1] / avg_loss.iloc[-1])
+            indicators['rsi'] = float(100.0 - (100.0 / (1.0 + rs_last)))
+
+        # Volatility (annualized). Drop the leading NaN from pct_change explicitly.
+        returns = closes.pct_change().dropna()
+        if len(returns) == 0:
+            return {}
+        indicators['volatility'] = float(returns.std() * np.sqrt(252) * 100)
+
+        # Momentum (20-day price return)
+        indicators['momentum'] = float((closes.iloc[-1] / closes.iloc[-20] - 1) * 100) if len(closes) >= 20 else 0.0
+
+        # Sharpe ratio (annualized; dynamic risk-free rate)
         try:
             risk_free_rate = self.advanced_analyzer.get_risk_free_rate()
         except Exception:
-            risk_free_rate = 0.045  # Fallback
-        daily_rf = risk_free_rate / 252
-        
-        if returns.std() > 0:
-            excess_returns = returns - daily_rf
-            indicators['sharpe'] = (excess_returns.mean() * 252) / (returns.std() * np.sqrt(252))
+            risk_free_rate = 0.045
+        daily_rf = risk_free_rate / 252.0
+
+        excess_returns = returns - daily_rf
+        excess_std = float(excess_returns.std())
+        if excess_std > 0:
+            indicators['sharpe'] = float((excess_returns.mean() * 252) / (excess_std * np.sqrt(252)))
         else:
-            indicators['sharpe'] = 0
-        indicators['risk_free_rate'] = risk_free_rate * 100
-        
-        # Sortino ratio (penalizes only downside deviation)
-        downside_returns = returns[returns < daily_rf]
-        if len(downside_returns) > 0 and downside_returns.std() > 0:
-            indicators['sortino'] = ((returns.mean() - daily_rf) * 252) / (downside_returns.std() * np.sqrt(252))
+            indicators['sharpe'] = 0.0
+        indicators['risk_free_rate'] = float(risk_free_rate * 100)
+
+        # Sortino: target semi-deviation (MAR = daily_rf), normalized by N total observations.
+        # TSD = sqrt( mean( min(R - MAR, 0)^2 ) )  — the canonical formula.
+        downside_dev = np.minimum(returns - daily_rf, 0.0)
+        target_semi_dev = float(np.sqrt(np.mean(downside_dev ** 2)) * np.sqrt(252))
+        if target_semi_dev > 0:
+            indicators['sortino'] = float(((returns.mean() - daily_rf) * 252) / target_semi_dev)
         else:
             indicators['sortino'] = indicators['sharpe']
-        
-        # Beta (market correlation) - proper date alignment via merge
+
+        # Beta vs SPY. Use consistent ddof and return NaN on failure so downstream
+        # consumers can gate explicitly instead of seeing a silent default of 1.0.
         try:
             spy = yf.Ticker("SPY")
             data_period = "1y" if len(data) < 252 else "2y" if len(data) < 504 else "5y"
-            spy_data = spy.history(period=data_period)
+            spy_data = spy.history(period=data_period, auto_adjust=True)
             if spy_data is not None and not spy_data.empty and 'Close' in spy_data.columns:
-                # Create DataFrames with date index, then inner-join to align dates
-                asset_ret_df = returns.dropna().to_frame(name='asset')
+                asset_ret_df = returns.to_frame(name='asset')
                 spy_ret_df = spy_data['Close'].pct_change().dropna().to_frame(name='spy')
-                
-                # Align by date index (inner join ensures matching dates only)
-                aligned = asset_ret_df.join(spy_ret_df, how='inner')
-                aligned = aligned.dropna()
-                
+                aligned = asset_ret_df.join(spy_ret_df, how='inner').dropna()
+
                 if len(aligned) > 10:
-                    covariance = np.cov(aligned['asset'], aligned['spy'])[0][1]
-                    spy_variance = np.var(aligned['spy'])
-                    if spy_variance > 0:
-                        indicators['beta'] = float(covariance / spy_variance)
-                    else:
-                        indicators['beta'] = 1.0
+                    # Both with ddof=1 (consistent unbiased estimators)
+                    covariance = float(aligned[['asset', 'spy']].cov().iloc[0, 1])
+                    spy_variance = float(aligned['spy'].var(ddof=1))
+                    indicators['beta'] = float(covariance / spy_variance) if spy_variance > 0 else float('nan')
                 else:
-                    indicators['beta'] = 1.0
+                    indicators['beta'] = float('nan')
             else:
-                indicators['beta'] = 1.0
+                indicators['beta'] = float('nan')
         except Exception as e:
             logger.debug(f"Failed to calculate beta: {e}")
-            indicators['beta'] = 1.0  # Default beta
-        
-        # Maximum Drawdown
-        cumulative = (1 + returns).cumprod()
-        running_max = cumulative.expanding().max()
+            indicators['beta'] = float('nan')
+
+        # Maximum Drawdown. Must avoid NaN propagation from the leading pct_change NaN
+        # (which would otherwise turn the cumprod into all-NaN).
+        cumulative = (1.0 + returns).cumprod()
+        running_max = cumulative.cummax()
         drawdown = (cumulative - running_max) / running_max
-        indicators['max_drawdown'] = drawdown.min() * 100
-        
-        # Trend analysis
+        if len(drawdown) > 0 and not drawdown.isna().all():
+            indicators['max_drawdown'] = float(drawdown.min() * 100)
+        else:
+            indicators['max_drawdown'] = 0.0
+
+        # Trend analysis: compare current SMA20 vs current SMA50 directly (point
+        # comparison of two rolling means at the same date — the conventional
+        # MA-crossover convention). The previous code compared .tail(20).mean()
+        # to .tail(50).mean(), which are heavily overlapping samples and biased
+        # toward calling NEUTRAL.
         if len(closes) >= 50:
-            short_ma = closes.tail(20).mean()
-            long_ma = closes.tail(50).mean()
-            if short_ma > long_ma:
+            sma20_now = float(sma_20_series.iloc[-1])
+            sma50_now = float(sma_50_series.iloc[-1])
+            if sma20_now > sma50_now:
                 indicators['trend'] = 'BULLISH'
-            elif short_ma < long_ma:
+            elif sma20_now < sma50_now:
                 indicators['trend'] = 'BEARISH'
             else:
                 indicators['trend'] = 'NEUTRAL'
@@ -2564,7 +2587,11 @@ class PortfolioAnalyzer:
                 print(f"  Volatility: {ti.get('volatility', 0):.2f}%")
                 print(f"  Trend: {ti.get('trend', 'NEUTRAL')}")
                 if 'beta' in ti:
-                    print(f"  Beta: {ti.get('beta', 1.0):.2f}")
+                    beta_val = ti.get('beta')
+                    if beta_val is None or (isinstance(beta_val, float) and np.isnan(beta_val)):
+                        print("  Beta: N/A")
+                    else:
+                        print(f"  Beta: {beta_val:.2f}")
                 if 'max_drawdown' in ti:
                     print(f"  Max Drawdown: {ti.get('max_drawdown', 0):.2f}%")
         

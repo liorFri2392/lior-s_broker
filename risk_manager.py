@@ -216,23 +216,41 @@ class RiskManager:
         
         results = {}
         
+        from scipy import stats as _stats
+        mu = float(portfolio_returns.mean())
+        sigma = float(portfolio_returns.std(ddof=1))
+
+        # Fit a Student-t to the empirical returns once (heavy-tailed model).
+        # Daily equity returns have excess kurtosis 3–15; Gaussian VaR
+        # systematically understates tail loss at 99% by 20–50%.
+        try:
+            t_df, t_loc, t_scale = _stats.t.fit(portfolio_returns.values)
+        except Exception:
+            t_df, t_loc, t_scale = float('inf'), mu, sigma
+
         for cl in confidence_levels:
             alpha = 1 - cl
             cl_key = f"{int(cl * 100)}%"
-            
-            # 1. Historical VaR
+
+            # 1. Historical VaR — quantile of empirical return distribution
             historical_var = float(np.percentile(portfolio_returns, alpha * 100))
             historical_var_dollar = float(historical_var * total_value)
-            
-            # 2. Parametric VaR (Normal distribution assumption)
-            from scipy import stats
-            mu = float(portfolio_returns.mean())
-            sigma = float(portfolio_returns.std())
-            z_score = stats.norm.ppf(alpha)
+
+            # 2a. Parametric Gaussian VaR (for comparison; usually optimistic)
+            z_score = _stats.norm.ppf(alpha)
             parametric_var = float(mu + z_score * sigma)
             parametric_var_dollar = float(parametric_var * total_value)
-            
-            # 3. CVaR (Expected Shortfall) — average of losses beyond VaR
+
+            # 2b. Parametric Student-t VaR (heavy-tailed; closer to reality)
+            try:
+                t_var = float(_stats.t.ppf(alpha, df=t_df, loc=t_loc, scale=t_scale))
+            except Exception:
+                t_var = parametric_var
+            t_var_dollar = float(t_var * total_value)
+
+            # 3. Historical CVaR (Expected Shortfall) — average of left-tail losses.
+            # Note: with cl=0.95 and ~250 days this averages ~12 observations;
+            # the estimate has large SE. Treat as indicative, not precise.
             tail_returns = portfolio_returns[portfolio_returns <= historical_var]
             if len(tail_returns) > 0:
                 cvar = float(tail_returns.mean())
@@ -240,19 +258,44 @@ class RiskManager:
             else:
                 cvar = historical_var
                 cvar_dollar = historical_var_dollar
-            
+
+            # 3b. Closed-form Student-t CVaR. For X ~ t_ν(loc, scale),
+            # ES_α(X) = loc - scale · ( (ν + τ²)/(ν − 1) ) · f_ν(τ) / α,
+            # where τ = t_inv(α; ν) (standard) and f_ν is the standard-t pdf.
+            try:
+                if t_df > 1 and np.isfinite(t_df):
+                    tau = _stats.t.ppf(alpha, df=t_df)
+                    pdf_tau = _stats.t.pdf(tau, df=t_df)
+                    es_t = float(t_loc - t_scale * ((t_df + tau ** 2) / (t_df - 1)) * pdf_tau / alpha)
+                else:
+                    es_t = t_var
+            except Exception:
+                es_t = t_var
+            es_t_dollar = float(es_t * total_value)
+
             results[cl_key] = {
                 "historical_var_daily": round(historical_var * 100, 3),
                 "historical_var_dollar": round(abs(historical_var_dollar), 2),
                 "parametric_var_daily": round(parametric_var * 100, 3),
                 "parametric_var_dollar": round(abs(parametric_var_dollar), 2),
+                "student_t_var_daily": round(t_var * 100, 3),
+                "student_t_var_dollar": round(abs(t_var_dollar), 2),
+                "student_t_df": round(float(t_df), 2) if np.isfinite(t_df) else None,
                 "cvar_daily": round(cvar * 100, 3),
                 "cvar_dollar": round(abs(cvar_dollar), 2),
-                "interpretation": f"At {cl_key} confidence, daily loss should not exceed ${abs(historical_var_dollar):,.2f}. "
-                                  f"If it does, expected loss is ${abs(cvar_dollar):,.2f}."
+                "student_t_cvar_daily": round(es_t * 100, 3),
+                "student_t_cvar_dollar": round(abs(es_t_dollar), 2),
+                "interpretation": f"At {cl_key} confidence, historical daily loss is bounded by "
+                                  f"${abs(historical_var_dollar):,.2f}; Student-t (df≈{t_df:.1f}) VaR "
+                                  f"is ${abs(t_var_dollar):,.2f}. Conditional shortfall ≈ "
+                                  f"${abs(cvar_dollar):,.2f} (hist) / ${abs(es_t_dollar):,.2f} (t)."
             }
         
-        # Annualized VaR (approximate using sqrt of time)
+        # Annualized VaR via the square-root-of-time rule.
+        # NOTE: this rule is only exact for i.i.d. Gaussian returns. Real
+        # equity series exhibit volatility clustering (GARCH effects) and
+        # heavy tails; the actual annual tail loss is typically 10–30%
+        # larger than √252-scaled daily VaR. We surface this as a label.
         best_cl = confidence_levels[0]
         cl_key = f"{int(best_cl * 100)}%"
         if cl_key in results:
@@ -261,7 +304,8 @@ class RiskManager:
             results["annualized_var"] = {
                 "confidence": cl_key,
                 "annual_var_pct": round(annual_var * 100, 2),
-                "annual_var_dollar": round(abs(annual_var * total_value), 2)
+                "annual_var_dollar": round(abs(annual_var * total_value), 2),
+                "scaling": "sqrt-of-time (i.i.d. assumption — likely understates fat-tailed annual risk)"
             }
         
         results["portfolio_value"] = total_value
@@ -286,27 +330,32 @@ class RiskManager:
         if total_value == 0:
             return {}
         
-        # Calculate concentration (Herfindahl index)
+        # Concentration (Herfindahl–Hirschman Index). HHI ∈ [1/n, 1].
+        # The reciprocal 1/HHI is the canonical "effective number of holdings"
+        # — interpretable as the number of equally-weighted positions that
+        # would produce the same concentration. A 5-asset equal-weight
+        # portfolio has HHI=0.20, effective_n=5.0. The previous metric
+        # `1 − HHI` is bounded above by `1 − 1/n` and is misleading for
+        # small portfolios.
         weights = [h.get("current_value", 0) / total_value for h in holdings if total_value > 0]
         concentration = sum(w**2 for w in weights)
-        
-        # Calculate actual portfolio volatility and max drawdown from historical data
+        effective_n = (1.0 / concentration) if concentration > 0 else 0.0
+
+        # Actual portfolio-level volatility, max drawdown, Sharpe from historical data
         portfolio_returns = self._get_portfolio_returns(portfolio)
-        
+
         portfolio_volatility = None
         portfolio_max_drawdown = None
         portfolio_sharpe = None
-        
+
         if portfolio_returns is not None and len(portfolio_returns) > 20:
-            portfolio_volatility = float(portfolio_returns.std() * np.sqrt(252) * 100)
-            
-            # Temporal max drawdown
+            portfolio_volatility = float(portfolio_returns.std(ddof=1) * np.sqrt(252) * 100)
+
             cumulative = (1 + portfolio_returns).cumprod()
-            running_max = cumulative.expanding().max()
+            running_max = cumulative.cummax()
             drawdown = (cumulative - running_max) / running_max
             portfolio_max_drawdown = float(drawdown.min() * 100)
-            
-            # Portfolio Sharpe
+
             try:
                 from advanced_analysis import AdvancedAnalyzer
                 rf = AdvancedAnalyzer().get_risk_free_rate()
@@ -314,13 +363,16 @@ class RiskManager:
                 rf = 0.045
             daily_rf = rf / 252
             excess = portfolio_returns - daily_rf
-            if portfolio_returns.std() > 0:
-                portfolio_sharpe = float((excess.mean() * 252) / (portfolio_returns.std() * np.sqrt(252)))
-        
+            # Use std of EXCESS returns in the Sharpe denominator (strict definition).
+            excess_std = float(excess.std(ddof=1))
+            if excess_std > 0:
+                portfolio_sharpe = float((excess.mean() * 252) / (excess_std * np.sqrt(252)))
+
         result = {
             "total_positions": len(holdings),
-            "concentration_index": concentration,
-            "diversification_score": 1 - concentration,
+            "concentration_index": concentration,            # HHI
+            "effective_number_holdings": round(effective_n, 2),  # 1 / HHI — canonical
+            "diversification_score": 1 - concentration,      # legacy (Gini-Simpson), kept for back-compat
             "max_position_weight": max(weights) * 100 if weights else 0,
             "cash_percent": (portfolio.get("cash", 0) / total_value * 100) if total_value > 0 else 0
         }
@@ -405,8 +457,9 @@ class RiskManager:
         if metrics:
             print("📈 Portfolio Risk Metrics:")
             print(f"   Total Positions: {metrics.get('total_positions', 0)}")
-            print(f"   Concentration Index: {metrics.get('concentration_index', 0):.3f}")
-            print(f"   Diversification Score: {metrics.get('diversification_score', 0):.2f}")
+            print(f"   Concentration Index (HHI): {metrics.get('concentration_index', 0):.3f}")
+            print(f"   Effective # Holdings (1/HHI): {metrics.get('effective_number_holdings', 0):.2f}")
+            print(f"   Diversification Score (1-HHI): {metrics.get('diversification_score', 0):.2f}")
             print(f"   Largest Position: {metrics.get('max_position_weight', 0):.1f}%")
             print(f"   Cash: {metrics.get('cash_percent', 0):.1f}%")
             

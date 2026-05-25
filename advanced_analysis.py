@@ -8,6 +8,7 @@ import pandas as pd
 import numpy as np
 from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import PolynomialFeatures
+from sklearn.covariance import LedoitWolf
 from typing import Dict, List, Optional, Tuple
 import yfinance as yf
 import logging
@@ -94,89 +95,87 @@ class AdvancedAnalyzer:
 
     def calculate_statistical_forecast(self, data: pd.DataFrame, periods: int = 60) -> Dict:
         """
-        Calculate statistical forecast using Geometric Brownian Motion (GBM).
-        
-        Uses log returns (stationary) instead of raw price levels (non-stationary).
-        GBM: S(t) = S(0) * exp((mu - sigma^2/2)*t + sigma*W(t))
-        where mu = drift (annualized mean log return), sigma = annualized volatility.
-        Monte Carlo simulation provides confidence intervals.
+        Statistical forecast under Geometric Brownian Motion (GBM).
+
+        Model: log S_t = log S_0 + (μ − σ²/2)·t + σ·W_t,  W_t ~ N(0, t).
+        Hence log-returns are i.i.d. Normal with mean (μ − σ²/2) per unit time
+        and std σ. The MLE of the log-drift m := μ − σ²/2 is the sample mean
+        of the log-returns; σ̂ is their sample std.
+
+            E[S_t]      = S_0 · exp(μ · t)           = S_0 · exp((m + ½σ²)·t)
+            Median[S_t] = S_0 · exp(m · t)
+
+        Quantiles are closed-form (LogNormal), so we use them analytically
+        instead of running Monte Carlo over a quantity we know exactly.
         """
         if data.empty or len(data) < 30:
             return {}
-        
+
         try:
-            closes = data['Close'].values
-            if len(closes) < 30:
+            closes = data['Close'].to_numpy(dtype=float)
+            if len(closes) < 30 or closes[-1] <= 0 or np.any(closes <= 0):
                 return {}
-            
-            current_price = closes[-1]
-            if current_price <= 0:
-                return {}
-            
-            # Use LOG RETURNS (stationary, proper for financial time series)
+
+            current_price = float(closes[-1])
+
+            # Log-returns are stationary; sample mean estimates the GBM log-drift m.
             log_returns = np.diff(np.log(closes))
-            
-            # Annualized parameters
-            mu_daily = np.mean(log_returns)
-            sigma_daily = np.std(log_returns, ddof=1)
-            mu_annual = mu_daily * 252
-            sigma_annual = sigma_daily * np.sqrt(252)
-            
-            # Time horizon in years
+
+            m_daily = float(np.mean(log_returns))                 # m = μ − σ²/2 (daily)
+            sigma_daily = float(np.std(log_returns, ddof=1))
+            m_annual = m_daily * 252.0
+            sigma_annual = sigma_daily * np.sqrt(252.0)
+            mu_annual = m_annual + 0.5 * sigma_annual ** 2        # Itô correction → arithmetic drift
+
+            # Horizon in years
             t = periods / 252.0
-            
-            # GBM expected price: E[S(t)] = S(0) * exp(mu * t)
-            # GBM median price: S(0) * exp((mu - sigma^2/2) * t)
-            drift = mu_annual - 0.5 * sigma_annual ** 2
-            expected_price = current_price * np.exp(mu_annual * t)
-            median_price = current_price * np.exp(drift * t)
-            
-            # Monte Carlo simulation for confidence intervals (1000 paths)
-            n_simulations = 1000
-            np.random.seed(42)  # Reproducible
-            random_shocks = np.random.normal(0, 1, n_simulations)
-            simulated_log_returns = drift * t + sigma_annual * np.sqrt(t) * random_shocks
-            simulated_prices = current_price * np.exp(simulated_log_returns)
-            
-            # Confidence intervals from simulation
-            ci_5 = float(np.percentile(simulated_prices, 5))
-            ci_25 = float(np.percentile(simulated_prices, 25))
-            ci_75 = float(np.percentile(simulated_prices, 75))
-            ci_95 = float(np.percentile(simulated_prices, 95))
-            
-            # Expected returns (using median for "expected_return_polynomial" for backward compat)
-            expected_return_median = (median_price / current_price - 1) * 100
-            expected_return_mean = (expected_price / current_price - 1) * 100
-            
-            # Linear regression on log prices for trend-based forecast (backward compat)
+            log_var = (sigma_annual ** 2) * t                     # Var[log S_t/S_0]
+            log_sd = np.sqrt(log_var)
+
+            # Closed-form LogNormal moments
+            expected_price = current_price * np.exp(mu_annual * t)        # E[S_t]
+            median_price = current_price * np.exp(m_annual * t)           # Median
+
+            # Closed-form quantiles via the inverse CDF of the LogNormal
+            # log S_t ~ N(log S_0 + m·t, σ²·t)
+            from scipy.stats import norm
+            def lognormal_quantile(p: float) -> float:
+                return float(current_price * np.exp(m_annual * t + norm.ppf(p) * log_sd))
+
+            ci_5 = lognormal_quantile(0.05)
+            ci_25 = lognormal_quantile(0.25)
+            ci_75 = lognormal_quantile(0.75)
+            ci_95 = lognormal_quantile(0.95)
+
+            # Linear regression on log-prices (descriptive trend only — note that this
+            # is a trend-stationary model, structurally inconsistent with GBM; kept for
+            # backward compatibility of the JSON shape).
             log_closes = np.log(closes)
             X = np.arange(len(closes)).reshape(-1, 1)
             lr = LinearRegression()
             lr.fit(X, log_closes)
-            log_forecast = lr.predict(np.array([[len(closes) + periods]]))[0]
-            linear_forecast = np.exp(log_forecast)
-            expected_return_linear = (linear_forecast / current_price - 1) * 100
-            
-            # Cap at realistic range
-            max_realistic_return = 200
-            min_realistic_return = -80
-            expected_return_linear = max(min_realistic_return, min(max_realistic_return, expected_return_linear))
-            expected_return_median = max(min_realistic_return, min(max_realistic_return, expected_return_median))
-            
+            log_forecast = float(lr.predict(np.array([[len(closes) + periods]]))[0])
+            linear_forecast = float(np.exp(log_forecast))
+            expected_return_linear = (linear_forecast / current_price - 1.0) * 100.0
+
+            expected_return_median = (median_price / current_price - 1.0) * 100.0
+            expected_return_mean = (expected_price / current_price - 1.0) * 100.0
+
             return {
-                "current_price": float(current_price),
-                "forecast_linear": float(linear_forecast),
-                "forecast_polynomial": float(median_price),  # Backward compat: use GBM median
+                "current_price": current_price,
+                "forecast_linear": linear_forecast,
+                "forecast_polynomial": float(median_price),     # backward-compat key
                 "expected_return_linear": float(expected_return_linear),
-                "expected_return_polynomial": float(expected_return_median),  # Backward compat
+                "expected_return_polynomial": float(expected_return_median),  # backward-compat
                 "expected_return_mean": float(expected_return_mean),
                 "confidence_interval": float(ci_95 - ci_5),
-                "confidence_interval_95": (float(ci_5), float(ci_95)),
-                "confidence_interval_50": (float(ci_25), float(ci_75)),
+                "confidence_interval_95": (ci_5, ci_95),
+                "confidence_interval_50": (ci_25, ci_75),
                 "forecast_periods": periods,
+                "annualized_log_drift": float(m_annual * 100),
                 "annualized_drift": float(mu_annual * 100),
                 "annualized_volatility": float(sigma_annual * 100),
-                "method": "GBM_MonteCarlo"
+                "method": "GBM_closed_form_LogNormal"
             }
         except Exception as e:
             logger.warning(f"Failed to calculate statistical forecast: {e}")
@@ -204,24 +203,35 @@ class AdvancedAnalyzer:
                 "recommendation": "NEUTRAL"
             }
             
-            # Get historical data
-            data = bond.history(period="2y")
+            # Use adjusted close so dividends/coupon distributions are reflected
+            data = bond.history(period="2y", auto_adjust=True)
             if data.empty:
                 return analysis
-            
-            # Calculate yield metrics
+
+            # Total-return series (price changes already reinvest distributions
+            # because auto_adjust=True). For bond ETFs this is the most honest
+            # proxy for realized yield: geometric, not arithmetic.
             returns = data['Close'].pct_change().dropna()
-            annual_yield = returns.mean() * 252 * 100
-            
-            # Current yield (if available)
-            current_yield = info.get("yield", 0) * 100 if info.get("yield") else annual_yield
-            
-            # Yield stability
-            yield_volatility = returns.std() * np.sqrt(252) * 100
-            
-            # Dynamic risk-free rate
+            if len(returns) < 30:
+                return analysis
+
+            # Geometric annualization avoids Jensen's-gap bias of mean*252
+            total_return = float((1.0 + returns).prod() - 1.0)
+            years = len(returns) / 252.0
+            annual_total_return = (1.0 + total_return) ** (1.0 / years) - 1.0 if years > 0 else 0.0
+
+            # Current distribution yield (if reported by yfinance) — this is the
+            # true coupon/dividend yield, distinct from price total-return above.
+            distribution_yield = info.get("yield")
+            current_yield = (distribution_yield * 100) if distribution_yield else annual_total_return * 100
+            annual_yield = annual_total_return * 100      # report total return as "annual yield"
+
+            # Volatility of daily returns, annualized
+            yield_volatility = float(returns.std() * np.sqrt(252) * 100)
+
+            # Sharpe-style risk-adjusted total return
             risk_free_rate = self.get_risk_free_rate()
-            excess_return = (annual_yield / 100) - risk_free_rate
+            excess_return = annual_total_return - risk_free_rate
             risk_adjusted_yield = (excess_return / (yield_volatility / 100)) if yield_volatility > 0 else 0
             
             analysis["yield_analysis"] = {
@@ -334,104 +344,151 @@ class AdvancedAnalyzer:
         
         return optimized
     
+    @staticmethod
+    def _project_to_simplex(v: np.ndarray) -> np.ndarray:
+        """Euclidean projection of v onto the probability simplex {w ≥ 0, Σw = 1}.
+
+        Implements the O(n log n) algorithm of Wang & Carreira-Perpiñán (2013).
+        We project the unconstrained analytical solution onto the long-only
+        simplex; this is the standard treatment for no-short-selling MPT and
+        avoids degenerate solutions when Σ⁻¹(μ − rf·1) has negative entries.
+        """
+        n = v.shape[0]
+        u = np.sort(v)[::-1]
+        cssv = np.cumsum(u) - 1.0
+        rho_candidates = np.where(u - cssv / (np.arange(n) + 1) > 0)[0]
+        if rho_candidates.size == 0:
+            # Fallback to equal weights if no valid pivot (degenerate input).
+            return np.ones(n) / n
+        rho = rho_candidates[-1]
+        theta = cssv[rho] / (rho + 1)
+        return np.maximum(v - theta, 0.0)
+
     def calculate_portfolio_optimization(self, holdings: List[Dict], target_return: float = 0.10) -> Dict:
         """
-        Calculate optimal portfolio allocation using Modern Portfolio Theory.
-        
-        Performs actual mean-variance optimization:
-        1. Monte Carlo simulation to map the efficient frontier
-        2. Maximum Sharpe Ratio portfolio (tangency portfolio)
-        3. Minimum Variance portfolio
-        4. Optimal weights for each asset
+        Mean-variance optimization (Markowitz) — closed-form analytical solution.
+
+        Tangency (max-Sharpe) portfolio with risk-free asset:
+            w* ∝ Σ⁻¹ (μ − r_f · 1),  normalized to Σ w = 1.
+
+        Minimum-variance portfolio (no return constraint):
+            w* ∝ Σ⁻¹ · 1,  normalized to Σ w = 1.
+
+        Σ is estimated with Ledoit–Wolf shrinkage toward a scaled-identity
+        target. Raw sample covariance is poorly conditioned with T ~ 500 days
+        and 5–20 assets (Markowitz "garbage in, garbage out"); shrinkage gives
+        a well-conditioned Σ̂ with proven MSE-optimality.
+
+        Both analytical solutions can produce negative weights when Σ⁻¹ μ has
+        sign-mixed entries; we project to the long-only simplex (no shorting)
+        which matches the prior MC behavior and the realistic constraint set.
         """
         if not holdings or len(holdings) < 2:
             return {}
-        
+
         # Get historical returns for all holdings
         returns_data = {}
         for holding in holdings:
             ticker = holding.get("ticker")
             try:
                 stock = yf.Ticker(ticker)
-                data = stock.history(period="2y")
+                data = stock.history(period="2y", auto_adjust=True)
                 if not data.empty:
                     returns = data['Close'].pct_change().dropna()
                     returns_data[ticker] = returns
             except Exception as e:
                 logger.debug(f"Failed to get returns data for {ticker}: {e}")
                 continue
-        
+
         if len(returns_data) < 2:
             return {}
-        
-        # Create returns matrix aligned by date (proper join)
-        returns_df = pd.DataFrame(returns_data)
-        returns_df = returns_df.dropna()
-        
+
+        # Align by date (inner join) — required for a meaningful Σ̂
+        returns_df = pd.DataFrame(returns_data).dropna()
         if len(returns_df) < 30:
             return {}
-        
+
         n_assets = len(returns_df.columns)
         tickers = list(returns_df.columns)
-        
-        # Annualized parameters
+
+        # Annualized expected return (arithmetic, for portfolio-variance math)
         mean_returns = returns_df.mean() * 252
-        cov_matrix = returns_df.cov() * 252
-        
+        mu_vec = mean_returns.values
+
+        # Ledoit–Wolf shrinkage covariance (annualized)
+        try:
+            lw = LedoitWolf().fit(returns_df.values)
+            cov_daily = lw.covariance_
+        except Exception as e:
+            logger.debug(f"LedoitWolf failed, falling back to sample covariance: {e}")
+            cov_daily = returns_df.cov().values
+        cov_matrix_arr = cov_daily * 252.0
+        cov_matrix = pd.DataFrame(cov_matrix_arr, index=tickers, columns=tickers)
+
+        # Regularize before inversion (tiny diagonal load handles edge cases)
+        eps = 1e-10 * np.trace(cov_matrix_arr) / max(n_assets, 1)
+        sigma_reg = cov_matrix_arr + eps * np.eye(n_assets)
+        try:
+            sigma_inv = np.linalg.inv(sigma_reg)
+        except np.linalg.LinAlgError:
+            sigma_inv = np.linalg.pinv(sigma_reg)
+
         # Dynamic risk-free rate
         risk_free_rate = self.get_risk_free_rate()
-        
+
         # Individual asset metrics
         portfolio_metrics = {}
         for ticker in tickers:
             mean_ret = mean_returns[ticker]
-            std_ret = np.sqrt(cov_matrix.loc[ticker, ticker])
-            sharpe = (mean_ret - risk_free_rate) / std_ret if std_ret > 0 else 0
-            
-            # Sortino ratio (downside deviation only)
+            std_ret = float(np.sqrt(cov_matrix.loc[ticker, ticker]))
+            sharpe = (mean_ret - risk_free_rate) / std_ret if std_ret > 0 else 0.0
+
+            # Canonical Sortino: target semi-deviation
+            # TSD = √( (1/N) · Σ min(R − MAR, 0)² )  (denominator N, not N_negatives)
             daily_returns = returns_df[ticker]
-            downside_returns = daily_returns[daily_returns < 0]
-            downside_std = downside_returns.std() * np.sqrt(252) if len(downside_returns) > 0 else std_ret
-            sortino = (mean_ret - risk_free_rate) / downside_std if downside_std > 0 else 0
-            
+            mar_daily = risk_free_rate / 252.0
+            downside = np.minimum(daily_returns - mar_daily, 0.0)
+            target_semi_dev = float(np.sqrt(np.mean(downside ** 2)) * np.sqrt(252))
+            sortino = (mean_ret - risk_free_rate) / target_semi_dev if target_semi_dev > 0 else 0.0
+
             portfolio_metrics[ticker] = {
                 "expected_return": float(mean_ret * 100),
                 "volatility": float(std_ret * 100),
                 "sharpe_ratio": float(sharpe),
                 "sortino_ratio": float(sortino)
             }
-        
-        # Monte Carlo optimization: find max Sharpe and min variance portfolios
-        n_simulations = 5000
-        results = np.zeros((n_simulations, 3 + n_assets))  # return, vol, sharpe, weights...
-        
-        for i in range(n_simulations):
-            # Random weights (sum to 1, no shorting)
-            weights = np.random.dirichlet(np.ones(n_assets))
-            
-            # Portfolio return and volatility
-            port_return = np.dot(weights, mean_returns.values)
-            port_vol = np.sqrt(np.dot(weights.T, np.dot(cov_matrix.values, weights)))
-            port_sharpe = (port_return - risk_free_rate) / port_vol if port_vol > 0 else 0
-            
-            results[i, 0] = port_return
-            results[i, 1] = port_vol
-            results[i, 2] = port_sharpe
-            results[i, 3:] = weights
-        
-        # Maximum Sharpe Ratio portfolio
-        max_sharpe_idx = np.argmax(results[:, 2])
-        max_sharpe_weights = results[max_sharpe_idx, 3:]
-        max_sharpe_return = results[max_sharpe_idx, 0]
-        max_sharpe_vol = results[max_sharpe_idx, 1]
-        max_sharpe_ratio = results[max_sharpe_idx, 2]
-        
-        # Minimum Variance portfolio
-        min_vol_idx = np.argmin(results[:, 1])
-        min_vol_weights = results[min_vol_idx, 3:]
-        min_vol_return = results[min_vol_idx, 0]
-        min_vol_vol = results[min_vol_idx, 1]
-        
+
+        ones = np.ones(n_assets)
+
+        # ---- Tangency (max-Sharpe) portfolio ---------------------------------
+        excess = mu_vec - risk_free_rate * ones
+        w_tan_raw = sigma_inv @ excess
+        sum_w = w_tan_raw.sum()
+        if sum_w != 0 and np.isfinite(sum_w):
+            w_tan = w_tan_raw / sum_w
+        else:
+            w_tan = ones / n_assets
+        # Project onto long-only simplex (no shorting, matches prior behaviour)
+        max_sharpe_weights = self._project_to_simplex(w_tan)
+
+        # ---- Minimum-variance portfolio --------------------------------------
+        w_mv_raw = sigma_inv @ ones
+        sum_mv = w_mv_raw.sum()
+        if sum_mv != 0 and np.isfinite(sum_mv):
+            w_mv = w_mv_raw / sum_mv
+        else:
+            w_mv = ones / n_assets
+        min_vol_weights = self._project_to_simplex(w_mv)
+
+        def _port_stats(w: np.ndarray):
+            r = float(w @ mu_vec)
+            v = float(np.sqrt(w @ cov_matrix_arr @ w))
+            s = (r - risk_free_rate) / v if v > 0 else 0.0
+            return r, v, s
+
+        max_sharpe_return, max_sharpe_vol, max_sharpe_ratio = _port_stats(max_sharpe_weights)
+        min_vol_return, min_vol_vol, _ = _port_stats(min_vol_weights)
+
         # Current weights (from holdings)
         total_value = sum(h.get("current_value", h.get("quantity", 0) * h.get("current_price", 0)) for h in holdings)
         current_weights = {}

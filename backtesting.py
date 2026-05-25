@@ -51,12 +51,15 @@ class Backtester:
         print(f"Initial Capital: ${self.initial_capital:,.2f}")
         print(f"Tickers: {', '.join(tickers)}\n")
         
-        # Get historical data
+        # Get historical data with auto_adjust=True so 'Close' is the dividend-
+        # and split-adjusted total-return series. Without this, dividend-paying
+        # ETFs (SPY ~1.5%/yr, BND ~3%/yr) understate total return by 5–10% per
+        # year of backtest.
         data = {}
         for ticker in tickers:
             try:
                 stock = yf.Ticker(ticker)
-                hist = stock.history(start=start_date, end=end_date)
+                hist = stock.history(start=start_date, end=end_date, auto_adjust=True)
                 if not hist.empty:
                     data[ticker] = hist
                     print(f"✅ Loaded {len(hist)} days of data for {ticker}")
@@ -162,17 +165,23 @@ class Backtester:
         if allocation is None:
             allocation = {ticker: 1.0 / len(tickers) for ticker in tickers}
         
-        # Determine rebalance dates
+        # Determine rebalance dates. The previous version filtered by `day == 1`,
+        # which misses ~35% of months because the calendar 1st is usually a
+        # weekend/holiday and equity markets are closed. We instead take the
+        # FIRST trading day of each period — which is what a real rebalancing
+        # schedule does.
+        dates_series = pd.Series(dates, index=dates)
         if frequency == "daily":
             rebalance_dates = dates
         elif frequency == "weekly":
-            rebalance_dates = dates[dates.weekday == 0]  # Mondays
+            rebalance_dates = dates_series.groupby(dates.to_period('W')).head(1).index
         elif frequency == "monthly":
-            rebalance_dates = dates[dates.day == 1]  # First of month
+            rebalance_dates = dates_series.groupby(dates.to_period('M')).head(1).index
         elif frequency == "quarterly":
-            rebalance_dates = dates[(dates.month % 3 == 1) & (dates.day == 1)]
+            rebalance_dates = dates_series.groupby(dates.to_period('Q')).head(1).index
         else:
             rebalance_dates = dates
+        rebalance_dates = pd.DatetimeIndex(rebalance_dates)
         
         portfolio_value = self.initial_capital
         portfolio_values = [portfolio_value]
@@ -310,9 +319,14 @@ class Backtester:
         
         # Volatility (annualized)
         volatility = np.std(returns) * np.sqrt(252)
-        
-        # Sharpe ratio (assuming 3% risk-free rate)
-        risk_free_rate = 3.0
+
+        # Sharpe ratio with dynamic risk-free rate from 3-month T-bill yield
+        # (^IRX), consistent with the rest of the codebase.
+        try:
+            from advanced_analysis import AdvancedAnalyzer
+            risk_free_rate = AdvancedAnalyzer().get_risk_free_rate() * 100.0
+        except Exception:
+            risk_free_rate = 4.5  # Fallback consistent with advanced_analysis default
         sharpe_ratio = (annualized_return - risk_free_rate) / volatility if volatility > 0 else 0
         
         # Max drawdown

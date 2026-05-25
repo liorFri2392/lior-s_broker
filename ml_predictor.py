@@ -32,26 +32,38 @@ class MLPredictor:
         self.model = None
         self.use_lstm = TENSORFLOW_AVAILABLE
     
-    def prepare_data(self, data: pd.DataFrame, lookback: int = 60) -> Tuple[np.ndarray, np.ndarray]:
-        """Prepare data for LSTM training."""
+    def prepare_data(
+        self, data: pd.DataFrame, lookback: int = 60, train_frac: float = 0.8
+    ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional["MinMaxScaler"]]:
+        """Prepare data for LSTM training.
+
+        Fits the MinMax scaler on the TRAINING split only, then transforms both
+        train and (later) test with that scaler. Fitting on the full series leaks
+        future min/max into the training pipeline and overstates held-out metrics.
+        """
         if data.empty or len(data) < lookback + 1:
-            return None, None
-        
-        # Use closing prices
-        prices = data['Close'].values.reshape(-1, 1)
-        
-        # Normalize
+            return None, None, None
+
+        prices = data['Close'].values.reshape(-1, 1).astype(float)
+
+        # Split prices chronologically before fitting the scaler to avoid leakage
+        split_idx = max(lookback + 1, int(len(prices) * train_frac))
+        if split_idx >= len(prices):
+            split_idx = len(prices) - 1
+        train_prices = prices[:split_idx]
+
         scaler = MinMaxScaler(feature_range=(0, 1))
-        scaled_prices = scaler.fit_transform(prices)
-        
+        scaler.fit(train_prices)
+        scaled_prices = scaler.transform(prices)
+
         X, y = [], []
         for i in range(lookback, len(scaled_prices)):
-            X.append(scaled_prices[i-lookback:i, 0])
+            X.append(scaled_prices[i - lookback:i, 0])
             y.append(scaled_prices[i, 0])
-        
+
         return np.array(X), np.array(y), scaler
     
-    def build_lstm_model(self, input_shape: Tuple) -> Sequential:
+    def build_lstm_model(self, input_shape: Tuple) -> "Sequential":
         """Build LSTM model architecture."""
         model = Sequential([
             LSTM(50, return_sequences=True, input_shape=input_shape),
@@ -152,10 +164,18 @@ class MLPredictor:
             predicted_price = predictions[-1]
             expected_return = (predicted_price / current_price - 1) * 100
             
-            # Calculate confidence (based on training accuracy)
-            train_pred = model.predict(X_train, verbose=0)
-            train_mae = np.mean(np.abs(train_pred.flatten() - y_train))
-            confidence = max(0, min(100, 100 - (train_mae * 100)))
+            # Confidence based on HELD-OUT validation accuracy.
+            # Training MAE is trivially small after fitting — using it as a
+            # confidence proxy reports overfitting as certainty.
+            if len(X_test) > 0:
+                val_pred = model.predict(X_test, verbose=0).flatten()
+                val_mae = float(np.mean(np.abs(val_pred - y_test)))
+            else:
+                val_mae = 1.0
+            # MAE is in [0,1] scaled-price units; map to a 0–100 score by
+            # inversion. This is not a probabilistic confidence but at least
+            # reflects out-of-sample fit and degrades errors honestly.
+            confidence = max(0.0, min(100.0, (1.0 - val_mae) * 100.0))
             
             return {
                 "ticker": ticker,
