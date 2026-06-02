@@ -10,6 +10,13 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import List, Dict
 from datetime import datetime
+from zoneinfo import ZoneInfo
+
+ISRAEL_TZ = ZoneInfo("Asia/Jerusalem")
+
+
+def _israel_now_str() -> str:
+    return datetime.now(ISRAEL_TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
 
 # Try to load .env file if available (optional - works with environment variables too)
 try:
@@ -73,7 +80,7 @@ class EmailNotifier:
             </head>
             <body>
                 <h1 class="critical">{'📋 Portfolio review (not all items are urgent)' if within_cd else '🚨 CRITICAL PORTFOLIO ALERT'}</h1>
-                <p><strong>Time:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+                <p><strong>Time:</strong> {_israel_now_str()} (Israel)</p>
             """
             if within_cd:
                 body += """
@@ -309,13 +316,13 @@ class EmailNotifier:
             msg = MIMEMultipart()
             msg['From'] = self.sender_email
             msg['To'] = self.recipient_email
-            msg['Subject'] = f"📊 Daily Portfolio Summary - {datetime.now().strftime('%Y-%m-%d')}"
+            msg['Subject'] = f"📊 Daily Portfolio Summary - {datetime.now(ISRAEL_TZ).strftime('%Y-%m-%d')}"
             
             body = f"""
             <html>
             <body>
                 <h2>Daily Portfolio Summary</h2>
-                <p><strong>Date:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+                <p><strong>Date:</strong> {_israel_now_str()} (Israel)</p>
                 <p><strong>Portfolio Value:</strong> ${summary.get('total_value', 0):,.2f}</p>
                 <p><strong>Status:</strong> {summary.get('status', 'No critical actions needed')}</p>
             </body>
