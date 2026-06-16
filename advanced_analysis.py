@@ -113,7 +113,8 @@ class AdvancedAnalyzer:
 
         try:
             closes = data['Close'].to_numpy(dtype=float)
-            if len(closes) < 30 or closes[-1] <= 0 or np.any(closes <= 0):
+            closes = closes[np.isfinite(closes) & (closes > 0)]
+            if len(closes) < 30:
                 return {}
 
             current_price = float(closes[-1])
