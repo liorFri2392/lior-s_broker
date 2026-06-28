@@ -11,9 +11,9 @@ import logging
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from portfolio_analyzer import PortfolioAnalyzer
-from deposit_advisor import DepositAdvisor
+from deposit_advisor import DepositAdvisor, SATELLITE_CATEGORIES
 from email_notifier import EmailNotifier
-import yfinance as yf
+import market_data
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,36 @@ class CriticalAlertSystem:
         self.critical_threshold = 75  # Score threshold for critical buy
         self.urgent_sell_threshold = 25  # Score threshold for urgent sell
         self.review_cooldown_days = 30  # Align with rebalance: fewer urgent emails soon after analyze/rebalance
-    
+
+    def _shares_for_amount(self, ticker: str, amount: float, known_price: float = 0) -> Tuple[int, float, float]:
+        """
+        Given a dollar ``amount`` to spend on ``ticker``, return
+        (shares, price, remaining_cash). If ``known_price`` is not supplied,
+        fetch it from the shared cached market-data layer.
+
+        Buys as many whole shares as ``amount`` allows; if >$50 is left over and
+        it covers one more share, buys that extra share. Returns (0, price, 0)
+        when no price is available or not even one share is affordable.
+        """
+        price = float(known_price or 0)
+        if price <= 0:
+            price = float(market_data.get_price(ticker) or 0)
+        if price <= 0:
+            return 0, 0.0, 0.0
+
+        shares = int(amount / price)
+        spent = shares * price
+        remaining = amount - spent
+        # If we have significant remaining cash (>$50) and it covers another
+        # share, buy one more.
+        if remaining > 50 and remaining >= price:
+            shares += 1
+            spent = shares * price
+            remaining = amount - spent
+        if shares <= 0:
+            return 0, price, 0.0
+        return shares, price, remaining
+
     def _within_review_cooldown(self, portfolio: Dict) -> bool:
         """True if last analyze or rebalance was within review_cooldown_days."""
         today = datetime.now().date()
@@ -117,12 +146,11 @@ class CriticalAlertSystem:
     def is_market_trading_day(self) -> bool:
         """Check if today is a US market trading day (excludes holidays)."""
         try:
-            # Use SPY as market indicator
-            spy = yf.Ticker("SPY")
+            # Use SPY as market indicator (cached; reused by check_market_anomalies).
             today = datetime.now().date()
-            
+
             # Try to get today's data
-            hist = spy.history(period="5d")
+            hist = market_data.get_history("SPY", period="5d")
             if hist is not None and not hist.empty:
                 last_date = hist.index[-1].date()
                 # If last trading day is today or yesterday, market is likely open
@@ -158,10 +186,11 @@ class CriticalAlertSystem:
         print("CRITICAL ALERT SYSTEM - Deep Analysis")
         print("=" * 60)
         
-        # Check if market is trading
+        # Check if market is trading. Compute market status once per run via the
+        # shared cached layer (memoized) instead of re-fetching SPY repeatedly.
         is_trading = self.is_market_trading_day()
-        market_status, market_message = self.analyzer.is_market_open()
-        
+        market_status, market_message = market_data.is_market_open()
+
         print(f"\n📊 Market Status: {market_message}")
         print(f"   Trading Day: {'✅ Yes' if is_trading else '❌ No (Holiday/Weekend)'}")
         print()
@@ -326,49 +355,15 @@ class CriticalAlertSystem:
                             sell_amount = shares_to_sell * weakest_holding.get("current_price", 0)
                             
                             if sell_amount > 100:  # Only if meaningful amount
-                                # Calculate buy shares and amount based on current price of the trend ETF
+                                # Size the buy using the (cached) trend ETF price.
                                 trend_analysis = best_trend_etf.get("analysis", {})
-                                buy_price = trend_analysis.get("current_price", 0)
-                                remaining_cash = 0
-                                
-                                if buy_price > 0:
-                                    buy_shares = int(sell_amount / buy_price)
-                                    buy_amount = buy_shares * buy_price
-                                    remaining_cash = sell_amount - buy_amount
-                                    
-                                    # If we have significant remaining cash (>$50), try to buy one more share
-                                    if remaining_cash > 50 and remaining_cash >= buy_price:
-                                        buy_shares += 1
-                                        buy_amount = buy_shares * buy_price
-                                        remaining_cash = sell_amount - buy_amount
-                                else:
-                                    # Fallback: try to get price from yfinance
-                                    try:
-                                        import yfinance as yf
-                                        stock = yf.Ticker(best_trend_etf["ticker"])
-                                        hist = stock.history(period="1d")
-                                        if hist is not None and not hist.empty and 'Close' in hist.columns:
-                                            buy_price = float(hist['Close'].iloc[-1])
-                                            buy_shares = int(sell_amount / buy_price)
-                                            buy_amount = buy_shares * buy_price
-                                            remaining_cash = sell_amount - buy_amount
-                                            
-                                            # If we have significant remaining cash (>$50), try to buy one more share
-                                            if remaining_cash > 50 and remaining_cash >= buy_price:
-                                                buy_shares += 1
-                                                buy_amount = buy_shares * buy_price
-                                                remaining_cash = sell_amount - buy_amount
-                                        else:
-                                            buy_price = 0
-                                            buy_shares = 0
-                                            buy_amount = 0
-                                            remaining_cash = 0
-                                    except Exception:
-                                        buy_price = 0
-                                        buy_shares = 0
-                                        buy_amount = 0
-                                        remaining_cash = 0
-                                
+                                buy_shares, buy_price, remaining_cash = self._shares_for_amount(
+                                    best_trend_etf["ticker"],
+                                    sell_amount,
+                                    known_price=trend_analysis.get("current_price", 0),
+                                )
+                                buy_amount = buy_shares * buy_price
+
                                 # Only recommend REPLACE if we can actually buy at least 1 share
                                 if buy_shares > 0 and buy_price > 0:
                                     critical_items.append({
@@ -404,20 +399,12 @@ class CriticalAlertSystem:
                 # Check if we have enough cash to buy at least 1 share of the cheapest ETF in the trend
                 has_cash_for_trend = False
                 if cash_available > 100 and trend_etfs:
-                    # Try to get price of cheapest ETF in trend
+                    # Cached + batched price lookup for the first 3 trend ETFs.
                     try:
-                        import yfinance as yf
-                        min_price = float('inf')
-                        for etf_ticker in trend_etfs[:3]:  # Check first 3 ETFs
-                            try:
-                                stock = yf.Ticker(etf_ticker)
-                                hist = stock.history(period="1d")
-                                if hist is not None and not hist.empty and 'Close' in hist.columns:
-                                    price = float(hist['Close'].iloc[-1])
-                                    min_price = min(min_price, price)
-                            except Exception:
-                                continue
-                        
+                        prices, _, _ = market_data.get_prices(trend_etfs[:3])
+                        valid_prices = [p for p in prices.values() if p and p > 0]
+                        min_price = min(valid_prices) if valid_prices else float('inf')
+
                         # If we found a price and have enough cash, we can potentially buy
                         if min_price != float('inf') and cash_available >= min_price:
                             has_cash_for_trend = True
@@ -573,24 +560,9 @@ class CriticalAlertSystem:
         # Core ETFs (essential for portfolio stability)
         core_etfs = ["SPY", "VOO", "IVV", "VXUS", "VEA"]
         
-        # Satellite ETFs (growth, but not too risky)
-        # Expanded to cover more opportunities while maintaining balanced risk
-        satellite_categories = [
-            # Core Satellite (essential diversification)
-            "US_SMALL_CAP", "TECHNOLOGY", "HEALTHCARE", "EMERGING_MARKETS",
-            # High-growth trends (but not leveraged)
-            "AI_AND_ROBOTICS", "QUANTUM_COMPUTING", "SEMICONDUCTORS", "CLOUD_COMPUTING", "CYBERSECURITY",
-            "ELECTRIC_VEHICLES", "CLEAN_ENERGY",
-            # Defensive growth
-            "REAL_ESTATE", "INFRASTRUCTURE",
-            # Investment styles
-            "DIVIDEND", "GROWTH", "VALUE",
-            # Sector diversification
-            "FINANCIAL", "ENERGY", "CONSUMER",
-            # Thematic trends
-            "ESG", "BIOTECH"
-        ]
-        
+        # Satellite ETF categories (shared module constant).
+        satellite_categories = SATELLITE_CATEGORIES
+
         # Bond ETFs (protection)
         bond_etfs = ["BND", "AGG", "TIP", "SCHP", "VTIP"]
         
@@ -621,7 +593,11 @@ class CriticalAlertSystem:
         
         print(f"   Analyzing {len(analyzed_etfs)} ETFs (Core, Satellite, Bonds) following 80/20 strategy...")
         print("   (Excluding leveraged ETFs and crypto for balanced risk)")
-        
+
+        # Prefetch the whole candidate universe in one batched download so every
+        # analyze_etf() below is served from cache.
+        market_data.prefetch(analyzed_etfs[:60], period="1y")
+
         # Analyze in batches
         # Increased limit to 60 to cover more opportunities (was 25)
         for i, etf in enumerate(analyzed_etfs[:60]):  # Limit to 60 for comprehensive coverage
@@ -794,14 +770,17 @@ class CriticalAlertSystem:
         core_etfs = ["SPY", "VOO", "IVV", "VXUS", "VEA"]
         bond_etfs = ["BND", "AGG", "TIP", "SCHP", "VTIP"]
         
-        # Get all satellite categories from advisor
-        satellite_categories = [
-            "US_SMALL_CAP", "TECHNOLOGY", "HEALTHCARE", "EMERGING_MARKETS",
-            "AI_AND_ROBOTICS", "QUANTUM_COMPUTING", "SEMICONDUCTORS", "CLOUD_COMPUTING", "CYBERSECURITY",
-            "ELECTRIC_VEHICLES", "CLEAN_ENERGY", "REAL_ESTATE", "INFRASTRUCTURE",
-            "DIVIDEND", "GROWTH", "VALUE", "FINANCIAL", "ENERGY", "CONSUMER", "ESG", "BIOTECH"
-        ]
-        
+        # Satellite ETF categories (shared module constant).
+        satellite_categories = SATELLITE_CATEGORIES
+
+        # Warm the cache for every plausible candidate (core + bonds + top-2 of
+        # each satellite category) in one batched download up front.
+        prefetch_set = set(core_etfs) | set(bond_etfs)
+        for cat in satellite_categories:
+            for etf in self.advisor.ETF_CATEGORIES.get(cat, [])[:2]:
+                prefetch_set.add(etf)
+        market_data.prefetch(list(prefetch_set), period="1y")
+
         print(f"   Analyzing {len(holdings_analysis)} existing holdings for better alternatives...")
         
         for holding in holdings_analysis:
@@ -890,52 +869,16 @@ class CriticalAlertSystem:
                         expected_return = best_analysis.get("mid_term_forecast", {}).get("expected_3yr_return", 0)
                         current_return = holding.get("mid_term_forecast", {}).get("expected_3yr_return", 0) if isinstance(holding.get("mid_term_forecast"), dict) else 0
                         
-                        # Calculate buy shares and amount based on current price of the new ETF
-                        # Use ALL money from sale to buy new ETF (maximize allocation)
-                        buy_price = best_analysis.get("current_price", 0)
-                        remaining_cash = 0
-                        
-                        if buy_price > 0:
-                            # Calculate how many shares we can buy with the sell amount
-                            buy_shares = int(sell_amount / buy_price)
-                            buy_amount = buy_shares * buy_price
-                            remaining_cash = sell_amount - buy_amount
-                            
-                            # If we have significant remaining cash (>$50), try to buy one more share
-                            # But only if we have enough money for the additional share
-                            if remaining_cash > 50 and remaining_cash >= buy_price:
-                                buy_shares += 1
-                                buy_amount = buy_shares * buy_price
-                                remaining_cash = sell_amount - buy_amount
-                        else:
-                            # Fallback: try to get price from yfinance
-                            try:
-                                import yfinance as yf
-                                stock = yf.Ticker(best_alternative)
-                                hist = stock.history(period="1d")
-                                if hist is not None and not hist.empty and 'Close' in hist.columns:
-                                    buy_price = float(hist['Close'].iloc[-1])
-                                    buy_shares = int(sell_amount / buy_price)
-                                    buy_amount = buy_shares * buy_price
-                                    remaining_cash = sell_amount - buy_amount
-                                    
-                                    # If we have significant remaining cash (>$50), try to buy one more share
-                                    # But only if we have enough money for the additional share
-                                    if remaining_cash > 50 and remaining_cash >= buy_price:
-                                        buy_shares += 1
-                                        buy_amount = buy_shares * buy_price
-                                        remaining_cash = sell_amount - buy_amount
-                                else:
-                                    buy_price = 0
-                                    buy_shares = 0
-                                    buy_amount = 0
-                                    remaining_cash = 0
-                            except Exception:
-                                buy_price = 0
-                                buy_shares = 0
-                                buy_amount = 0
-                                remaining_cash = 0
-                        
+                        # Size the buy using all proceeds of the sale, preferring
+                        # the (cached) analyzed price and falling back to the
+                        # shared market-data layer.
+                        buy_shares, buy_price, remaining_cash = self._shares_for_amount(
+                            best_alternative,
+                            sell_amount,
+                            known_price=best_analysis.get("current_price", 0),
+                        )
+                        buy_amount = buy_shares * buy_price
+
                         # Only recommend REPLACE if we can actually buy at least 1 share
                         if buy_shares > 0 and buy_price > 0:
                             replacement_opportunities.append({
@@ -970,10 +913,10 @@ class CriticalAlertSystem:
         anomalies = []
         
         try:
-            # Check SPY for extreme movements
-            spy = yf.Ticker("SPY")
-            hist = spy.history(period="5d")
-            
+            # Check SPY for extreme movements (cached; usually a hit from
+            # is_market_trading_day's earlier 5d fetch).
+            hist = market_data.get_history("SPY", period="5d")
+
             if hist is not None and not hist.empty and 'Close' in hist.columns and len(hist) >= 2:
                 recent_return = (hist['Close'].iloc[-1] / hist['Close'].iloc[-2] - 1) * 100
                 
@@ -1172,10 +1115,12 @@ class CriticalAlertSystem:
                         buy_holding["current_value"] = buy_holding["quantity"] * buy_price
                         print(f"  ✅ BUY: {ticker} - {old_qty} → {buy_holding['quantity']} shares @ ${buy_price:.2f}")
                     else:
-                        # Create new holding
+                        # Create new holding (cost_basis = price just paid, so
+                        # downstream cost-basis/tax math has a value to work with).
                         new_holding = {
                             "ticker": ticker,
                             "quantity": buy_shares,
+                            "cost_basis": round(buy_price, 4),
                             "last_price": buy_price,
                             "current_value": buy_shares * buy_price
                         }

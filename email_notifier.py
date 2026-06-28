@@ -39,7 +39,14 @@ class EmailNotifier:
         if not self.sender_email or not self.sender_password:
             logger.error("EMAIL_SENDER and EMAIL_PASSWORD must be set in environment variables")
             raise ValueError("EMAIL_SENDER and EMAIL_PASSWORD must be set in .env file or environment variables")
-    
+
+    def _send(self, msg: MIMEMultipart) -> None:
+        """Send a prepared message via Gmail SMTP (shared by all senders)."""
+        with smtplib.SMTP('smtp.gmail.com', 587) as server:
+            server.starttls()
+            server.login(self.sender_email, self.sender_password)
+            server.send_message(msg)
+
     def send_critical_alert(
         self,
         subject: str,
@@ -294,13 +301,9 @@ class EmailNotifier:
             """
             
             msg.attach(MIMEText(body, 'html'))
-            
-            # Send email via Gmail SMTP
-            with smtplib.SMTP('smtp.gmail.com', 587) as server:
-                server.starttls()
-                server.login(self.sender_email, self.sender_password)
-                server.send_message(msg)
-            
+
+            self._send(msg)
+
             logger.info(f"Critical alert email sent successfully to {self.recipient_email}")
             print(f"✅ Critical alert email sent successfully to {self.recipient_email}")
             return True
@@ -330,12 +333,9 @@ class EmailNotifier:
             """
             
             msg.attach(MIMEText(body, 'html'))
-            
-            with smtplib.SMTP('smtp.gmail.com', 587) as server:
-                server.starttls()
-                server.login(self.sender_email, self.sender_password)
-                server.send_message(msg)
-            
+
+            self._send(msg)
+
             logger.info(f"Daily summary email sent successfully to {self.recipient_email}")
             return True
             
@@ -352,10 +352,7 @@ class EmailNotifier:
             msg['To'] = self.recipient_email
             msg['Subject'] = subject
             msg.attach(MIMEText(body_plain, 'plain'))
-            with smtplib.SMTP('smtp.gmail.com', 587) as server:
-                server.starttls()
-                server.login(self.sender_email, self.sender_password)
-                server.send_message(msg)
+            self._send(msg)
             logger.info(f"Reminder email sent to {self.recipient_email}")
             return True
         except Exception as e:

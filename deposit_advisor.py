@@ -11,11 +11,26 @@ import subprocess
 import base64
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
-import yfinance as yf
 import pandas as pd
 import numpy as np
+import market_data
 from portfolio_analyzer import PortfolioAnalyzer
 from advanced_analysis import AdvancedAnalyzer
+
+# Leveraged ETF classification (single source of truth, was duplicated inline).
+LEVERAGED_2X = ["SSO", "QLD", "UWM", "EFO"]
+LEVERAGED_3X = ["TQQQ", "SPXL", "UPRO", "TNA", "FAS", "CURE", "SOXL", "LABU", "TECL"]
+LEVERAGED_INVERSE = ["SQQQ", "SPXS", "SPXU", "TZA", "FAZ", "SOXS", "LABD", "TECS"]
+ALL_LEVERAGED_TICKERS = set(LEVERAGED_2X) | set(LEVERAGED_3X) | set(LEVERAGED_INVERSE)
+
+# Satellite ETF categories used by the critical-alert scan (hoisted to avoid
+# duplicate literal lists across modules).
+SATELLITE_CATEGORIES = [
+    "US_SMALL_CAP", "TECHNOLOGY", "HEALTHCARE", "EMERGING_MARKETS",
+    "AI_AND_ROBOTICS", "QUANTUM_COMPUTING", "SEMICONDUCTORS", "CLOUD_COMPUTING", "CYBERSECURITY",
+    "ELECTRIC_VEHICLES", "CLEAN_ENERGY", "REAL_ESTATE", "INFRASTRUCTURE",
+    "DIVIDEND", "GROWTH", "VALUE", "FINANCIAL", "ENERGY", "CONSUMER", "ESG", "BIOTECH",
+]
 
 # Try to import requests for GitHub API
 try:
@@ -116,6 +131,11 @@ class DepositAdvisor:
         self.analyzer = PortfolioAnalyzer(portfolio_file)
         self.advanced_analyzer = AdvancedAnalyzer()
         self.exchange_rate_usd_ils = 1.0 / 0.34  # ILS per USD (~2.94 when 1 ILS = 0.34 USD)
+        # Per-run memoization: the same candidate tickers (SPY/QQQ/BND/XLK...) are
+        # analyzed dozens of times across scan loops. Cache by ticker / category
+        # so each is computed (and fetched) at most once per run.
+        self._etf_cache: Dict[str, Dict] = {}
+        self._industry_trend_cache: Dict[str, Dict] = {}
 
     def load_portfolio(self) -> Dict:
         """Load portfolio from JSON file."""
@@ -131,15 +151,20 @@ class DepositAdvisor:
         """Analyze industry trends for a category by comparing all ETFs in that category."""
         if category not in self.ETF_CATEGORIES:
             return {"trend": "UNKNOWN", "score": 50, "reason": "Category not found"}
-        
+
+        # Per-run memoization (same category requested many times per run).
+        if category in self._industry_trend_cache:
+            return self._industry_trend_cache[category]
+
         etfs = self.ETF_CATEGORIES[category]
         category_returns = []
         category_momentums = []
-        
+
+        # Batched, cached fetch of the top-3 ETFs in one round-trip.
+        histories = market_data.get_histories(etfs[:3], period="6mo")
         for etf in etfs[:3]:  # Analyze top 3 ETFs in category
             try:
-                stock = yf.Ticker(etf)
-                data = stock.history(period="6mo", auto_adjust=True)
+                data = histories.get(etf, pd.DataFrame())
                 if not data.empty and len(data) > 20:
                     # Calculate 6-month return
                     return_6m = (data['Close'].iloc[-1] / data['Close'].iloc[0] - 1) * 100
@@ -153,8 +178,10 @@ class DepositAdvisor:
                 continue
         
         if not category_returns:
-            return {"trend": "UNKNOWN", "score": 50, "reason": "Insufficient data"}
-        
+            result = {"trend": "UNKNOWN", "score": 50, "reason": "Insufficient data"}
+            self._industry_trend_cache[category] = result
+            return result
+
         avg_return = np.mean(category_returns)
         avg_momentum = np.mean(category_momentums)
         
@@ -176,14 +203,16 @@ class DepositAdvisor:
             score = 50
             reason = f"Neutral industry trend: {avg_return:.1f}% return"
         
-        return {
+        result = {
             "trend": trend,
             "score": score,
             "reason": reason,
             "avg_return": avg_return,
             "avg_momentum": avg_momentum
         }
-    
+        self._industry_trend_cache[category] = result
+        return result
+
     def detect_emerging_trends(self, excluded_categories: List[str] = None) -> List[Dict]:
         """
         Scan all categories to detect emerging trends and hot sectors.
@@ -233,7 +262,13 @@ class DepositAdvisor:
         """
         if verbose:
             print(f"Analyzing ETF: {ticker}...")
-        
+
+        # Per-run memoization: the same candidate ticker is analyzed many times
+        # across the scan loops; compute (and fetch) it at most once per run.
+        cache_key = ticker.upper()
+        if cache_key in self._etf_cache:
+            return self._etf_cache[cache_key]
+
         analysis = {
             "ticker": ticker,
             "score": 0,
@@ -245,105 +280,63 @@ class DepositAdvisor:
             "leverage_multiplier": 1.0,
             "risk_level": "NORMAL"
         }
-        
-        # Check if ETF is leveraged
-        leveraged_2x = ["SSO", "QLD", "UWM", "EFO"]
-        leveraged_3x = ["TQQQ", "SPXL", "UPRO", "TNA", "FAS", "CURE", "SOXL", "LABU", "TECL"]
-        leveraged_inverse = ["SQQQ", "SPXS", "SPXU", "TZA", "FAZ", "SOXS", "LABD", "TECS"]
-        
-        if ticker.upper() in leveraged_2x:
+
+        # Check if ETF is leveraged (module-level single source of truth).
+        if ticker.upper() in LEVERAGED_2X:
             analysis["is_leveraged"] = True
             analysis["leverage_multiplier"] = 2.0
             analysis["risk_level"] = "HIGH"
-        elif ticker.upper() in leveraged_3x:
+        elif ticker.upper() in LEVERAGED_3X:
             analysis["is_leveraged"] = True
             analysis["leverage_multiplier"] = 3.0
             analysis["risk_level"] = "VERY_HIGH"
-        elif ticker.upper() in leveraged_inverse:
+        elif ticker.upper() in LEVERAGED_INVERSE:
             analysis["is_leveraged"] = True
             analysis["leverage_multiplier"] = -3.0  # Negative for inverse
             analysis["risk_level"] = "VERY_HIGH"
-        
+
         try:
-            stock = yf.Ticker(ticker)
-            info = stock.info
-            
-            # Get basic info
+            # Basic info via the shared cache (.info is slow — fetched at most
+            # once per ticker per run/TTL window).
+            info = market_data.get_info(ticker)
             analysis["name"] = info.get("longName", ticker)
             analysis["category"] = info.get("category", "Unknown")
             analysis["expense_ratio"] = info.get("annualReportExpenseRatio", 0) * 100
-            
-            # Get price - check market status first
-            market_status, market_message = self.analyzer.is_market_open()
-            
-            # Try to get real-time price if market is open
-            price_found = False
-            if market_status:
-                try:
-                    if hasattr(stock, 'fast_info') and stock.fast_info is not None:
-                        fast_info = stock.fast_info
-                        if hasattr(fast_info, 'get'):
-                            price = float(fast_info.get('lastPrice', 0))
-                            if price > 0:
-                                analysis["current_price"] = price
-                                price_found = True
-                except Exception as e:
-                    logger.debug(f"Failed to get real-time price for {ticker}: {e}")
-                    pass  # Fall through to historical data
-            
-            # Fallback to historical data (last close) if real-time price not found
-            if not price_found:
-                try:
-                    hist = stock.history(period="1d")
-                    if hist is not None and not hist.empty and 'Close' in hist.columns:
-                        analysis["current_price"] = float(hist['Close'].iloc[-1])
-                    else:
-                        # Try longer period if 1d fails (for delisted ETFs)
-                        hist = stock.history(period="5d")
-                        if hist is not None and not hist.empty and 'Close' in hist.columns:
-                            analysis["current_price"] = float(hist['Close'].iloc[-1])
-                        else:
-                            try:
-                                if hasattr(stock, 'fast_info') and stock.fast_info is not None:
-                                    fast_info = stock.fast_info
-                                    if hasattr(fast_info, 'get'):
-                                        analysis["current_price"] = float(fast_info.get('lastPrice', 0))
-                                        if analysis["current_price"] == 0:
-                                            logger.warning(f"{ticker}: Possibly delisted - no price data found")
-                                            return analysis
-                                    else:
-                                        logger.warning(f"{ticker}: Possibly delisted - no price data available")
-                                        return analysis  # Return early if no price data
-                                else:
-                                    logger.warning(f"{ticker}: Possibly delisted - no price data available")
-                                    return analysis  # Return early if no price data
-                            except Exception:
-                                logger.warning(f"{ticker}: Possibly delisted - no price data available")
-                                return analysis  # Return early if no price data
-                except Exception as e:
-                    logger.warning(f"{ticker}: Failed to get price data - possibly delisted: {e}")
-                    return analysis  # Return early if can't get price
-            
+
             # Get historical data for analysis. auto_adjust=True so 'Close'
             # is the dividend- and split-adjusted total-return series — without
             # this, dividend-heavy ETFs (BND, VYM, SCHD, AGG) understate Sharpe
-            # by 1–3% per year of distributions.
-            try:
-                data = stock.history(period="1y", auto_adjust=True)
-                if data.empty:
-                    data = stock.history(period="6mo", auto_adjust=True)
-                    if data.empty:
-                        logger.warning(f"{ticker}: No historical data available - possibly delisted")
-                        return analysis
-            except Exception as e:
-                logger.warning(f"{ticker}: Failed to get historical data - possibly delisted: {e}")
+            # by 1–3% per year of distributions. Routed through the shared cache.
+            data = market_data.get_history(ticker, period="1y")
+            if data is None or data.empty:
+                data = market_data.get_history(ticker, period="6mo")
+            if data is None or data.empty:
+                logger.warning(f"{ticker}: No historical data available - possibly delisted")
+                self._etf_cache[cache_key] = analysis
                 return analysis
+
+            # Derive current price from the (cached) history's last close, with a
+            # cached real-time price as a secondary source. Avoids the separate
+            # 1d/5d/info round-trips that previously ran for every ETF.
+            try:
+                analysis["current_price"] = float(data['Close'].iloc[-1])
+            except Exception:
+                analysis["current_price"] = 0
+            if analysis["current_price"] <= 0:
+                live_price = market_data.get_price(ticker)
+                if live_price and live_price > 0:
+                    analysis["current_price"] = float(live_price)
+                else:
+                    logger.warning(f"{ticker}: Possibly delisted - no price data available")
+                    self._etf_cache[cache_key] = analysis
+                    return analysis
 
             # Compute metrics
             returns = data['Close'].pct_change().dropna()
             T = len(returns)
             if T < 30:
                 logger.warning(f"{ticker}: Insufficient return observations ({T} days)")
+                self._etf_cache[cache_key] = analysis
                 return analysis
 
             # === NORMALIZED SCORING SYSTEM ===
@@ -360,7 +353,7 @@ class DepositAdvisor:
             # with T~250 daily observations the SE drops to roughly
             # SE_Sharpe ≈ √((1 + ½·Sharpe²) / T) ≈ 0.06–0.07.
             try:
-                risk_free_rate = self.advanced_analyzer.get_risk_free_rate()
+                risk_free_rate = market_data.get_risk_free_rate()
             except Exception:
                 risk_free_rate = 0.045
 
@@ -626,9 +619,10 @@ class DepositAdvisor:
         except Exception as e:
             logger.error(f"Error analyzing {ticker}: {e}")
             analysis["reasons"].append(f"Error in analysis: {str(e)}")
-        
+
+        self._etf_cache[cache_key] = analysis
         return analysis
-    
+
     def get_portfolio_diversification(self, portfolio: Dict) -> Dict:
         """Analyze current portfolio diversification."""
         holdings = portfolio.get("holdings", [])
@@ -744,8 +738,7 @@ class DepositAdvisor:
             print(f"   Deposit allocation: ${stocks_target:,.2f} Stocks ({(stocks_target/deposit_amount_usd*100):.1f}%), ${bonds_target:,.2f} Bonds ({(bonds_target/deposit_amount_usd*100):.1f}%)")
         print()
         
-        # Define Core ETFs (stable, broad market)
-        core_etfs = ["SPY", "VOO", "IVV", "VXUS", "VEA"]  # US Large Cap + International
+        # core_etfs / bond_etfs already defined above (allocation section); reuse them.
         # Define Satellite ETFs (growth, trends - but not too risky)
         # Expanded to include more categories for better coverage
         satellite_etfs = [
@@ -763,19 +756,25 @@ class DepositAdvisor:
             # Sector diversification
             "XLF", "VFH", "XLE", "VDE", "XLY", "VCR"  # Financial, Energy, Consumer
         ]
-        # Define Bonds (protection)
-        bond_etfs = ["BND", "AGG", "TIP", "SCHP", "VTIP"]  # US Bonds + Inflation Protection
-        
+        # bond_etfs already defined above (allocation section); reuse it.
+
         # Exclude high-risk categories
         excluded_categories = ["LEVERAGED_2X", "LEVERAGED_3X", "LEVERAGED_INVERSE", "CRYPTO"]
         excluded_tickers = []
         for cat in excluded_categories:
             if cat in self.ETF_CATEGORIES:
                 excluded_tickers.extend(self.ETF_CATEGORIES[cat])
-        
+
+        # Prefetch the full candidate universe (core + satellite + bonds) in one
+        # batched download so every subsequent analyze_etf() is a cache hit.
+        prefetch_tickers = [
+            t for t in (core_etfs + satellite_etfs + bond_etfs)
+            if t not in excluded_tickers
+        ]
+        market_data.prefetch(prefetch_tickers, period="1y")
+
         # Check for emerging trends first (NEW - automatically detects hot sectors)
         print("🔍 Checking for emerging trends and hot sectors...")
-        excluded_categories = ["LEVERAGED_2X", "LEVERAGED_3X", "LEVERAGED_INVERSE", "CRYPTO"]
         emerging_trends = self.detect_emerging_trends(excluded_categories)
         if emerging_trends:
             print(f"   ✅ Found {len(emerging_trends)} emerging trends with strong momentum:")
@@ -1116,10 +1115,10 @@ class DepositAdvisor:
         with open(self.portfolio_file, 'w', encoding='utf-8') as f:
             json.dump(portfolio, f, indent=2, ensure_ascii=False)
         
-        # Try to update GitHub secret automatically
+        # Try to update GitHub secret automatically (single path — previously this
+        # also called _run_update_secret(), double-writing the same secret).
         self._try_update_github_secret(portfolio)
-        self._run_update_secret()
-        
+
         print(f"\n✅ Portfolio updated successfully!")
         print(f"   Total spent: ${total_spent_usd:,.2f} (₪{total_spent_usd * exchange_rate:,.2f})")
         print(f"   Remaining cash: ${new_cash_usd:,.2f} (₪{new_cash_usd * exchange_rate:,.2f})")

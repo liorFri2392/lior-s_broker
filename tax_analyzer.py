@@ -22,11 +22,25 @@ class TaxAnalyzer:
     
     # Tax exemptions
     ANNUAL_EXEMPTION_ILS = 0  # No exemption for capital gains (as of 2024)
-    LONG_TERM_REDUCTION = 0.20  # 20% reduction for long-term (>2 years) - check current law
-    
-    def __init__(self, portfolio_file: str = "portfolio.json"):
+    # ⚠️ UNVERIFIED: Israeli capital-gains tax on marketable securities is a flat 25%
+    # with no general "long-term holding" reduction — this 20% reduction looks like a
+    # US-style concept misapplied. It is left configurable (default preserves the old
+    # behavior) but should be CONFIRMED WITH A TAX ADVISOR before relying on it.
+    # Set LONG_TERM_REDUCTION=0 in the environment to disable it.
+    LONG_TERM_REDUCTION = float(os.getenv("LONG_TERM_REDUCTION", "0.20"))
+
+    def __init__(self, portfolio_file: str = "portfolio.json", exchange_rate: float = None):
         self.portfolio_file = portfolio_file
-        self.exchange_rate_usd_ils = 3.7  # Will be updated from market
+        if exchange_rate is not None:
+            self.exchange_rate_usd_ils = exchange_rate
+        else:
+            # Default to the live, cached rate; fall back to 3.7 only if it fails.
+            try:
+                import market_data
+                self.exchange_rate_usd_ils = market_data.get_exchange_rate()
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"Falling back to default FX rate (3.7): {e}")
+                self.exchange_rate_usd_ils = 3.7
     
     def load_portfolio(self) -> Dict:
         """Load portfolio from JSON file."""
@@ -154,7 +168,7 @@ class TaxAnalyzer:
         
         # Remaining dividend after US tax
         remaining_dividend_usd = dividend_amount_usd - us_withholding_usd
-        remaining_dividend_ils = remaining_dividend_ils = remaining_dividend_usd * exchange_rate
+        remaining_dividend_ils = remaining_dividend_usd * exchange_rate
         
         # Israeli tax on remaining dividend
         israeli_tax_ils = remaining_dividend_ils * self.DIVIDEND_TAX
@@ -217,6 +231,9 @@ class TaxAnalyzer:
                 continue
             
             purchase_price = holding.get("purchase_price") or holding.get("last_price", 0)
+            if not holding.get("purchase_date") or not holding.get("purchase_price"):
+                print(f"   ⚠️  {ticker}: missing purchase_date/purchase_price — "
+                      f"tax estimate uses last_updated/last_price and may be inaccurate.")
             purchase_date = holding.get("purchase_date") or portfolio.get("last_updated", datetime.now().isoformat())
             
             # Calculate tax

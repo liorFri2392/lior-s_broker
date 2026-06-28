@@ -11,6 +11,7 @@ from sklearn.preprocessing import PolynomialFeatures
 from sklearn.covariance import LedoitWolf
 from typing import Dict, List, Optional, Tuple
 import yfinance as yf
+import market_data
 import logging
 import warnings
 warnings.filterwarnings('ignore')
@@ -80,18 +81,12 @@ class AdvancedAnalyzer:
     
     def get_risk_free_rate(self) -> float:
         """Get current risk-free rate from 3-month Treasury yield (^IRX).
-        Falls back to 4.5% if unavailable."""
-        try:
-            irx = yf.Ticker("^IRX")
-            hist = irx.history(period="5d")
-            if hist is not None and not hist.empty and 'Close' in hist.columns:
-                # ^IRX is quoted as percentage (e.g. 4.5 means 4.5%)
-                rate = float(hist['Close'].iloc[-1]) / 100.0
-                if 0 < rate < 0.15:  # Sanity: between 0% and 15%
-                    return rate
-        except Exception as e:
-            logger.debug(f"Failed to fetch risk-free rate: {e}")
-        return 0.045  # Default fallback
+
+        Delegates to the shared cached market-data layer, which memoizes the
+        ^IRX fetch (and persists it across runs) so we don't re-download a
+        scalar on every call across the codebase. Falls back to 4.5% if
+        unavailable."""
+        return market_data.get_risk_free_rate()
 
     def calculate_statistical_forecast(self, data: pd.DataFrame, periods: int = 60) -> Dict:
         """
@@ -193,9 +188,8 @@ class AdvancedAnalyzer:
     def analyze_bonds(self, ticker: str) -> Dict:
         """Advanced bond analysis focusing on yield and risk."""
         try:
-            bond = yf.Ticker(ticker)
-            info = bond.info
-            
+            info = market_data.get_info(ticker)
+
             analysis = {
                 "ticker": ticker,
                 "name": info.get("longName", ticker),
@@ -203,9 +197,9 @@ class AdvancedAnalyzer:
                 "risk_metrics": {},
                 "recommendation": "NEUTRAL"
             }
-            
+
             # Use adjusted close so dividends/coupon distributions are reflected
-            data = bond.history(period="2y", auto_adjust=True)
+            data = market_data.get_history(ticker, period="2y", auto_adjust=True)
             if data.empty:
                 return analysis
 
@@ -283,18 +277,25 @@ class AdvancedAnalyzer:
             return []
         
         optimized = []
-        
+
+        # Fetch all candidate histories in ONE batched (and cached) request
+        # instead of re-downloading each ticker sequentially.
+        period = f"{target_years+1}y"
+        cand_tickers = [c.get("ticker") for c in candidates if c.get("ticker")]
+        histories = market_data.get_histories(cand_tickers, period=period)
+
         for candidate in candidates:
             ticker = candidate.get("ticker")
             if not ticker:
                 continue
-            
+
             try:
-                stock = yf.Ticker(ticker)
-                # Get enough data for analysis
-                data = stock.history(period=f"{target_years+1}y")
-                
-                if data.empty or len(data) < 60:  # Minimum 60 days
+                # Served from the batched cache (no per-ticker re-download)
+                data = histories.get(ticker)
+                if data is None:
+                    data = market_data.get_history(ticker, period=period)
+
+                if data is None or data.empty or len(data) < 60:  # Minimum 60 days
                     continue
                 
                 # Calculate historical returns
@@ -387,19 +388,15 @@ class AdvancedAnalyzer:
         if not holdings or len(holdings) < 2:
             return {}
 
-        # Get historical returns for all holdings
+        # Get historical returns for all holdings in ONE batched (cached) request
+        opt_tickers = [h.get("ticker") for h in holdings if h.get("ticker")]
+        histories = market_data.get_histories(opt_tickers, period="2y", auto_adjust=True)
         returns_data = {}
-        for holding in holdings:
-            ticker = holding.get("ticker")
-            try:
-                stock = yf.Ticker(ticker)
-                data = stock.history(period="2y", auto_adjust=True)
-                if not data.empty:
-                    returns = data['Close'].pct_change().dropna()
-                    returns_data[ticker] = returns
-            except Exception as e:
-                logger.debug(f"Failed to get returns data for {ticker}: {e}")
-                continue
+        for ticker in opt_tickers:
+            data = histories.get(ticker)
+            if data is not None and not data.empty and 'Close' in data.columns:
+                returns = data['Close'].pct_change().dropna()
+                returns_data[ticker] = returns
 
         if len(returns_data) < 2:
             return {}
@@ -465,10 +462,19 @@ class AdvancedAnalyzer:
         excess = mu_vec - risk_free_rate * ones
         w_tan_raw = sigma_inv @ excess
         sum_w = w_tan_raw.sum()
-        if sum_w != 0 and np.isfinite(sum_w):
+        # Only normalize when the tangency sum is strictly positive. When excess
+        # returns are net-negative, sum_w <= 0 and dividing by it FLIPS every
+        # sign, producing a nonsensical "max-Sharpe" portfolio. Fall back to the
+        # minimum-variance solution (Σ⁻¹·1) in that degenerate regime.
+        if sum_w > 0 and np.isfinite(sum_w):
             w_tan = w_tan_raw / sum_w
         else:
-            w_tan = ones / n_assets
+            w_mv_fallback = sigma_inv @ ones
+            sum_mv_fallback = w_mv_fallback.sum()
+            if sum_mv_fallback > 0 and np.isfinite(sum_mv_fallback):
+                w_tan = w_mv_fallback / sum_mv_fallback
+            else:
+                w_tan = ones / n_assets
         # Project onto long-only simplex (no shorting, matches prior behaviour)
         max_sharpe_weights = self._project_to_simplex(w_tan)
 

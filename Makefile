@@ -33,11 +33,17 @@ venv:
 		echo "Virtual environment already exists."; \
 	fi
 
-install: venv
+# Stamp file: deps are reinstalled only when requirements.txt changes.
+DEPS_STAMP = $(VENV)/.deps-installed
+
+$(DEPS_STAMP): requirements.txt | venv
 	@echo "Installing required packages..."
 	@$(PIP) install --upgrade pip
 	@$(PIP) install -r requirements.txt
+	@touch $(DEPS_STAMP)
 	@echo "Packages installed successfully."
+
+install: $(DEPS_STAMP)
 
 setup: install
 	@echo "Setting up initial portfolio structure..."
@@ -50,24 +56,24 @@ setup: install
 	@echo ""
 	@echo "✅ Setup complete! You can now use 'make analyze' or 'make deposit'"
 
-analyze: venv
+analyze: install
 	@echo "Running portfolio analysis..."
 	@$(PYTHON) portfolio_analyzer.py
 
-analyze-preview: venv
+analyze-preview: install
 	@echo "Running portfolio analysis (read-only - portfolio.json will not be changed)..."
 	@ANALYZE_READONLY=1 $(PYTHON) portfolio_analyzer.py
 
-refresh-prices: venv
+refresh-prices: install
 	@echo "Refreshing portfolio prices..."
 	@$(PYTHON) -c "from portfolio_analyzer import PortfolioAnalyzer; PortfolioAnalyzer().refresh_portfolio_prices(verbose=True)"
 
-deposit: venv
+deposit: install
 	@echo "Deposit Advisory System"
 	@read -p "Enter deposit amount in ILS (₪): " amount; \
 	$(PYTHON) deposit_advisor.py $$amount
 
-alerts: venv
+alerts: install
 	@echo "Checking for critical portfolio actions..."
 	@if [ ! -f .env ]; then \
 		echo "❌ Error: .env file not found!"; \
@@ -77,24 +83,24 @@ alerts: venv
 	fi
 	@$(PYTHON) critical_alert.py
 
-backtest: venv
+backtest: install
 	@echo "Running backtesting analysis..."
 	@$(PYTHON) backtesting.py
 
-risk: venv
+risk: install
 	@echo "Checking portfolio risk..."
 	@$(PYTHON) -c "from risk_manager import RiskManager; rm = RiskManager(); rm.print_risk_report()"
 
-backfill-cost-basis: venv
+backfill-cost-basis: install
 	@echo "Setting cost_basis = last_price for holdings without a tracked cost basis."
 	@echo "This is a one-time migration so stop-loss / take-profit alerts work."
 	@$(PYTHON) risk_manager.py backfill-cost-basis
 
-tax: venv
+tax: install
 	@echo "Analyzing tax implications for current portfolio..."
 	@$(PYTHON) tax_report.py
 
-update-secret: venv
+update-secret: install
 	@echo "Updating GitHub secret with current portfolio..."
 	@$(PYTHON) update_github_secret.py
 

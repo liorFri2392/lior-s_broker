@@ -42,7 +42,11 @@ def main():
         
         if purchase_price == 0 or current_price == 0:
             continue
-        
+
+        if not holding.get("purchase_date") or not holding.get("purchase_price"):
+            print(f"   ⚠️  {ticker}: missing purchase_date/purchase_price — "
+                  f"estimate uses last_updated/last_price and may be inaccurate.")
+
         # Calculate potential tax if sold now
         tax_calc = analyzer.calculate_capital_gains_tax(
             purchase_price=purchase_price,
