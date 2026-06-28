@@ -10,6 +10,7 @@ import pandas as pd
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 import yfinance as yf
+import market_data
 import logging
 
 logger = logging.getLogger(__name__)
@@ -154,6 +155,21 @@ class RiskManager:
         skipped = []
         holdings = portfolio.get("holdings", [])
 
+        # Fetch all live prices in ONE batched (cached) request instead of a
+        # separate yf.Ticker call per holding inside the loop.
+        live_tickers = [
+            h.get("ticker") for h in holdings
+            if h.get("ticker")
+            and (h.get("cost_basis") or h.get("purchase_price"))
+            and h.get("last_price", 0) != 0
+        ]
+        live_prices = {}
+        if live_tickers:
+            try:
+                live_prices, _, _ = market_data.get_prices(live_tickers)
+            except Exception as e:
+                logger.debug(f"Could not batch-fetch live prices: {e}")
+
         for holding in holdings:
             ticker = holding.get("ticker")
             quantity = holding.get("quantity", 0)
@@ -166,15 +182,8 @@ class RiskManager:
             if current_price_stored == 0:
                 continue
 
-            # Fetch live price (falls back to stored last_price on failure)
-            current_price = current_price_stored
-            try:
-                stock = yf.Ticker(ticker)
-                hist = stock.history(period="1d", auto_adjust=True)
-                if not hist.empty:
-                    current_price = float(hist['Close'].iloc[-1])
-            except Exception as e:
-                logger.debug(f"Could not get current price for {ticker}: {e}")
+            # Use the batched live price, falling back to stored last_price.
+            current_price = live_prices.get(ticker, current_price_stored)
 
             return_pct = (current_price / cost_basis - 1) * 100
 
@@ -272,23 +281,26 @@ class RiskManager:
         
         returns_data = {}
         weights = {}
-        
+
+        # Fetch every holding's history in ONE batched (cached) request rather
+        # than a sequential yf.Ticker.history() per holding.
+        ret_tickers = [
+            h.get("ticker") for h in holdings
+            if h.get("ticker") and h.get("current_value", 0) > 0
+        ]
+        histories = market_data.get_histories(ret_tickers, period=period)
+
         for holding in holdings:
             ticker = holding.get("ticker")
             value = holding.get("current_value", 0)
             if not ticker or value <= 0:
                 continue
-            
-            try:
-                stock = yf.Ticker(ticker)
-                data = stock.history(period=period)
-                if data is not None and not data.empty and 'Close' in data.columns:
-                    returns_data[ticker] = data['Close'].pct_change().dropna()
-                    weights[ticker] = value / total_value
-            except Exception as e:
-                logger.debug(f"Failed to get returns for {ticker}: {e}")
-                continue
-        
+
+            data = histories.get(ticker)
+            if data is not None and not data.empty and 'Close' in data.columns:
+                returns_data[ticker] = data['Close'].pct_change().dropna()
+                weights[ticker] = value / total_value
+
         if not returns_data:
             return None
         
@@ -304,33 +316,39 @@ class RiskManager:
         
         return pd.Series(portfolio_returns, index=returns_df.index)
     
-    def calculate_var_cvar(self, portfolio: Dict = None, confidence_levels: List[float] = None) -> Dict:
+    def calculate_var_cvar(self, portfolio: Dict = None, confidence_levels: List[float] = None,
+                           portfolio_returns: Optional[pd.Series] = None) -> Dict:
         """
         Calculate Value at Risk (VaR) and Conditional VaR (Expected Shortfall).
-        
+
         Methods:
         1. Historical VaR: Based on actual return distribution
         2. Parametric VaR: Assumes normal distribution
         3. CVaR (Expected Shortfall): Average loss beyond VaR threshold
-        
+
         Args:
             portfolio: Portfolio data
             confidence_levels: List of confidence levels (default: [0.95, 0.99])
-        
+            portfolio_returns: Pre-computed portfolio daily returns. When the
+                caller (e.g. calculate_portfolio_risk_metrics) already computed
+                them, pass them in to avoid a redundant _get_portfolio_returns()
+                call (which re-fetches every holding's history).
+
         Returns:
             Dict with VaR and CVaR metrics at each confidence level
         """
         if portfolio is None:
             portfolio = self.load_portfolio()
-        
+
         if confidence_levels is None:
             confidence_levels = [0.95, 0.99]
-        
+
         total_value = portfolio.get("total_value", 0)
         if total_value == 0:
             total_value = sum(h.get("current_value", 0) for h in portfolio.get("holdings", []))
-        
-        portfolio_returns = self._get_portfolio_returns(portfolio)
+
+        if portfolio_returns is None:
+            portfolio_returns = self._get_portfolio_returns(portfolio)
         if portfolio_returns is None or len(portfolio_returns) < 20:
             return {"error": "Insufficient data for VaR calculation"}
         
@@ -543,9 +561,11 @@ class RiskManager:
         if portfolio_sharpe is not None:
             result["portfolio_sharpe"] = round(portfolio_sharpe, 3)
         
-        # Add VaR/CVaR
+        # Add VaR/CVaR — reuse the portfolio_returns we already computed above
+        # so _get_portfolio_returns (and its batched history fetch) runs once
+        # per report instead of three times.
         try:
-            var_metrics = self.calculate_var_cvar(portfolio)
+            var_metrics = self.calculate_var_cvar(portfolio, portfolio_returns=portfolio_returns)
             if "error" not in var_metrics:
                 result["var_cvar"] = var_metrics
         except Exception as e:

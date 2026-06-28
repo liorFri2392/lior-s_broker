@@ -9,6 +9,7 @@ import numpy as np
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 import yfinance as yf
+import market_data
 import json
 import logging
 
@@ -76,20 +77,51 @@ class Backtester:
         # and split-adjusted total-return series. Without this, dividend-paying
         # ETFs (SPY ~1.5%/yr, BND ~3%/yr) understate total return by 5–10% per
         # year of backtest.
+        #
+        # Backtests need an explicit start/end window, which the shared
+        # market_data cache keys on `period` rather than date ranges — so we
+        # issue ONE batched yf.download for the whole ticker set (instead of a
+        # sequential yf.Ticker.history() per ticker) and slice per ticker.
         data = {}
+        try:
+            raw = yf.download(
+                tickers,
+                start=start_date,
+                end=end_date,
+                auto_adjust=True,
+                group_by="ticker",
+                threads=True,
+                progress=False,
+            )
+        except Exception as e:
+            logger.warning(f"Batched download failed: {e}")
+            raw = None
+
         for ticker in tickers:
+            hist = pd.DataFrame()
             try:
-                stock = yf.Ticker(ticker)
-                hist = stock.history(start=start_date, end=end_date, auto_adjust=True)
-                if not hist.empty:
-                    data[ticker] = hist
-                    print(f"✅ Loaded {len(hist)} days of data for {ticker}")
-                else:
-                    print(f"❌ No data for {ticker}")
-            except Exception as e:
-                logger.warning(f"Failed to get data for {ticker}: {e}")
-                continue
-        
+                if raw is not None and not raw.empty:
+                    if len(tickers) == 1:
+                        hist = raw.dropna(how="all")
+                    elif isinstance(raw.columns, pd.MultiIndex) and ticker in raw.columns.get_level_values(0):
+                        hist = raw[ticker].dropna(how="all")
+            except Exception:
+                hist = pd.DataFrame()
+
+            if hist is None or hist.empty:
+                # Fallback to a per-ticker fetch for odd/delisted symbols.
+                try:
+                    hist = yf.Ticker(ticker).history(start=start_date, end=end_date, auto_adjust=True)
+                except Exception as e:
+                    logger.warning(f"Failed to get data for {ticker}: {e}")
+                    hist = pd.DataFrame()
+
+            if hist is not None and not hist.empty:
+                data[ticker] = hist
+                print(f"✅ Loaded {len(hist)} days of data for {ticker}")
+            else:
+                print(f"❌ No data for {ticker}")
+
         if not data:
             return {"error": "No data available for backtesting"}
         
@@ -103,14 +135,22 @@ class Backtester:
         
         if len(common_dates) == 0:
             return {"error": "No common dates found"}
-        
+
+        # Build ONE aligned close-price matrix (dates × tickers) up front. All
+        # strategies do their daily mark-to-market against this via vectorized
+        # matrix ops instead of per-cell .loc lookups inside a Python loop.
+        prices = pd.concat(
+            {t: data[t]['Close'] for t in data},
+            axis=1,
+        ).reindex(common_dates).ffill()
+
         # Run strategy
         if strategy == "buy_and_hold":
-            results = self._backtest_buy_and_hold(data, common_dates, allocation)
+            results = self._backtest_buy_and_hold(data, common_dates, allocation, prices)
         elif strategy == "rebalance":
-            results = self._backtest_rebalance(data, common_dates, rebalance_frequency, allocation)
+            results = self._backtest_rebalance(data, common_dates, rebalance_frequency, allocation, prices)
         elif strategy == "momentum":
-            results = self._backtest_momentum(data, common_dates)
+            results = self._backtest_momentum(data, common_dates, prices)
         else:
             return {"error": f"Unknown strategy: {strategy}"}
         
@@ -124,46 +164,51 @@ class Backtester:
         self,
         data: Dict[str, pd.DataFrame],
         dates: pd.DatetimeIndex,
-        allocation: Dict[str, float] = None
+        allocation: Dict[str, float] = None,
+        prices: pd.DataFrame = None
     ) -> Dict:
-        """Backtest buy and hold strategy."""
+        """Backtest buy and hold strategy (vectorized mark-to-market)."""
         tickers = list(data.keys())
-        
+
         # Equal allocation if not specified
         if allocation is None:
             allocation = {ticker: 1.0 / len(tickers) for ticker in tickers}
-        
+
+        if prices is None:
+            prices = pd.concat({t: data[t]['Close'] for t in data}, axis=1).reindex(dates).ffill()
+        prices = prices[tickers]
+
         cash = float(self.initial_capital)
-        positions = {}
-        prices_start = {}
         total_costs = 0.0
-        for ticker in tickers:
-            if ticker in data and len(data[ticker]) > 0:
-                prices_start[ticker] = data[ticker]['Close'].iloc[0]
-                if prices_start[ticker] > 0:
-                    target_notional = self.initial_capital * allocation.get(ticker, 0)
-                    shares = int(target_notional / prices_start[ticker])
-                    positions[ticker] = shares
-                    actual_notional = shares * prices_start[ticker]
-                    cost = self._trade_cost(actual_notional, self.slippage_bps,
-                                            self.commission_per_trade if shares > 0 else 0.0)
-                    cash -= actual_notional + cost
-                    total_costs += cost
+        prices_start = prices.iloc[0]
+        shares_vec = np.zeros(len(tickers))
+        for j, ticker in enumerate(tickers):
+            p0 = float(prices_start[ticker])
+            if p0 > 0:
+                target_notional = self.initial_capital * allocation.get(ticker, 0)
+                shares = int(target_notional / p0)
+                shares_vec[j] = shares
+                actual_notional = shares * p0
+                cost = self._trade_cost(actual_notional, self.slippage_bps,
+                                        self.commission_per_trade if shares > 0 else 0.0)
+                cash -= actual_notional + cost
+                total_costs += cost
 
-        portfolio_values = []
+        # Vectorized daily mark-to-market: (dates × tickers) @ shares + cash
+        marks = prices.to_numpy(dtype=float) @ shares_vec
+        portfolio_values_arr = marks + cash
+        portfolio_values = portfolio_values_arr.tolist()
+
+        # Daily % returns where the prior day's value was positive
         daily_returns = []
+        if len(portfolio_values_arr) > 1:
+            prev = portfolio_values_arr[:-1]
+            curr = portfolio_values_arr[1:]
+            mask = prev > 0
+            rets = np.where(mask, (curr / prev - 1) * 100, 0.0)
+            daily_returns = rets[mask].tolist()
 
-        for date in dates:
-            mark = 0.0
-            for ticker, shares in positions.items():
-                if ticker in data and date in data[ticker].index:
-                    mark += shares * data[ticker].loc[date, 'Close']
-            portfolio_value = cash + mark
-            portfolio_values.append(portfolio_value)
-            if len(portfolio_values) > 1 and portfolio_values[-2] > 0:
-                daily_return = (portfolio_value / portfolio_values[-2] - 1) * 100
-                daily_returns.append(daily_return)
-
+        positions = {ticker: int(shares_vec[j]) for j, ticker in enumerate(tickers)}
         final_value = portfolio_values[-1] if portfolio_values else self.initial_capital
         total_return = (final_value / self.initial_capital - 1) * 100
 
@@ -185,14 +230,22 @@ class Backtester:
         data: Dict[str, pd.DataFrame],
         dates: pd.DatetimeIndex,
         frequency: str,
-        allocation: Dict[str, float] = None
+        allocation: Dict[str, float] = None,
+        prices: pd.DataFrame = None
     ) -> Dict:
         """Backtest rebalancing strategy."""
         tickers = list(data.keys())
-        
+
         if allocation is None:
             allocation = {ticker: 1.0 / len(tickers) for ticker in tickers}
-        
+
+        # Aligned price matrix → positional row lookups instead of per-cell
+        # .loc inside the daily loop.
+        if prices is None:
+            prices = pd.concat({t: data[t]['Close'] for t in data}, axis=1).reindex(dates).ffill()
+        prices = prices[tickers]
+        price_mat = prices.to_numpy(dtype=float)
+
         # Determine rebalance dates. The previous version filtered by `day == 1`,
         # which misses ~35% of months because the calendar 1st is usually a
         # weekend/holiday and equity markets are closed. We instead take the
@@ -210,7 +263,8 @@ class Backtester:
         else:
             rebalance_dates = dates
         rebalance_dates = pd.DatetimeIndex(rebalance_dates)
-        
+        rebalance_set = set(rebalance_dates)
+
         # Track cash + share positions explicitly. Every trade debits cash by
         # |Δshares|·price for shares purchased (or credits for sales), AND by
         # the trading cost (slippage + commission). The portfolio value is
@@ -223,12 +277,13 @@ class Backtester:
         rebalances_executed = 0
 
         for i, date in enumerate(dates):
+            row = price_mat[i]
             current_prices = {
-                t: data[t].loc[date, 'Close']
-                for t in tickers if t in data and date in data[t].index
+                t: row[j]
+                for j, t in enumerate(tickers) if np.isfinite(row[j])
             }
 
-            if (date in rebalance_dates or i == 0) and current_prices:
+            if (date in rebalance_set or i == 0) and current_prices:
                 # Current portfolio value at pre-trade prices
                 mtm = cash + sum(positions[t] * current_prices.get(t, 0) for t in tickers)
 
@@ -282,11 +337,12 @@ class Backtester:
     def _backtest_momentum(
         self,
         data: Dict[str, pd.DataFrame],
-        dates: pd.DatetimeIndex
+        dates: pd.DatetimeIndex,
+        prices: pd.DataFrame = None
     ) -> Dict:
         """Backtest momentum strategy - buy winners, sell losers."""
         tickers = list(data.keys())
-        
+
         cash = float(self.initial_capital)
         positions = {t: 0 for t in tickers}
         portfolio_values = []
@@ -295,27 +351,30 @@ class Backtester:
         rebalances_executed = 0
         lookback_period = 20
 
+        # Aligned price matrix + fully vectorized momentum: the lookback return
+        # for every (date, ticker) is prices / prices.shift(lookback) - 1.
+        if prices is None:
+            prices = pd.concat({t: data[t]['Close'] for t in data}, axis=1).reindex(dates).ffill()
+        prices = prices[tickers]
+        price_mat = prices.to_numpy(dtype=float)
+        momentum_mat = (prices / prices.shift(lookback_period) - 1.0).to_numpy(dtype=float) * 100.0
+
         for i, date in enumerate(dates):
             if i < lookback_period:
                 continue
 
+            row = price_mat[i]
             current_prices = {
-                t: data[t].loc[date, 'Close']
-                for t in tickers if t in data and date in data[t].index
+                t: row[j]
+                for j, t in enumerate(tickers) if np.isfinite(row[j])
             }
 
-            momentum_scores = {}
-            for ticker in tickers:
-                if ticker in data and date in data[ticker].index:
-                    try:
-                        past_idx = data[ticker].index.get_loc(date) - lookback_period
-                        if past_idx >= 0:
-                            past_price = data[ticker]['Close'].iloc[past_idx]
-                            cur_price = current_prices.get(ticker, 0)
-                            if past_price > 0 and cur_price > 0:
-                                momentum_scores[ticker] = (cur_price / past_price - 1) * 100
-                    except (KeyError, IndexError):
-                        continue
+            mom_row = momentum_mat[i]
+            momentum_scores = {
+                t: mom_row[j]
+                for j, t in enumerate(tickers)
+                if np.isfinite(mom_row[j]) and np.isfinite(row[j]) and row[j] > 0
+            }
 
             if momentum_scores:
                 mtm = cash + sum(positions[t] * current_prices.get(t, 0) for t in tickers)
@@ -372,10 +431,18 @@ class Backtester:
             return {}
         
         returns = np.array(results["daily_returns"])
-        
-        # Annualized return
+
+        # Annualized return. Base the elapsed time on actual CALENDAR span
+        # (start→end), not the count of daily-return observations — momentum
+        # drops its lookback warm-up days, which would otherwise shrink the
+        # denominator and inflate the annualized figure.
         days = len(returns)
-        years = days / 252
+        try:
+            span_days = (datetime.strptime(end_date, "%Y-%m-%d")
+                         - datetime.strptime(start_date, "%Y-%m-%d")).days
+            years = span_days / 365.25 if span_days > 0 else days / 252
+        except Exception:
+            years = days / 252
         if years > 0:
             total_return = results.get("total_return", 0)
             annualized_return = ((1 + total_return / 100) ** (1 / years) - 1) * 100
@@ -472,7 +539,7 @@ if __name__ == "__main__":
         start_date="2020-01-01",
         end_date="2023-12-31",
         strategy="buy_and_hold",
-        allocation={"SPY": 0.5, "VWO": 0.3, "BND": 0.2}
+        allocation={"SPY": 0.5, "VXUS": 0.3, "BND": 0.2}
     )
     
     backtester.print_results(results)

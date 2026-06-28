@@ -18,6 +18,7 @@ import pandas as pd
 import numpy as np
 from newsapi import NewsApiClient
 from advanced_analysis import AdvancedAnalyzer
+import market_data
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -44,127 +45,35 @@ logger = logging.getLogger(__name__)
 
 class PortfolioAnalyzer:
     """Advanced portfolio analysis system with news, trends, and statistical analysis."""
-    
+
+    # 80/20 strategy ETF universes (single source of truth - referenced everywhere
+    # instead of redefining these literals in each method).
+    CORE_ETFS = ["SPY", "VOO", "IVV", "VXUS", "VEA"]
+    BOND_ETFS = ["BND", "AGG", "TIP", "SCHP", "VTIP"]
+    SATELLITE_ETFS = ["IWM", "VB", "XLK", "VGT", "VWO", "EEM", "XLV", "VHT"]
+
     def __init__(self, portfolio_file: str = "portfolio.json"):
         self.portfolio_file = portfolio_file
         self.news_api_key = os.getenv("NEWS_API_KEY", "")
         self.alpha_vantage_key = os.getenv("ALPHA_VANTAGE_KEY", "")
-        self.exchange_rate_usd_ils = 1.0 / 0.34  # ILS per USD (~2.94 when 1 ILS = 0.34 USD)
-        self.exchange_rate_cache_time = None  # Cache for exchange rate
-        self.exchange_rate_cache_timeout = timedelta(minutes=30)  # Refresh FX more often than stock prices
-        self.price_cache = {}  # Cache for prices: {ticker: (price, timestamp)}
-        self.market_data_cache = {}  # Cache for market data: {ticker: (data, timestamp)}
+        # Price / market-data / FX caching is now owned by the process-wide
+        # market_data singleton (batched, thread-safe, DST-correct, persists to
+        # .cache.json). Only news caching remains local (not provided there).
         self.news_cache = {}  # Cache for news: {ticker: (sentiment, timestamp)}
         self.cache_timeout = timedelta(hours=4)   # Cache when market closed: 4 hours for stability
         self.cache_timeout_market_open = timedelta(minutes=60)  # When market open: 60 min to reduce noise
-        self.cache_file = ".cache.json"  # Persistent cache file
         self.rebalancing_cooldown_days = 30  # Don't recommend rebalancing for underperformers more than once per 30 days
         self.advanced_analyzer = AdvancedAnalyzer()  # Advanced analysis module
-        self._load_cache()  # Load persistent cache on init
-    
-    def _load_cache(self):
-        """Load persistent cache from file."""
-        try:
-            if os.path.exists(self.cache_file):
-                with open(self.cache_file, 'r', encoding='utf-8') as f:
-                    cache_data = json.load(f)
-                    # Load price cache (only valid entries)
-                    now = datetime.now()
-                    price_cache_data = cache_data.get('price_cache', {})
-                    if price_cache_data and isinstance(price_cache_data, dict):
-                        for ticker, data in price_cache_data.items():
-                            if data and isinstance(data, dict) and 'timestamp' in data and 'price' in data:
-                                try:
-                                    cached_time = datetime.fromisoformat(data['timestamp'])
-                                    # Use same timeout as runtime (4h closed / 60min open - we use 4h when loading)
-                                    if now - cached_time < self.cache_timeout:
-                                        self.price_cache[ticker] = (data['price'], cached_time)
-                                except (ValueError, KeyError) as e:
-                                    logger.debug(f"Failed to load cache entry for {ticker}: {e}")
-                                    continue
-                    # Load exchange rate cache
-                    ex_data = cache_data.get('exchange_rate')
-                    if ex_data and isinstance(ex_data, dict) and 'timestamp' in ex_data and 'rate' in ex_data:
-                        try:
-                            cached_time = datetime.fromisoformat(ex_data['timestamp'])
-                            if now - cached_time < self.cache_timeout:
-                                self.exchange_rate_usd_ils = ex_data['rate']
-                                self.exchange_rate_cache_time = cached_time
-                        except (ValueError, KeyError) as e:
-                            logger.debug(f"Failed to load exchange rate cache: {e}")
-                    logger.info(f"Loaded cache from {self.cache_file}")
-        except Exception as e:
-            logger.warning(f"Failed to load cache: {e}")
-    
-    def _save_cache(self):
-        """Save cache to persistent file."""
-        try:
-            cache_data = {
-                'price_cache': {
-                    ticker: {
-                        'price': price,
-                        'timestamp': timestamp.isoformat()
-                    }
-                    for ticker, (price, timestamp) in self.price_cache.items()
-                },
-                'exchange_rate': {
-                    'rate': self.exchange_rate_usd_ils,
-                    'timestamp': self.exchange_rate_cache_time.isoformat() if self.exchange_rate_cache_time else None
-                } if self.exchange_rate_cache_time else None
-            }
-            with open(self.cache_file, 'w', encoding='utf-8') as f:
-                json.dump(cache_data, f, indent=2)
-        except Exception as e:
-            logger.warning(f"Failed to save cache: {e}")
-    
+
     @staticmethod
     def normalize_ils_per_usd(raw_rate: float) -> float:
-        """
-        Return how many ILS equal 1 USD.
-        Quotes like '1 ILS = 0.34 USD' are USD-per-ILS (< 1) and must be inverted.
-        Quotes like '1 USD = 2.94 ILS' are already ILS-per-USD (>= 1).
-        """
-        if raw_rate <= 0:
-            return 1.0 / 0.34
-        if raw_rate < 1.0:
-            return 1.0 / raw_rate
-        return raw_rate
+        """Return how many ILS equal 1 USD (delegates to the shared market layer)."""
+        return market_data.market.normalize_ils_per_usd(raw_rate)
 
     def get_exchange_rate(self) -> float:
         """Get ILS per 1 USD (for USD→ILS multiply, for ILS→USD divide)."""
-        override = os.getenv("ILS_PER_USD") or os.getenv("EXCHANGE_RATE_ILS_PER_USD")
-        if override:
-            try:
-                rate = self.normalize_ils_per_usd(float(override))
-                self.exchange_rate_usd_ils = rate
-                return rate
-            except ValueError:
-                logger.warning(f"Invalid ILS_PER_USD override: {override!r}")
+        return market_data.get_exchange_rate()
 
-        now = datetime.now()
-
-        if (
-            self.exchange_rate_cache_time
-            and now - self.exchange_rate_cache_time < self.exchange_rate_cache_timeout
-        ):
-            return self.exchange_rate_usd_ils
-
-        for symbol in ("ILSUSD=X", "USDILS=X"):
-            try:
-                hist = yf.Ticker(symbol).history(period="1d")
-                if not hist.empty:
-                    raw = float(hist["Close"].iloc[-1])
-                    rate = self.normalize_ils_per_usd(raw)
-                    self.exchange_rate_usd_ils = rate
-                    self.exchange_rate_cache_time = now
-                    self._save_cache()
-                    return rate
-            except Exception as e:
-                logger.debug(f"Failed to fetch {symbol}: {e}")
-
-        logger.warning("Failed to fetch exchange rate, using default (1 ILS = 0.34 USD)")
-        return self.exchange_rate_usd_ils
-        
     def load_portfolio(self) -> Dict:
         """Load portfolio from JSON file."""
         if os.path.exists(self.portfolio_file):
@@ -321,142 +230,20 @@ class PortfolioAnalyzer:
             return False
     
     def is_market_open(self) -> Tuple[bool, str]:
-        """Check if US stock market (NYSE/NASDAQ) is currently open."""
-        try:
-            # Get current time in Eastern Time (ET)
-            now_utc = datetime.now(timezone.utc)
-            # Convert to ET (UTC-5 or UTC-4 depending on DST)
-            # Simple approximation: ET is UTC-5
-            et_offset = timedelta(hours=5)
-            now_et = now_utc - et_offset
-            
-            # Market hours: 9:30 AM - 4:00 PM ET, Monday-Friday
-            market_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
-            market_close = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
-            
-            # Check if it's a weekday (Monday=0, Sunday=6)
-            is_weekday = now_et.weekday() < 5
-            
-            if is_weekday and market_open <= now_et <= market_close:
-                return True, "Market is OPEN - Prices are real-time"
-            else:
-                if not is_weekday:
-                    return False, "Market is CLOSED - Weekend (Prices from last close)"
-                else:
-                    return False, "Market is CLOSED - After hours (Prices from last close)"
-        except Exception as e:
-            logger.warning(f"Failed to determine market status: {e}")
-            return None, "Unable to determine market status"
-    
+        """Check if US stock market (NYSE/NASDAQ) is currently open (DST-correct)."""
+        return market_data.is_market_open()
+
     def get_current_prices(self, tickers: List[str]) -> Tuple[Dict[str, float], Optional[bool], str]:
-        """Get current prices for tickers with caching and parallel fetching.
-        Returns: (prices_dict, market_status, market_message)
-        - prices_dict: Dictionary of ticker -> price
-        - market_status: True if market is open, False if closed, None if unknown
-        - market_message: Human-readable market status message"""
-        prices = {}
-        uncached_tickers = []
-        market_status, market_message = self.is_market_open()
-        
-        # Check cache first
-        now = datetime.now()
-        for ticker in tickers:
-            if ticker in self.price_cache:
-                cached_data, cached_time = self.price_cache[ticker]
-                # When market open: 60 min cache for stability. When closed: 4 hours.
-                cache_timeout = self.cache_timeout_market_open if market_status else self.cache_timeout
-                if now - cached_time < cache_timeout:
-                    prices[ticker] = cached_data
-                else:
-                    uncached_tickers.append(ticker)
-            else:
-                uncached_tickers.append(ticker)
-        
-        # Fetch uncached prices in parallel
-        if uncached_tickers:
-            def fetch_price(ticker):
-                try:
-                    stock = yf.Ticker(ticker)
-                    
-                    # Try to get real-time price first (if market is open)
-                    if market_status:
-                        try:
-                            # Use fast_info for real-time data
-                            if hasattr(stock, 'fast_info') and stock.fast_info is not None:
-                                fast_info = stock.fast_info
-                                if hasattr(fast_info, 'get'):
-                                    price = float(fast_info.get('lastPrice', 0))
-                                    if price > 0:
-                                        self.price_cache[ticker] = (price, now)
-                                        self._save_cache()  # Save to persistent cache
-                                        return ticker, price, True  # True = real-time
-                        except Exception as e:
-                            logger.debug(f"Failed to get real-time price for {ticker}: {e}")
-                            pass
-                    
-                    # Fallback to historical data (last close)
-                    try:
-                        info = stock.history(period="1d")
-                        if info is not None and not info.empty and 'Close' in info.columns:
-                            price = float(info['Close'].iloc[-1])
-                            if price > 0:
-                                self.price_cache[ticker] = (price, now)
-                                self._save_cache()  # Save to persistent cache
-                                return ticker, price, False  # False = last close
-                    except Exception as e:
-                        logger.debug(f"Failed to get historical price for {ticker}: {e}")
-                    
-                    # Last resort: try fast_info again
-                    try:
-                        if hasattr(stock, 'fast_info') and stock.fast_info is not None:
-                            fast_info = stock.fast_info
-                            if hasattr(fast_info, 'get'):
-                                price = float(fast_info.get('lastPrice', 0))
-                                if price > 0:
-                                    self.price_cache[ticker] = (price, now)
-                                    self._save_cache()  # Save to persistent cache
-                                    return ticker, price, False
-                    except Exception as e:
-                        logger.debug(f"Failed to get fallback price for {ticker}: {e}")
-                    
-                    return ticker, None, False
-                except Exception as e:
-                    logger.warning(f"Could not fetch price for {ticker}: {e}")
-                    return ticker, None, False
-            
-            with ThreadPoolExecutor(max_workers=5) as executor:
-                futures = [executor.submit(fetch_price, ticker) for ticker in uncached_tickers]
-                for future in as_completed(futures):
-                    ticker, price, is_realtime = future.result()
-                    if price is not None:
-                        prices[ticker] = price
-        
-        return prices, market_status, market_message
-    
+        """Get current prices for tickers.
+        Delegates to the shared market layer, which batches (one yf.download for
+        all uncached tickers), caches, and persists thread-safely.
+        Returns: (prices_dict, market_status, market_message)"""
+        return market_data.get_prices(tickers)
+
     def get_market_data(self, ticker: str, period: str = "1y") -> pd.DataFrame:
-        """Get historical market data for analysis with caching."""
-        now = datetime.now()
-        cache_key = f"{ticker}_{period}"
-        
-        # Check cache first
-        if cache_key in self.market_data_cache:
-            cached_data, cached_time = self.market_data_cache[cache_key]
-            if now - cached_time < self.cache_timeout:
-                return cached_data
-        
-        # Fetch new data
-        try:
-            stock = yf.Ticker(ticker)
-            data = stock.history(period=period)
-            if data is not None and not data.empty:
-                self.market_data_cache[cache_key] = (data, now)
-                return data
-            else:
-                return pd.DataFrame()
-        except Exception as e:
-            logger.warning(f"Failed to fetch market data for {ticker}: {e}")
-            return pd.DataFrame()
-    
+        """Get historical market data for analysis (cached by the shared layer)."""
+        return market_data.get_history(ticker, period=period)
+
     def calculate_technical_indicators(self, data: pd.DataFrame) -> Dict:
         """Calculate technical indicators."""
         if data is None or data.empty or len(data) < 20:
@@ -531,9 +318,10 @@ class PortfolioAnalyzer:
         # Beta vs SPY. Use consistent ddof and return NaN on failure so downstream
         # consumers can gate explicitly instead of seeing a silent default of 1.0.
         try:
-            spy = yf.Ticker("SPY")
             data_period = "1y" if len(data) < 252 else "2y" if len(data) < 504 else "5y"
-            spy_data = spy.history(period=data_period, auto_adjust=True)
+            # Cached via the shared layer so SPY is downloaded at most once per
+            # period/TTL instead of once per holding being analyzed.
+            spy_data = market_data.get_history("SPY", period=data_period, auto_adjust=True)
             if spy_data is not None and not spy_data.empty and 'Close' in spy_data.columns:
                 asset_ret_df = returns.to_frame(name='asset')
                 spy_ret_df = spy_data['Close'].pct_change().dropna().to_frame(name='spy')
@@ -659,8 +447,7 @@ class PortfolioAnalyzer:
             if self.news_api_key:
                 try:
                     newsapi = NewsApiClient(api_key=self.news_api_key)
-                    stock = yf.Ticker(ticker)
-                    info = stock.info
+                    info = market_data.get_info(ticker)
                     company_name = info.get('longName', ticker)
                     
                     articles = newsapi.get_everything(
@@ -933,10 +720,9 @@ class PortfolioAnalyzer:
         
         exclude_tickers = exclude_tickers or []
         advisor = DepositAdvisor(self.portfolio_file)
-        
-        # Define Core ETFs (priority)
-        core_etfs = ["SPY", "VOO", "IVV", "VXUS", "VEA"]
-        # Define Satellite ETFs (safe growth) - Expanded for better coverage
+
+        core_etfs = self.CORE_ETFS
+        # Expanded satellite universe (broader than SATELLITE_ETFS) for candidate search.
         satellite_etfs = [
             # Core Satellite (essential diversification)
             "IWM", "VB", "XLK", "VGT", "VWO", "EEM", "XLV", "VHT",  # Small Cap, Tech, Emerging, Healthcare
@@ -952,9 +738,8 @@ class PortfolioAnalyzer:
             # Sector diversification
             "XLF", "VFH", "XLE", "VDE", "XLY", "VCR"  # Financial, Energy, Consumer
         ]
-        # Define Bond ETFs (protection)
-        bond_etfs = ["BND", "AGG", "TIP", "SCHP", "VTIP"]
-        
+        bond_etfs = self.BOND_ETFS
+
         # Exclude high-risk categories
         excluded_categories = ["LEVERAGED_2X", "LEVERAGED_3X", "LEVERAGED_INVERSE", "CRYPTO"]
         excluded_from_categories = []
@@ -983,54 +768,58 @@ class PortfolioAnalyzer:
                 etf not in excluded_from_categories):
                 candidate_etfs.append(etf)
         
-        # Analyze candidates in parallel
+        core_upper = {e.upper() for e in core_etfs}
+        bond_upper = {e.upper() for e in bond_etfs}
+
+        # Limit to top candidates (prioritize Core and Bonds), then fetch all
+        # their prices in ONE batched request via the shared layer.
+        candidates_to_analyze = candidate_etfs[:10]
+        candidate_prices, _, _ = market_data.get_prices(candidates_to_analyze)
+
         def analyze_etf_candidate(etf):
             try:
-                stock = yf.Ticker(etf)
-                hist = stock.history(period="1d")
-                if not hist.empty:
-                    price = float(hist['Close'].iloc[-1])
-                    shares = int(amount_usd / price / 3)  # Divide by 3 for 3 recommendations
-                    if shares > 0:
-                        # Scoring based on category
-                        score = 60  # Base score
-                        info = stock.info
-                        
-                        # Boost for Core and Bonds
-                        if etf.upper() in [e.upper() for e in core_etfs]:
-                            score += 20
-                            category = "CORE"
-                        elif etf.upper() in [e.upper() for e in bond_etfs]:
-                            score += 25
-                            category = "BONDS"
-                        else:
-                            category = "SATELLITE"
-                        
-                        if info.get('annualReportExpenseRatio', 1) < 0.001:
-                            score += 10
-                        
-                        return {
-                            "ticker": etf,
-                            "name": info.get('longName', etf),
-                            "shares": shares,
-                            "price": price,
-                            "allocation_amount": shares * price,
-                            "score": score,
-                            "recommendation": "BUY",
-                            "reasons": [
-                                f"{category} holding" if category else "Diversification",
-                                "Low expense ratio" if info.get('annualReportExpenseRatio', 1) < 0.001 else "Good diversification"
-                            ],
-                            "category": category
-                        }
+                price = candidate_prices.get(etf)
+                if not price or price <= 0:
+                    return None
+                shares = int(amount_usd / price / 3)  # Divide by 3 for 3 recommendations
+                if shares > 0:
+                    # Scoring based on category
+                    score = 60  # Base score
+                    info = market_data.get_info(etf)
+
+                    # Boost for Core and Bonds
+                    if etf.upper() in core_upper:
+                        score += 20
+                        category = "CORE"
+                    elif etf.upper() in bond_upper:
+                        score += 25
+                        category = "BONDS"
+                    else:
+                        category = "SATELLITE"
+
+                    if info.get('annualReportExpenseRatio', 1) < 0.001:
+                        score += 10
+
+                    return {
+                        "ticker": etf,
+                        "name": info.get('longName', etf),
+                        "shares": shares,
+                        "price": price,
+                        "allocation_amount": shares * price,
+                        "score": score,
+                        "recommendation": "BUY",
+                        "reasons": [
+                            f"{category} holding" if category else "Diversification",
+                            "Low expense ratio" if info.get('annualReportExpenseRatio', 1) < 0.001 else "Good diversification"
+                        ],
+                        "category": category
+                    }
             except Exception as e:
                 logger.debug(f"Failed to analyze ETF candidate {etf}: {e}")
                 pass
             return None
-        
+
         recommendations = []
-        # Limit to top candidates (prioritize Core and Bonds)
-        candidates_to_analyze = candidate_etfs[:10]
         with ThreadPoolExecutor(max_workers=min(5, len(candidates_to_analyze))) as executor:
             futures = [executor.submit(analyze_etf_candidate, etf) for etf in candidates_to_analyze]
             for future in as_completed(futures):
@@ -1058,30 +847,28 @@ class PortfolioAnalyzer:
             "recommendations": []
         }
         
-        # Define Core ETFs (SPY, VOO, VXUS, etc.)
-        core_etfs = ["SPY", "VOO", "IVV", "VXUS", "VEA"]
-        # Define Bond ETFs
-        bond_etfs = ["BND", "AGG", "TIP", "SCHP", "VTIP"]
-        
+        core_upper = {e.upper() for e in self.CORE_ETFS}
+        bond_upper = {e.upper() for e in self.BOND_ETFS}
+
         total_value = portfolio_metrics["total_value"]
         if total_value == 0:
             return balance_check
-        
+
         # Calculate current allocation
         stocks_value = 0
         bonds_value = 0
         core_value = 0
         satellite_value = 0
-        
+
         for analysis in analyses:
             ticker = analysis["ticker"]
             value = analysis["current_value"]
-            
-            if ticker.upper() in [e.upper() for e in bond_etfs]:
+
+            if ticker.upper() in bond_upper:
                 bonds_value += value
             else:
                 stocks_value += value
-                if ticker.upper() in [e.upper() for e in core_etfs]:
+                if ticker.upper() in core_upper:
                     core_value += value
                 else:
                     satellite_value += value
@@ -1176,136 +963,119 @@ class PortfolioAnalyzer:
         if total_value == 0:
             return recommendations
         
-        # Define target ETFs
-        core_etfs = ["SPY", "VOO", "IVV", "VXUS", "VEA"]
-        bond_etfs = ["BND", "AGG", "TIP", "SCHP", "VTIP"]
-        
+        core_etfs = self.CORE_ETFS
+        bond_etfs = self.BOND_ETFS
+
         # Check what we need
         target_bonds = total_value * 0.20
         current_bonds = total_value * (bonds_percent / 100)
         needed_bonds = max(0, target_bonds - current_bonds)
-        
+
         target_core = total_value * 0.50
         current_core = total_value * (core_percent / 100)
         needed_core = max(0, target_core - current_core)
-        
+
         target_satellite = total_value * 0.30
         current_satellite = total_value * (satellite_percent / 100)
         needed_satellite = max(0, target_satellite - current_satellite)
-        
+
         # Get current holdings
         current_holdings = [h.get("ticker", "").upper() for h in holdings_analysis]
-        
+
+        # Batch-fetch all candidate prices up front (one request for bonds + core).
+        candidate_prices, _, _ = market_data.get_prices(bond_etfs + core_etfs)
+
         # Recommend bonds if needed (priority)
         if needed_bonds > 100:
-            # Try to get price for bond ETFs
-            import yfinance as yf
             remaining_needed = needed_bonds
             for bond_etf in bond_etfs:
                 if remaining_needed <= 0 or len(recommendations) >= 3:
                     break
                 if bond_etf.upper() not in current_holdings or needed_bonds > 500:
-                    try:
-                        stock = yf.Ticker(bond_etf)
-                        hist = stock.history(period="1d")
-                        if not hist.empty:
-                            price = float(hist['Close'].iloc[-1])
-                            # Recommend based on what's needed, but note cash limitation
-                            amount_to_recommend = min(remaining_needed, cash_available) if cash_available > 0 else remaining_needed
-                            shares = int(amount_to_recommend / price) if price > 0 else 0
-                            if shares > 0:
-                                actual_amount = shares * price
-                                reason = f"Add bonds to reach 20% target (currently {bonds_percent:.1f}%)"
-                                if cash_available < needed_bonds:
-                                    reason += f" | Need ${needed_bonds:,.2f} total, but only ${cash_available:,.2f} cash available"
-                                recommendations.append({
-                                    "ticker": bond_etf,
-                                    "shares": shares,
-                                    "price": price,
-                                    "amount": actual_amount,
-                                    "amount_ils": actual_amount * exchange_rate,
-                                    "reason": reason,
-                                    "needed_total": needed_bonds,
-                                    "cash_available": cash_available
-                                })
-                                remaining_needed -= actual_amount
-                    except Exception as e:
-                        logger.debug(f"Failed to get price for {bond_etf}: {e}")
-                        continue
-        
+                    price = candidate_prices.get(bond_etf)
+                    if price and price > 0:
+                        # Recommend based on what's needed, but note cash limitation
+                        amount_to_recommend = min(remaining_needed, cash_available) if cash_available > 0 else remaining_needed
+                        shares = int(amount_to_recommend / price)
+                        if shares > 0:
+                            actual_amount = shares * price
+                            reason = f"Add bonds to reach 20% target (currently {bonds_percent:.1f}%)"
+                            if cash_available < needed_bonds:
+                                reason += f" | Need ${needed_bonds:,.2f} total, but only ${cash_available:,.2f} cash available"
+                            recommendations.append({
+                                "ticker": bond_etf,
+                                "shares": shares,
+                                "price": price,
+                                "amount": actual_amount,
+                                "amount_ils": actual_amount * exchange_rate,
+                                "reason": reason,
+                                "needed_total": needed_bonds,
+                                "cash_available": cash_available
+                            })
+                            remaining_needed -= actual_amount
+
         # Recommend core if needed (only if we have cash left after bonds)
         remaining_cash = cash_available - sum(r.get("amount", 0) for r in recommendations)
         if needed_core > 100 and remaining_cash > 100:
-            import yfinance as yf
             remaining_needed = needed_core
             for core_etf in core_etfs:
                 if remaining_needed <= 0 or len(recommendations) >= 5:
                     break
                 if core_etf.upper() not in current_holdings or needed_core > 500:
-                    try:
-                        stock = yf.Ticker(core_etf)
-                        hist = stock.history(period="1d")
-                        if not hist.empty:
-                            price = float(hist['Close'].iloc[-1])
-                            amount_to_recommend = min(remaining_needed, remaining_cash)
-                            shares = int(amount_to_recommend / price) if price > 0 else 0
-                            if shares > 0:
-                                actual_amount = shares * price
-                                reason = f"Increase core holdings to reach 50% target (currently {core_percent:.1f}%)"
-                                if remaining_cash < needed_core:
-                                    reason += f" | Need ${needed_core:,.2f} total, but only ${remaining_cash:,.2f} cash available"
-                                recommendations.append({
-                                    "ticker": core_etf,
-                                    "shares": shares,
-                                    "price": price,
-                                    "amount": actual_amount,
-                                    "amount_ils": actual_amount * exchange_rate,
-                                    "reason": reason,
-                                    "needed_total": needed_core,
-                                    "cash_available": remaining_cash
-                                })
-                                remaining_needed -= actual_amount
-                                remaining_cash -= actual_amount
-                    except Exception as e:
-                        logger.debug(f"Failed to get price for {core_etf}: {e}")
-                        continue
-        
+                    price = candidate_prices.get(core_etf)
+                    if price and price > 0:
+                        amount_to_recommend = min(remaining_needed, remaining_cash)
+                        shares = int(amount_to_recommend / price)
+                        if shares > 0:
+                            actual_amount = shares * price
+                            reason = f"Increase core holdings to reach 50% target (currently {core_percent:.1f}%)"
+                            if remaining_cash < needed_core:
+                                reason += f" | Need ${needed_core:,.2f} total, but only ${remaining_cash:,.2f} cash available"
+                            recommendations.append({
+                                "ticker": core_etf,
+                                "shares": shares,
+                                "price": price,
+                                "amount": actual_amount,
+                                "amount_ils": actual_amount * exchange_rate,
+                                "reason": reason,
+                                "needed_total": needed_core,
+                                "cash_available": remaining_cash
+                            })
+                            remaining_needed -= actual_amount
+                            remaining_cash -= actual_amount
+
         return recommendations
     
     def _generate_bond_recommendations(self, amount_usd: float, current_tickers: List[str], exchange_rate: float) -> List[Dict]:
         """Generate bond ETF recommendations for a specific amount."""
-        bond_etfs = ["BND", "AGG", "TIP", "SCHP", "VTIP"]
+        bond_etfs = self.BOND_ETFS
         recommendations = []
-        
-        import yfinance as yf
+
+        current_upper = {t.upper() for t in current_tickers}
+        # One batched price fetch for all bond ETFs.
+        bond_prices, _, _ = market_data.get_prices(bond_etfs)
         remaining_amount = amount_usd
-        
+
         for bond_etf in bond_etfs:
             if remaining_amount <= 0 or len(recommendations) >= 3:
                 break
-            
-            if bond_etf.upper() not in [t.upper() for t in current_tickers]:
-                try:
-                    stock = yf.Ticker(bond_etf)
-                    hist = stock.history(period="1d")
-                    if not hist.empty:
-                        price = float(hist['Close'].iloc[-1])
-                        shares = int(remaining_amount / price) if price > 0 else 0
-                        if shares > 0:
-                            actual_amount = shares * price
-                            recommendations.append({
-                                "ticker": bond_etf,
-                                "shares": shares,
-                                "price": price,
-                                "allocation_amount": actual_amount,
-                                "name": bond_etf,
-                                "reasons": [f"Rebalancing: Buy bonds to reach 25% target"]
-                            })
-                            remaining_amount -= actual_amount
-                except Exception as e:
-                    logger.debug(f"Failed to get price for {bond_etf}: {e}")
-                    continue
-        
+
+            if bond_etf.upper() not in current_upper:
+                price = bond_prices.get(bond_etf)
+                if price and price > 0:
+                    shares = int(remaining_amount / price)
+                    if shares > 0:
+                        actual_amount = shares * price
+                        recommendations.append({
+                            "ticker": bond_etf,
+                            "shares": shares,
+                            "price": price,
+                            "allocation_amount": actual_amount,
+                            "name": bond_etf,
+                            "reasons": [f"Rebalancing: Buy bonds to reach 25% target"]
+                        })
+                        remaining_amount -= actual_amount
+
         return recommendations
     
     def find_better_alternatives(self, holdings_analysis: List[Dict], portfolio_metrics: Dict) -> List[Dict]:
@@ -1325,9 +1095,9 @@ class PortfolioAnalyzer:
         total_value = portfolio_metrics.get("total_value", 0)
         
         # Define categories for comparison
-        core_etfs = ["SPY", "VOO", "IVV", "VXUS", "VEA"]
-        bond_etfs = ["BND", "AGG", "TIP", "SCHP", "VTIP"]
-        
+        core_etfs = self.CORE_ETFS
+        bond_etfs = self.BOND_ETFS
+
         # Get all satellite categories from advisor
         satellite_categories = [
             "US_SMALL_CAP", "TECHNOLOGY", "HEALTHCARE", "EMERGING_MARKETS",
@@ -1450,32 +1220,36 @@ class PortfolioAnalyzer:
         
         return replacement_opportunities
     
-    def find_concentration_opportunities(self, holdings_analysis: List[Dict], portfolio_metrics: Dict) -> List[Dict]:
+    def find_concentration_opportunities(self, holdings_analysis: List[Dict], portfolio_metrics: Dict, emerging_trends: List[Dict] = None) -> List[Dict]:
         """
         Find replacement opportunities based on:
         1. Over-concentration (ETF > 30% of portfolio)
         2. Hot sectors (emerging trends with strong momentum)
         3. Portfolio balance (Core too low, Satellite too high)
+
+        ``emerging_trends`` may be passed in (computed once by the caller) to
+        avoid recomputing the expensive trend sweep; if None it is computed here.
         """
         from deposit_advisor import DepositAdvisor
-        
+
         replacement_opportunities = []
         advisor = DepositAdvisor(self.portfolio_file)
-        
+
         # Get current portfolio
         portfolio = self.load_portfolio()
         current_tickers = [h.get("ticker", "").upper() for h in portfolio.get("holdings", [])]
         total_value = portfolio_metrics.get("total_value", 0)
-        
-        # Get emerging trends
-        excluded_categories = ["LEVERAGED_2X", "LEVERAGED_3X", "LEVERAGED_INVERSE", "CRYPTO"]
-        emerging_trends = advisor.detect_emerging_trends(excluded_categories)
+
+        # Get emerging trends (reuse caller's computation when provided)
+        if emerging_trends is None:
+            excluded_categories = ["LEVERAGED_2X", "LEVERAGED_3X", "LEVERAGED_INVERSE", "CRYPTO"]
+            emerging_trends = advisor.detect_emerging_trends(excluded_categories)
         hot_sectors = {t.get("category", ""): t for t in emerging_trends[:5]}  # Top 5 hot sectors
-        
+
         # Calculate current portfolio balance
-        core_etfs = ["SPY", "VOO", "IVV", "VXUS", "VEA"]
-        bond_etfs = ["BND", "AGG", "TIP", "SCHP", "VTIP"]
-        
+        core_etfs = self.CORE_ETFS
+        bond_etfs = self.BOND_ETFS
+
         core_value = 0
         satellite_value = 0
         bonds_value = 0
@@ -1782,9 +1556,9 @@ class PortfolioAnalyzer:
             advisor = DepositAdvisor(self.portfolio_file)
             
             # Define categories for comparison
-            core_etfs = ["SPY", "VOO", "IVV", "VXUS", "VEA"]
-            satellite_etfs = ["IWM", "VB", "XLK", "VGT", "VWO", "EEM", "XLV", "VHT"]
-            bond_etfs = ["BND", "AGG", "TIP", "SCHP", "VTIP"]
+            core_etfs = self.CORE_ETFS
+            satellite_etfs = self.SATELLITE_ETFS
+            bond_etfs = self.BOND_ETFS
             
             for underperformer in underperforming_holdings:
                 ticker = underperformer["ticker"]
@@ -1926,17 +1700,20 @@ class PortfolioAnalyzer:
                         portfolio = self.load_portfolio()
                         from tax_analyzer import TaxAnalyzer
                         tax_analyzer = TaxAnalyzer()
-                        
-                        core_etfs = ["SPY", "VOO", "IVV", "VXUS", "VEA"]
-                        bond_etfs = ["BND", "AGG", "TIP", "SCHP", "VTIP"]
-                        
+                        # Use the live FX rate so tax ILS figures are accurate.
+                        tax_exchange_rate = market_data.get_exchange_rate()
+                        tax_analyzer.exchange_rate_usd_ils = tax_exchange_rate
+
+                        core_upper = {c.upper() for c in self.CORE_ETFS}
+                        bond_upper = {b.upper() for b in self.BOND_ETFS}
+
                         # Analyze stocks for tax implications
                         stocks_to_sell = []
                         for analysis in analyses:
                             ticker = analysis["ticker"]
-                            if ticker.upper() not in [b.upper() for b in bond_etfs]:
-                                is_core = ticker.upper() in [c.upper() for c in core_etfs]
-                                
+                            if ticker.upper() not in bond_upper:
+                                is_core = ticker.upper() in core_upper
+
                                 # Find holding info for tax calculation
                                 holding = next((h for h in portfolio.get("holdings", []) if h.get("ticker") == ticker), None)
                                 # Ensure purchase_date is not None
@@ -1956,7 +1733,8 @@ class PortfolioAnalyzer:
                                     purchase_price=cost_basis,
                                     sale_price=analysis["current_price"],
                                     quantity=analysis["quantity"],
-                                    purchase_date=purchase_date
+                                    purchase_date=purchase_date,
+                                    exchange_rate=tax_exchange_rate
                                 )
                                 
                                 # Calculate gain/loss
@@ -2112,12 +1890,8 @@ class PortfolioAnalyzer:
         else:
             print("   📅 Using LAST CLOSE prices")
         
-        # Show cache usage info
-        cache_used = self.cache_timeout_market_open if market_status else self.cache_timeout
-        cached_prices = sum(1 for t in tickers if t in self.price_cache and
-                           datetime.now() - self.price_cache[t][1] < cache_used)
-        if cached_prices > 0:
-            print(f"   💾 Using cached prices for {cached_prices}/{len(tickers)} tickers (cache: {'60 min' if market_status else '4 hr'})")
+        # Price caching is handled by the shared market_data layer.
+        print(f"   💾 Prices served via shared cache (window: {'60 min' if market_status else '4 hr'})")
         print()
         
         # Create DepositAdvisor once (to avoid loading cache multiple times)
@@ -2179,12 +1953,17 @@ class PortfolioAnalyzer:
                         "reasons": [rec["reason"]]
                     })
         
-        # Update portfolio with current values
+        # Update portfolio with current values.
+        # analyses is reordered by the ThreadPool (as_completed) and filtered
+        # (zero-price holdings dropped), so we must match by ticker - a positional
+        # analyses[i] -> holdings[i] write would assign prices to the wrong holding.
         portfolio["total_value"] = portfolio_metrics["total_value"]
-        for i, analysis in enumerate(analyses):
-            if i < len(portfolio["holdings"]):
-                portfolio["holdings"][i]["last_price"] = analysis["current_price"]
-                portfolio["holdings"][i]["current_value"] = analysis["current_value"]
+        analysis_by_ticker = {a["ticker"]: a for a in analyses}
+        for holding in portfolio["holdings"]:
+            analysis = analysis_by_ticker.get(holding["ticker"])
+            if analysis:
+                holding["last_price"] = analysis["current_price"]
+                holding["current_value"] = analysis["current_value"]
         
         # Save updated portfolio
         self.save_portfolio(portfolio)
@@ -2194,7 +1973,8 @@ class PortfolioAnalyzer:
         replacement_opportunities = self.find_better_alternatives(analyses, portfolio_metrics)
         
         # Also check for over-concentration and hot sector opportunities
-        concentration_opportunities = self.find_concentration_opportunities(analyses, portfolio_metrics)
+        # (reuse the emerging_trends computed at the top of analyze() - no recompute).
+        concentration_opportunities = self.find_concentration_opportunities(analyses, portfolio_metrics, emerging_trends=emerging_trends)
         if concentration_opportunities:
             replacement_opportunities.extend(concentration_opportunities)
         
@@ -2271,78 +2051,82 @@ class PortfolioAnalyzer:
             else:
                 print("Please enter 'yes' or 'no' (כן/לא)")
     
+    def _apply_buy(self, portfolio: Dict, ticker: str, shares: int, price: float):
+        """Add ``shares`` of ``ticker`` at ``price`` to the portfolio, merging into
+        an existing holding (weighted-average cost basis) or creating a new one."""
+        if shares <= 0 or price <= 0:
+            return
+        existing_holding = None
+        for holding in portfolio.get("holdings", []):
+            if holding["ticker"] == ticker:
+                existing_holding = holding
+                break
+
+        if existing_holding:
+            old_qty = existing_holding.get("quantity", 0)
+            old_cb = (existing_holding.get("cost_basis")
+                      or existing_holding.get("purchase_price")
+                      or existing_holding.get("last_price", price))
+            new_qty = old_qty + shares
+            if new_qty > 0:
+                existing_holding["cost_basis"] = round(
+                    (old_qty * old_cb + shares * price) / new_qty, 4
+                )
+            existing_holding["quantity"] = new_qty
+            existing_holding["last_price"] = price
+            existing_holding["current_value"] = new_qty * price
+        else:
+            portfolio.setdefault("holdings", []).append({
+                "ticker": ticker,
+                "quantity": shares,
+                "cost_basis": round(price, 4),
+                "last_price": price,
+                "current_value": shares * price,
+            })
+
+    def _apply_sell(self, portfolio: Dict, ticker: str, shares: int, price: float = 0) -> float:
+        """Reduce/remove ``shares`` of ``ticker`` from the portfolio. ``price`` (if
+        > 0) updates last_price on the remaining position. Returns the price used
+        for the holding's valuation (caller decides how to handle cash proceeds)."""
+        for holding in portfolio.get("holdings", []):
+            if holding["ticker"] == ticker:
+                current_quantity = holding.get("quantity", 0)
+                new_quantity = max(0, current_quantity - shares)
+                used_price = price if price > 0 else holding.get("last_price", 0)
+                if new_quantity > 0:
+                    holding["quantity"] = new_quantity
+                    holding["last_price"] = used_price
+                    holding["current_value"] = new_quantity * used_price
+                else:
+                    portfolio["holdings"].remove(holding)
+                return used_price
+        return price
+
     def update_portfolio_from_rebalancing(self, portfolio: Dict, rebalancing: Dict, analyses: List[Dict]):
         """Update portfolio.json based on rebalancing recommendations."""
         exchange_rate = self.get_exchange_rate()
-        
+
         # Process SELL actions
         for rec in rebalancing.get("recommendations", []):
             if rec["action"] == "SELL":
                 ticker = rec["ticker"]
                 shares_to_sell = rec.get("reduce_shares", rec.get("sell_shares", 0))
-                
-                # Find and update the holding
-                for holding in portfolio.get("holdings", []):
-                    if holding["ticker"] == ticker:
-                        current_quantity = holding.get("quantity", 0)
-                        new_quantity = max(0, current_quantity - shares_to_sell)
-                        
-                        if new_quantity > 0:
-                            # Update quantity and value
-                            holding["quantity"] = new_quantity
-                            current_price = rec.get("current_price_usd", holding.get("last_price", 0))
-                            holding["last_price"] = current_price
-                            holding["current_value"] = new_quantity * current_price
-                        else:
-                            # Remove holding if quantity becomes 0
-                            portfolio["holdings"].remove(holding)
-                        
-                        # Add to cash
-                        sell_amount = shares_to_sell * rec.get("current_price_usd", holding.get("last_price", 0))
-                        portfolio["cash"] = portfolio.get("cash", 0) + sell_amount
-                        break
-        
+                used_price = self._apply_sell(portfolio, ticker, shares_to_sell, rec.get("current_price_usd", 0))
+                # Add proceeds to cash
+                portfolio["cash"] = portfolio.get("cash", 0) + shares_to_sell * used_price
+
         # Process BUY actions
         for rec in rebalancing.get("buy_recommendations", []):
             ticker = rec["ticker"]
             shares_to_buy = rec.get("shares", 0)
             price = rec.get("price", 0)
             buy_amount = rec.get("allocation_amount", shares_to_buy * price)
-            
-            if shares_to_buy > 0 and price > 0:
-                # Check if holding already exists
-                existing_holding = None
-                for holding in portfolio.get("holdings", []):
-                    if holding["ticker"] == ticker:
-                        existing_holding = holding
-                        break
-                
-                if existing_holding:
-                    old_qty = existing_holding.get("quantity", 0)
-                    old_cb = (existing_holding.get("cost_basis")
-                              or existing_holding.get("purchase_price")
-                              or existing_holding.get("last_price", price))
-                    new_qty = old_qty + shares_to_buy
-                    if new_qty > 0:
-                        existing_holding["cost_basis"] = round(
-                            (old_qty * old_cb + shares_to_buy * price) / new_qty, 4
-                        )
-                    existing_holding["quantity"] = new_qty
-                    existing_holding["last_price"] = price
-                    existing_holding["current_value"] = new_qty * price
-                else:
-                    new_holding = {
-                        "ticker": ticker,
-                        "quantity": shares_to_buy,
-                        "cost_basis": round(price, 4),
-                        "last_price": price,
-                        "current_value": shares_to_buy * price,
-                    }
-                    portfolio.setdefault("holdings", []).append(new_holding)
 
+            if shares_to_buy > 0 and price > 0:
+                self._apply_buy(portfolio, ticker, shares_to_buy, price)
                 # Subtract from cash
                 portfolio["cash"] = max(0, portfolio.get("cash", 0) - buy_amount)
-        
+
         # Recalculate total value
         total_value = portfolio.get("cash", 0)
         for holding in portfolio.get("holdings", []):
@@ -2386,55 +2170,13 @@ class PortfolioAnalyzer:
                 if analysis["ticker"] == sell_ticker:
                     sell_price = analysis.get("current_price", 0)
                     break
-            
+
             # SELL: Reduce or remove the old holding
-            for holding in portfolio.get("holdings", []):
-                if holding["ticker"] == sell_ticker:
-                    current_quantity = holding.get("quantity", 0)
-                    new_quantity = max(0, current_quantity - shares_to_sell)
-                    
-                    if new_quantity > 0:
-                        # Update quantity and value
-                        holding["quantity"] = new_quantity
-                        holding["last_price"] = sell_price if sell_price > 0 else holding.get("last_price", 0)
-                        holding["current_value"] = new_quantity * holding["last_price"]
-                    else:
-                        # Remove holding if quantity becomes 0
-                        portfolio["holdings"].remove(holding)
-                    break
-            
+            self._apply_sell(portfolio, sell_ticker, shares_to_sell, sell_price)
+
             # BUY: Add or update the new holding
-            if shares_to_buy > 0 and buy_price > 0:
-                # Check if holding already exists
-                existing_holding = None
-                for holding in portfolio.get("holdings", []):
-                    if holding["ticker"] == buy_ticker:
-                        existing_holding = holding
-                        break
-                
-                if existing_holding:
-                    old_qty = existing_holding.get("quantity", 0)
-                    old_cb = (existing_holding.get("cost_basis")
-                              or existing_holding.get("purchase_price")
-                              or existing_holding.get("last_price", buy_price))
-                    new_qty = old_qty + shares_to_buy
-                    if new_qty > 0:
-                        existing_holding["cost_basis"] = round(
-                            (old_qty * old_cb + shares_to_buy * buy_price) / new_qty, 4
-                        )
-                    existing_holding["quantity"] = new_qty
-                    existing_holding["last_price"] = buy_price
-                    existing_holding["current_value"] = new_qty * buy_price
-                else:
-                    new_holding = {
-                        "ticker": buy_ticker,
-                        "quantity": shares_to_buy,
-                        "cost_basis": round(buy_price, 4),
-                        "last_price": buy_price,
-                        "current_value": shares_to_buy * buy_price,
-                    }
-                    portfolio.setdefault("holdings", []).append(new_holding)
-            
+            self._apply_buy(portfolio, buy_ticker, shares_to_buy, buy_price)
+
             # Add remaining cash from the transaction
             if remaining_cash > 0:
                 portfolio["cash"] = portfolio.get("cash", 0) + remaining_cash
@@ -2616,8 +2358,8 @@ class PortfolioAnalyzer:
         print("=" * 60)
         
         rebalancing = results["rebalancing"]
-        exchange_rate = self.get_exchange_rate()
-        
+        # Reuse the exchange_rate fetched at the top of this method.
+
         if rebalancing["needed"]:
             print("⚠️  REBALANCING IS RECOMMENDED")
             print(f"Reason: {rebalancing['reason']}\n")
@@ -2694,8 +2436,10 @@ class PortfolioAnalyzer:
             print("\n" + "=" * 60)
             print("🔄 REPLACEMENT OPPORTUNITIES (Better Alternatives Found)")
             print("=" * 60)
-            exchange_rate = results["portfolio_metrics"].get("exchange_rate", 3.15)
-            
+            # Bug fix: portfolio_metrics has no "exchange_rate" key, so the old
+            # .get(..., 3.15) always used a stale hardcoded rate. Use the live rate
+            # already fetched at the top of this method.
+
             for opp in rebalancing["replacement_opportunities"]:
                 sell_ticker = opp["sell_ticker"]
                 buy_ticker = opp["buy_ticker"]

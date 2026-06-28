@@ -4,15 +4,25 @@ Machine Learning Predictor - Advanced LSTM models for price forecasting
 Uses deep learning for more accurate predictions
 """
 
+import os
+import json
+import pickle
+from datetime import datetime
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Optional, Tuple
 import yfinance as yf
+import market_data
 import logging
 import warnings
 warnings.filterwarnings('ignore')
 
 logger = logging.getLogger(__name__)
+
+# Directory where trained LSTM models + scalers are persisted between runs.
+MODELS_DIR = "models"
+# Retrain a saved model only when it is older than this many days.
+MODEL_MAX_AGE_DAYS = 7
 
 try:
     from tensorflow import keras
@@ -31,7 +41,46 @@ class MLPredictor:
         self.scaler = None
         self.model = None
         self.use_lstm = TENSORFLOW_AVAILABLE
-    
+
+    # ------------------------------------------------------------------ #
+    # Model persistence (#4): save/load trained LSTM + its meta so we don't
+    # retrain from scratch on every predict_with_lstm call.
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _model_paths(ticker: str) -> Tuple[str, str]:
+        safe = ticker.replace("/", "_").replace("\\", "_")
+        model_path = os.path.join(MODELS_DIR, f"{safe}.keras")
+        meta_path = os.path.join(MODELS_DIR, f"{safe}_meta.pkl")
+        return model_path, meta_path
+
+    def _load_cached_model(self, ticker: str):
+        """Return (model, meta) if a fresh saved model exists, else (None, None)."""
+        model_path, meta_path = self._model_paths(ticker)
+        if not (os.path.exists(model_path) and os.path.exists(meta_path)):
+            return None, None
+        try:
+            age_days = (datetime.now().timestamp() - os.path.getmtime(model_path)) / 86400.0
+            if age_days > MODEL_MAX_AGE_DAYS:
+                logger.debug(f"Cached model for {ticker} is stale ({age_days:.1f}d); retraining")
+                return None, None
+            model = keras.models.load_model(model_path)
+            with open(meta_path, "rb") as f:
+                meta = pickle.load(f)
+            return model, meta
+        except Exception as e:
+            logger.debug(f"Failed to load cached model for {ticker}: {e}")
+            return None, None
+
+    def _save_model(self, ticker: str, model, meta: dict) -> None:
+        try:
+            os.makedirs(MODELS_DIR, exist_ok=True)
+            model_path, meta_path = self._model_paths(ticker)
+            model.save(model_path)
+            with open(meta_path, "wb") as f:
+                pickle.dump(meta, f)
+        except Exception as e:
+            logger.debug(f"Failed to persist model for {ticker}: {e}")
+
     def prepare_data(
         self, data: pd.DataFrame, lookback: int = 60, train_frac: float = 0.8
     ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[dict]]:
@@ -122,52 +171,88 @@ class MLPredictor:
             return self._fallback_prediction(ticker, periods)
 
         try:
-            stock = yf.Ticker(ticker)
-            data = stock.history(period=training_period, auto_adjust=True)
+            data = market_data.get_history(ticker, period=training_period, auto_adjust=True)
 
-            if data.empty or len(data) < lookback + periods + 2:
+            if data is None or data.empty or len(data) < lookback + periods + 2:
                 logger.warning(f"Insufficient data for {ticker}, using fallback")
                 return self._fallback_prediction(ticker, periods)
 
-            X, y, meta = self.prepare_data(data, lookback)
-            if X is None:
-                return self._fallback_prediction(ticker, periods)
+            # ---- Try to reuse a persisted model (skips the expensive retrain) --
+            model, cached_meta = self._load_cached_model(ticker)
 
-            X = X.reshape((X.shape[0], X.shape[1], 1))
+            if model is not None and cached_meta is not None:
+                # Reuse the σ_train the model was trained with so the seed window
+                # is in the same units the network learned in.
+                sigma_train = float(cached_meta["sigma_train"])
+                confidence = float(cached_meta.get("confidence", 0.0))
+            else:
+                # ---- Train from scratch and persist for next time --------------
+                X, y, meta = self.prepare_data(data, lookback)
+                if X is None:
+                    return self._fallback_prediction(ticker, periods)
 
-            train_size = int(len(X) * 0.8)
-            X_train, X_test = X[:train_size], X[train_size:]
-            y_train, y_test = y[:train_size], y[train_size:]
+                X = X.reshape((X.shape[0], X.shape[1], 1))
 
-            model = self.build_lstm_model((X.shape[1], 1))
+                train_size = int(len(X) * 0.8)
+                X_train, X_test = X[:train_size], X[train_size:]
+                y_train, y_test = y[:train_size], y[train_size:]
 
-            try:
-                from tensorflow.keras.callbacks import EarlyStopping
-                early_stop = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
-                model.fit(
-                    X_train, y_train,
-                    epochs=50, batch_size=32,
-                    validation_data=(X_test, y_test) if len(X_test) > 0 else None,
-                    callbacks=[early_stop] if len(X_test) > 0 else None,
-                    verbose=0,
-                )
-            except Exception as e:
-                logger.debug(f"Training error: {e}, using simpler training")
-                model.fit(X_train, y_train, epochs=20, batch_size=32, verbose=0)
+                model = self.build_lstm_model((X.shape[1], 1))
+
+                try:
+                    from tensorflow.keras.callbacks import EarlyStopping
+                    early_stop = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
+                    model.fit(
+                        X_train, y_train,
+                        epochs=50, batch_size=32,
+                        validation_data=(X_test, y_test) if len(X_test) > 0 else None,
+                        callbacks=[early_stop] if len(X_test) > 0 else None,
+                        verbose=0,
+                    )
+                except Exception as e:
+                    logger.debug(f"Training error: {e}, using simpler training")
+                    model.fit(X_train, y_train, epochs=20, batch_size=32, verbose=0)
+
+                sigma_train = float(meta["sigma_train"])
+
+                # Held-out MAE in σ-units → interpretable confidence score.
+                if len(X_test) > 0:
+                    val_pred = np.asarray(model(X_test, training=False)).flatten()
+                    val_mae_sigma = float(np.mean(np.abs(val_pred - y_test)))
+                    # MAE/σ ≈ 0.8 is "random walk baseline" (E|Z| = 0.798); below
+                    # that the model adds some skill, above it the model is worse
+                    # than a constant-σ random walk.
+                    skill = max(0.0, 0.8 - val_mae_sigma) / 0.8
+                    confidence = float(min(100.0, max(0.0, skill * 100.0)))
+                else:
+                    confidence = 0.0
+
+                # Persist for reuse (the confidence is cached too, since the
+                # held-out split is only available right after training).
+                self._save_model(ticker, model, {
+                    "sigma_train": sigma_train,
+                    "confidence": confidence,
+                    "lookback": lookback,
+                    "trained_at": datetime.now().isoformat(),
+                })
+
+            # Cache on the instance for any repeated calls within this session.
+            self.model = model
 
             # Build the seed window from the LAST `lookback` log-returns in the
             # training-period series (scaled by σ_train, the same units the
             # model was trained on).
             log_rets = np.diff(np.log(data['Close'].to_numpy(dtype=float)))
-            sigma_train = meta["sigma_train"]
             seed_scaled = (log_rets[-lookback:] / sigma_train).reshape(1, lookback, 1)
 
             # Autoregressive rollout. Errors compound — the model's
             # uncertainty grows roughly like √h. We don't pretend otherwise.
+            # Use a direct tensor call (model(x)) rather than model.predict(),
+            # which is ~10-100x faster for single-sample inference in a loop.
             preds_scaled = []
             current = seed_scaled.copy()
             for _ in range(periods):
-                next_scaled = float(model.predict(current, verbose=0)[0, 0])
+                next_scaled = float(np.asarray(model(current, training=False))[0, 0])
                 preds_scaled.append(next_scaled)
                 current = np.append(current[:, 1:, :], [[[next_scaled]]], axis=1)
 
@@ -178,19 +263,6 @@ class MLPredictor:
             predicted_prices = current_price * np.exp(cum_log)
             predicted_price = float(predicted_prices[-1])
             expected_return = (predicted_price / current_price - 1.0) * 100.0
-
-            # Held-out MAE in σ-units. Convert to *daily-return RMSE* for an
-            # interpretable confidence score.
-            if len(X_test) > 0:
-                val_pred = model.predict(X_test, verbose=0).flatten()
-                val_mae_sigma = float(np.mean(np.abs(val_pred - y_test)))
-                # MAE/σ ≈ 0.8 is "random walk baseline" (E|Z| = 0.798); below
-                # that the model adds some skill, above it the model is worse
-                # than a constant-σ random walk.
-                skill = max(0.0, 0.8 - val_mae_sigma) / 0.8
-                confidence = float(min(100.0, max(0.0, skill * 100.0)))
-            else:
-                confidence = 0.0
 
             return {
                 "ticker": ticker,
@@ -217,10 +289,9 @@ class MLPredictor:
         compounding regimes and gave a Jensen-biased projection.
         """
         try:
-            stock = yf.Ticker(ticker)
-            data = stock.history(period="1y", auto_adjust=True)
+            data = market_data.get_history(ticker, period="1y", auto_adjust=True)
 
-            if data.empty or len(data) < 30:
+            if data is None or data.empty or len(data) < 30:
                 return {"ticker": ticker, "error": "No data available"}
 
             closes = data['Close'].to_numpy(dtype=float)
