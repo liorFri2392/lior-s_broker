@@ -21,6 +21,7 @@ written atomically, so concurrent ``ThreadPoolExecutor`` fetches can't corrupt i
 
 import json
 import logging
+import math
 import os
 import threading
 from datetime import datetime, timedelta, timezone
@@ -46,6 +47,10 @@ _TTL_INFO = timedelta(hours=12)
 
 _DEFAULT_FX = 1.0 / 0.34  # ILS per USD when 1 ILS = 0.34 USD (~2.94)
 _DEFAULT_RISK_FREE = 0.045
+
+# A single-fetch price move beyond this vs the last known price is treated as a
+# likely data glitch and logged (a real ETF cannot move 60% between fetches).
+_MAX_PRICE_JUMP = 0.60
 
 
 class MarketData:
@@ -300,10 +305,23 @@ class MarketData:
                 try:
                     if df is not None and not df.empty and "Close" in df.columns:
                         price = float(df["Close"].iloc[-1])
-                        if price > 0:
-                            prices[t] = price
-                            with self._lock:
-                                self._price_cache[t] = (price, now)
+                        # Reject bad data: non-finite (NaN/inf) or non-positive.
+                        if not math.isfinite(price) or price <= 0:
+                            continue
+                        # Flag implausible single-fetch jumps vs the last known
+                        # price — almost always a data glitch, not a real move.
+                        prev = self._price_cache.get(t)
+                        if prev and prev[0] > 0:
+                            change = abs(price / prev[0] - 1)
+                            if change > _MAX_PRICE_JUMP:
+                                logger.warning(
+                                    f"{t}: suspicious price jump {prev[0]:.2f} -> "
+                                    f"{price:.2f} ({change*100:.0f}%). Using new value; "
+                                    f"verify before trading."
+                                )
+                        prices[t] = price
+                        with self._lock:
+                            self._price_cache[t] = (price, now)
                 except Exception:  # noqa: BLE001
                     continue
             self._save_cache()

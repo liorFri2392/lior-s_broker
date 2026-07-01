@@ -45,7 +45,23 @@ class TaxAnalyzer:
     def load_portfolio(self) -> Dict:
         """Load portfolio from JSON file."""
         return portfolio_io.load_portfolio(self.portfolio_file)
-    
+
+    def estimate_sale_tax_usd(self, cost_basis: float, sale_price: float,
+                              shares: float) -> Optional[float]:
+        """Rough realized capital-gains tax (USD) for selling ``shares``.
+
+        Conservative: treats the gain as short-term (flat CAPITAL_GAINS_TAX, the
+        correct Israeli treatment for securities — no long-term reduction).
+        Returns 0.0 for a loss/no-gain, and None when cost basis is unknown so
+        callers can distinguish "no tax" from "can't tell".
+        """
+        if not cost_basis or cost_basis <= 0 or sale_price <= 0 or shares <= 0:
+            return None
+        gain_usd = (sale_price - cost_basis) * shares
+        if gain_usd <= 0:
+            return 0.0
+        return gain_usd * self.CAPITAL_GAINS_TAX
+
     def calculate_capital_gains_tax(
         self,
         purchase_price: float,
@@ -109,8 +125,15 @@ class TaxAnalyzer:
         # Calculate tax
         if total_gain_ils > 0:
             # Capital gains tax
-            if is_long_term:
-                # Long-term reduction (check current Israeli law)
+            if is_long_term and self.LONG_TERM_REDUCTION:
+                # ⚠️ UNVERIFIED: Israeli capital-gains tax on securities is a flat
+                # 25% with no long-term reduction. This reduction may understate
+                # your tax. Set LONG_TERM_REDUCTION=0 to disable it.
+                logger.warning(
+                    "Applying UNVERIFIED %.0f%% long-term tax reduction — Israeli "
+                    "securities have no such reduction. Verify with a tax advisor "
+                    "or set LONG_TERM_REDUCTION=0.", self.LONG_TERM_REDUCTION * 100
+                )
                 taxable_gain = total_gain_ils * (1 - self.LONG_TERM_REDUCTION)
             else:
                 taxable_gain = total_gain_ils

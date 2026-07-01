@@ -249,6 +249,52 @@ def test_github_secret_no_cli_no_token(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# Tax-impact estimate for sell/replace decisions.
+# --------------------------------------------------------------------------- #
+def test_estimate_sale_tax_gain():
+    from tax_analyzer import TaxAnalyzer
+    ta = TaxAnalyzer(exchange_rate=1.0)
+    # gain = (150-100)*10 = $500 -> 25% = $125
+    assert ta.estimate_sale_tax_usd(100, 150, 10) == pytest.approx(125.0)
+
+
+def test_estimate_sale_tax_loss_is_zero():
+    from tax_analyzer import TaxAnalyzer
+    ta = TaxAnalyzer(exchange_rate=1.0)
+    assert ta.estimate_sale_tax_usd(150, 100, 10) == 0.0
+
+
+def test_estimate_sale_tax_unknown_cost_basis_is_none():
+    from tax_analyzer import TaxAnalyzer
+    ta = TaxAnalyzer(exchange_rate=1.0)
+    assert ta.estimate_sale_tax_usd(None, 150, 10) is None
+    assert ta.estimate_sale_tax_usd(0, 150, 10) is None
+
+
+# --------------------------------------------------------------------------- #
+# Bad-data price guards (market_data).
+# --------------------------------------------------------------------------- #
+def test_prices_reject_non_finite_and_nonpositive(monkeypatch):
+    import numpy as np
+    import pandas as pd
+    import market_data
+    md = market_data.MarketData(cache_file="/nonexistent-cache-for-tests.json")
+
+    def fake_histories(tickers, period="1y", auto_adjust=True):
+        frames = {}
+        for t, val in zip(tickers, [float("inf"), 0.0, -5.0, 123.0]):
+            frames[t] = pd.DataFrame({"Close": [val]})
+        return frames
+
+    monkeypatch.setattr(md, "get_histories", fake_histories)
+    monkeypatch.setattr(md, "is_market_open", lambda: (False, "closed"))
+    monkeypatch.setattr(md, "_save_cache", lambda: None)
+    prices, _, _ = md.get_prices(["INF", "ZERO", "NEG", "GOOD"])
+    # Only the finite, positive price survives.
+    assert prices == {"GOOD": 123.0}
+
+
+# --------------------------------------------------------------------------- #
 # Import smoke — every module imports without side effects hitting the network.
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("mod", [
