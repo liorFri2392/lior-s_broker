@@ -16,6 +16,7 @@ import pandas as pd
 import numpy as np
 from newsapi import NewsApiClient
 from advanced_analysis import AdvancedAnalyzer
+from tax_analyzer import TaxAnalyzer
 import market_data
 import etf_universe
 import portfolio_io
@@ -999,19 +1000,21 @@ class PortfolioAnalyzer:
         portfolio = self.load_portfolio()
         current_tickers = [h.get("ticker", "").upper() for h in portfolio.get("holdings", [])]
         total_value = portfolio_metrics.get("total_value", 0)
-        
+
+        # Cost-basis lookup so replacement recs can estimate the tax hit of selling.
+        cost_basis_by_ticker = {
+            h.get("ticker", "").upper(): (h.get("cost_basis") or h.get("purchase_price"))
+            for h in portfolio.get("holdings", [])
+        }
+        # exchange_rate is irrelevant for the USD tax estimate; pass 1.0 to skip
+        # the live FX fetch in TaxAnalyzer.__init__.
+        tax_analyzer = TaxAnalyzer(self.portfolio_file, exchange_rate=1.0)
+
         # Define categories for comparison
         core_etfs = self.CORE_ETFS
         bond_etfs = self.BOND_ETFS
+        satellite_categories = etf_universe.SATELLITE_CATEGORIES
 
-        # Get all satellite categories from advisor
-        satellite_categories = [
-            "US_SMALL_CAP", "TECHNOLOGY", "HEALTHCARE", "EMERGING_MARKETS",
-            "AI_AND_ROBOTICS", "QUANTUM_COMPUTING", "SEMICONDUCTORS", "CLOUD_COMPUTING", "CYBERSECURITY",
-            "ELECTRIC_VEHICLES", "CLEAN_ENERGY", "REAL_ESTATE", "INFRASTRUCTURE",
-            "DIVIDEND", "GROWTH", "VALUE", "FINANCIAL", "ENERGY", "CONSUMER", "ESG", "BIOTECH"
-        ]
-        
         for holding in holdings_analysis:
             ticker = holding.get("ticker", "").upper()
             current_score = holding.get("recommendation_score", 50)
@@ -1107,6 +1110,22 @@ class PortfolioAnalyzer:
                         
                         # Only recommend if we can buy at least 1 share
                         if buy_shares > 0:
+                            # Estimate the realized capital-gains tax of selling
+                            # this portion, so the human weighs it against the
+                            # score gain (a taxable swap can be net-negative).
+                            est_tax = tax_analyzer.estimate_sale_tax_usd(
+                                cost_basis_by_ticker.get(ticker),
+                                holding.get("current_price", 0),
+                                shares_to_sell,
+                            )
+                            if est_tax is None:
+                                tax_note = ("⚠️ No cost basis tracked — tax impact unknown; "
+                                            "selling a gain triggers ~25% capital-gains tax.")
+                            elif est_tax > 0:
+                                tax_note = (f"⚠️ Selling triggers ~${est_tax:,.0f} capital-gains "
+                                            f"tax (25%); the score gain must justify it.")
+                            else:
+                                tax_note = "No capital-gains tax (no gain on the portion sold)."
                             replacement_opportunities.append({
                             "sell_ticker": ticker,
                             "sell_score": current_score,
@@ -1121,7 +1140,9 @@ class PortfolioAnalyzer:
                             "category": category_name,
                             "expected_return": expected_return,
                             "current_return": current_return,
-                            "replace_percentage": replace_percentage
+                            "replace_percentage": replace_percentage,
+                            "estimated_sale_tax_usd": est_tax,
+                            "tax_note": tax_note,
                         })
         
         return replacement_opportunities
@@ -2369,6 +2390,9 @@ class PortfolioAnalyzer:
                 print(f"   Recommendation: Replace {replace_pct:.0f}% of {sell_ticker} with {buy_ticker}")
                 print(f"   🔴 SELL: {sell_shares} shares of {sell_ticker} = ${sell_amount:,.2f} (₪{sell_amount * exchange_rate:,.2f})")
                 print(f"   🟢 BUY: {buy_shares} shares of {buy_ticker} @ ${buy_price:.2f} = ${buy_amount:,.2f} (₪{buy_amount * exchange_rate:,.2f})")
+                tax_note = opp.get("tax_note")
+                if tax_note:
+                    print(f"   🧾 {tax_note}")
                 if sell_amount - buy_amount > 5:
                     remaining = sell_amount - buy_amount
                     print(f"   💰 Remaining Cash: ${remaining:,.2f} (₪{remaining * exchange_rate:,.2f})")
