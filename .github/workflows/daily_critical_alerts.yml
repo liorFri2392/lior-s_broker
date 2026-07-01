@@ -34,8 +34,8 @@ jobs:
           if [ -n "$PORTFOLIO_JSON" ]; then
             echo "$PORTFOLIO_JSON" > portfolio.json
           else
-            echo '{"currency": "USD", "cash": 0, "holdings": [], "last_updated": null, "total_value": 0}' > portfolio.json
-            echo "Warning: PORTFOLIO_JSON secret not set. Using empty portfolio."
+            echo "::error::PORTFOLIO_JSON secret is not set — refusing to run alerts on an empty portfolio."
+            exit 1
           fi
       
       - name: Set up email credentials

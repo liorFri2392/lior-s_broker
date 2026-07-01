@@ -9,32 +9,20 @@ import os
 import sys
 import logging
 import subprocess
-import base64
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import yfinance as yf
 import pandas as pd
 import numpy as np
 from newsapi import NewsApiClient
 from advanced_analysis import AdvancedAnalyzer
 import market_data
+import etf_universe
+import portfolio_io
+import github_secret
+import scoring
 import warnings
 warnings.filterwarnings('ignore')
-
-# Try to import requests for GitHub API
-try:
-    import requests
-    HAS_REQUESTS = True
-except ImportError:
-    HAS_REQUESTS = False
-
-# Try to import PyNaCl for encryption (required for GitHub Secrets API)
-try:
-    from nacl import encoding, public
-    HAS_PYNACL = True
-except ImportError:
-    HAS_PYNACL = False
 
 # Setup logging
 logging.basicConfig(
@@ -46,11 +34,11 @@ logger = logging.getLogger(__name__)
 class PortfolioAnalyzer:
     """Advanced portfolio analysis system with news, trends, and statistical analysis."""
 
-    # 80/20 strategy ETF universes (single source of truth - referenced everywhere
-    # instead of redefining these literals in each method).
-    CORE_ETFS = ["SPY", "VOO", "IVV", "VXUS", "VEA"]
-    BOND_ETFS = ["BND", "AGG", "TIP", "SCHP", "VTIP"]
-    SATELLITE_ETFS = ["IWM", "VB", "XLK", "VGT", "VWO", "EEM", "XLV", "VHT"]
+    # 80/20 strategy ETF universes - the single source of truth lives in
+    # etf_universe.py; re-exposed as class attributes for the many self.* uses.
+    CORE_ETFS = etf_universe.CORE_ETFS
+    BOND_ETFS = etf_universe.BOND_ETFS
+    SATELLITE_ETFS = etf_universe.SATELLITE_ETFS
 
     def __init__(self, portfolio_file: str = "portfolio.json"):
         self.portfolio_file = portfolio_file
@@ -76,15 +64,7 @@ class PortfolioAnalyzer:
 
     def load_portfolio(self) -> Dict:
         """Load portfolio from JSON file."""
-        if os.path.exists(self.portfolio_file):
-            with open(self.portfolio_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        return {
-            "cash": 0,
-            "holdings": [],
-            "last_updated": None,
-            "total_value": 0
-        }
+        return portfolio_io.load_portfolio(self.portfolio_file)
     
     def save_portfolio(self, portfolio: Dict, sync_github_secret: bool = True):
         """Save portfolio to JSON file locally."""
@@ -115,7 +95,11 @@ class PortfolioAnalyzer:
         refreshed = 0
         for holding in holdings:
             ticker = holding["ticker"]
-            price = prices.get(ticker) or holding.get("last_price", 0)
+            # Prefer the freshly fetched price; only fall back to the stored
+            # last_price when there is no positive live quote (a valid 0.0 or
+            # None must not silently reuse a stale price via ``or``).
+            fetched = prices.get(ticker)
+            price = fetched if (fetched is not None and fetched > 0) else holding.get("last_price", 0)
             if price <= 0:
                 total_value += holding.get("current_value", 0)
                 continue
@@ -133,43 +117,9 @@ class PortfolioAnalyzer:
         return portfolio
     
     def _try_update_github_secret(self, portfolio: Dict):
-        """Try to update GitHub secret automatically (silently, no errors if fails)."""
-        # Method 1: Try GitHub CLI first (easiest)
-        try:
-            result = subprocess.run(
-                ["gh", "--version"],
-                capture_output=True,
-                text=True,
-                timeout=2
-            )
-            if result.returncode == 0:
-                # GitHub CLI is available, try to update secret
-                portfolio_json_str = json.dumps(portfolio, ensure_ascii=False, indent=2)
-                process = subprocess.Popen(
-                    ["gh", "secret", "set", "PORTFOLIO_JSON", "--repo", "liorFri2392/lior-s_broker"],
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True
-                )
-                stdout, stderr = process.communicate(input=portfolio_json_str, timeout=10)
-                if process.returncode == 0:
-                    logger.info("✅ GitHub secret updated automatically (via GitHub CLI)")
-                    return True
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass  # GitHub CLI not available, try API method
-        
-        # Method 2: Try GitHub API with token (if requests and PyNaCl available)
-        github_token = os.getenv("GITHUB_TOKEN")
-        if github_token and HAS_REQUESTS and HAS_PYNACL:
-            try:
-                return self._update_secret_via_api(github_token, portfolio)
-            except Exception as e:
-                logger.debug(f"GitHub API update failed: {e}")
-        
-        # If both methods fail, silently return False
-        return False
-    
+        """Best-effort sync of the portfolio to the GitHub secret (shared impl)."""
+        return github_secret.update_portfolio_secret(portfolio)
+
     def _run_update_secret(self) -> None:
         """Run make update-secret so GitHub secret is updated (runs every time user confirms 'yes')."""
         try:
@@ -185,49 +135,6 @@ class PortfolioAnalyzer:
         except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
             logger.debug(f"update-secret run failed: {e}")
             print("   ⚠️  Run 'make update-secret' manually to sync the GitHub secret.")
-    
-    def _update_secret_via_api(self, token: str, portfolio: Dict) -> bool:
-        """Update GitHub secret using GitHub API with token."""
-        repo_owner = "liorFri2392"
-        repo_name = "lior-s_broker"
-        secret_name = "PORTFOLIO_JSON"
-        
-        # Get public key
-        public_key_url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/actions/secrets/public-key"
-        headers = {
-            "Authorization": f"token {token}",
-            "Accept": "application/vnd.github.v3+json"
-        }
-        
-        try:
-            response = requests.get(public_key_url, headers=headers, timeout=10)
-            response.raise_for_status()
-            public_key_data = response.json()
-            public_key = public_key_data["key"]
-            key_id = public_key_data["key_id"]
-            
-            # Encrypt the secret using public key
-            portfolio_json_str = json.dumps(portfolio, ensure_ascii=False, indent=2)
-            public_key_obj = public.PublicKey(public_key.encode("utf-8"), encoding.Base64Encoder())
-            sealed_box = public.SealedBox(public_key_obj)
-            encrypted = sealed_box.encrypt(portfolio_json_str.encode("utf-8"))
-            encrypted_value = base64.b64encode(encrypted).decode("utf-8")
-            
-            # Update the secret
-            secret_url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/actions/secrets/{secret_name}"
-            payload = {
-                "encrypted_value": encrypted_value,
-                "key_id": key_id
-            }
-            
-            response = requests.put(secret_url, headers=headers, json=payload, timeout=10)
-            response.raise_for_status()
-            logger.info("✅ GitHub secret updated automatically (via GitHub API)")
-            return True
-            
-        except Exception as e:
-            logger.debug(f"GitHub API secret update failed: {e}")
-            return False
     
     def is_market_open(self) -> Tuple[bool, str]:
         """Check if US stock market (NYSE/NASDAQ) is currently open (DST-correct)."""
@@ -276,7 +183,7 @@ class PortfolioAnalyzer:
         avg_loss = loss.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
         if pd.isna(avg_loss.iloc[-1]) or pd.isna(avg_gain.iloc[-1]):
             indicators['rsi'] = 50.0
-        elif avg_loss.iloc[-1] == 0:
+        elif avg_loss.iloc[-1] < 1e-12:
             indicators['rsi'] = 100.0
         else:
             rs_last = float(avg_gain.iloc[-1] / avg_loss.iloc[-1])
@@ -412,10 +319,9 @@ class PortfolioAnalyzer:
         }
         
         try:
-            # Try to get news from yfinance (free, no API key needed)
-            stock = yf.Ticker(ticker)
-            news = stock.news
-            
+            # News via the shared cached market layer (free, no API key needed).
+            news = market_data.get_news(ticker)
+
             if news:
                 sentiment["articles_count"] = len(news)
                 sentiment["recent_news"] = [
@@ -512,27 +418,27 @@ class PortfolioAnalyzer:
             rsi = ti.get('rsi', 50)
             # For existing holdings: oversold = higher score (recovery potential)
             # overbought = lower score (profit-taking)
-            rsi_norm = max(0.0, min(1.0, (100 - rsi) / 100.0))  # Invert: low RSI = high score
+            rsi_norm = scoring.clamp01((100 - rsi) / 100.0)  # Invert: low RSI = high score
             sub_scores['rsi'] = rsi_norm
-            
+
             # Momentum sub-score
             momentum = ti.get('momentum', 0)
-            momentum_norm = max(0.0, min(1.0, (momentum + 15) / 30.0))
+            momentum_norm = scoring.momentum_score(momentum)
             sub_scores['momentum'] = momentum_norm
-            
+
             # Sharpe sub-score
             sharpe = ti.get('sharpe', 0)
-            sharpe_norm = max(0.0, min(1.0, (sharpe + 1) / 4.0))
+            sharpe_norm = scoring.sharpe_score(sharpe)
             sub_scores['sharpe'] = sharpe_norm
-            
+
             # Sortino sub-score (if available)
             sortino = ti.get('sortino', sharpe)
-            sortino_norm = max(0.0, min(1.0, (sortino + 1) / 4.0))
+            sortino_norm = scoring.sharpe_score(sortino)
             sub_scores['sortino'] = sortino_norm
-            
+
             # Volatility sub-score (lower is better)
             vol = ti.get('volatility', 20)
-            vol_norm = max(0.0, min(1.0, 1.0 - (vol - 5) / 35.0))
+            vol_norm = scoring.volatility_score(vol)
             sub_scores['volatility'] = vol_norm
             
             # Trend sub-score
@@ -543,7 +449,7 @@ class PortfolioAnalyzer:
         # News sentiment sub-score (normalized)
         news_sentiment = analysis["news_sentiment"]
         sentiment_score = news_sentiment.get("score", 50)
-        sentiment_norm = max(0.0, min(1.0, sentiment_score / 100.0))
+        sentiment_norm = scoring.clamp01(sentiment_score / 100.0)
         sub_scores['sentiment'] = sentiment_norm
         
         # Weighted combination
@@ -555,8 +461,8 @@ class PortfolioAnalyzer:
             'trend': 0.15, 'sentiment': 0.10, 'rsi': 0.10
         }
         
-        weighted_score = sum(sub_scores.get(k, 0.5) * w for k, w in holding_weights.items())
-        score = weighted_score * 80  # Map [0,1] -> [0,80], reserve 20 pts for refinements
+        weighted = scoring.weighted_score(sub_scores, holding_weights)
+        score = weighted * 80  # Map [0,1] -> [0,80], reserve 20 pts for refinements
         
         # === REFINEMENT FACTORS (up to ±20 points total) ===
         
@@ -741,7 +647,7 @@ class PortfolioAnalyzer:
         bond_etfs = self.BOND_ETFS
 
         # Exclude high-risk categories
-        excluded_categories = ["LEVERAGED_2X", "LEVERAGED_3X", "LEVERAGED_INVERSE", "CRYPTO"]
+        excluded_categories = etf_universe.EXCLUDED_CATEGORIES
         excluded_from_categories = []
         for cat in excluded_categories:
             if cat in advisor.ETF_CATEGORIES:
@@ -1242,7 +1148,7 @@ class PortfolioAnalyzer:
 
         # Get emerging trends (reuse caller's computation when provided)
         if emerging_trends is None:
-            excluded_categories = ["LEVERAGED_2X", "LEVERAGED_3X", "LEVERAGED_INVERSE", "CRYPTO"]
+            excluded_categories = etf_universe.EXCLUDED_CATEGORIES
             emerging_trends = advisor.detect_emerging_trends(excluded_categories)
         hot_sectors = {t.get("category", ""): t for t in emerging_trends[:5]}  # Top 5 hot sectors
 
@@ -1302,7 +1208,7 @@ class PortfolioAnalyzer:
                                     best_alternative = core_etf
                                     best_analysis = analysis
                                     reason = f"Over-concentration ({current_weight:.1f}%) + Low Core ({core_pct:.1f}%)"
-                            except:
+                            except Exception:
                                 continue
                 
                 # If no Core alternative or Core is OK, check hot sectors
@@ -1326,7 +1232,7 @@ class PortfolioAnalyzer:
                                                 best_alternative = etf
                                                 best_analysis = analysis
                                                 reason = f"Over-concentration ({current_weight:.1f}%) + Hot sector ({category}, {momentum:.1f}% momentum)"
-                                        except:
+                                        except Exception:
                                             continue
                 
                 # If found alternative, recommend replacement
@@ -1409,7 +1315,7 @@ class PortfolioAnalyzer:
                                             "reason": f"Satellite too high ({satellite_pct:.1f}%) + Core too low ({core_pct:.1f}%) - Rebalance to 80/20"
                                         })
                                         break  # Only one Core recommendation per Satellite holding
-                        except:
+                        except Exception:
                             continue
         
         return replacement_opportunities
@@ -1847,7 +1753,7 @@ class PortfolioAnalyzer:
         print("\n🔍 Checking for emerging trends and hot sectors...")
         from deposit_advisor import DepositAdvisor
         advisor = DepositAdvisor(self.portfolio_file)
-        excluded_categories = ["LEVERAGED_2X", "LEVERAGED_3X", "LEVERAGED_INVERSE", "CRYPTO"]
+        excluded_categories = etf_universe.EXCLUDED_CATEGORIES
         emerging_trends = advisor.detect_emerging_trends(excluded_categories)
         if emerging_trends:
             print(f"   ✅ Found {len(emerging_trends)} emerging trends with strong momentum:")
@@ -2238,7 +2144,7 @@ class PortfolioAnalyzer:
                     try:
                         start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
                         start_date_str = start_dt.strftime("%Y-%m-%d")
-                    except:
+                    except Exception:
                         pass
                 
                 print("\n" + "-" * 60)

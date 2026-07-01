@@ -8,4 +8,5 @@ scipy>=1.11.0
 tensorflow>=2.13.0  # Optional - for LSTM predictions
 requests>=2.31.0  # For GitHub API
 PyNaCl>=1.5.0  # For GitHub Secrets encryption
+pytest>=7.4.0  # Test suite (offline regression net)
 

@@ -4,11 +4,11 @@ Tax Analyzer - Calculate tax implications for Israeli investors in US markets
 Handles capital gains, dividends, and tax optimization
 """
 
-import json
 import os
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import logging
+import portfolio_io
 
 logger = logging.getLogger(__name__)
 
@@ -44,10 +44,7 @@ class TaxAnalyzer:
     
     def load_portfolio(self) -> Dict:
         """Load portfolio from JSON file."""
-        if os.path.exists(self.portfolio_file):
-            with open(self.portfolio_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        return {"holdings": [], "cash": 0}
+        return portfolio_io.load_portfolio(self.portfolio_file)
     
     def calculate_capital_gains_tax(
         self,
@@ -101,6 +98,10 @@ class TaxAnalyzer:
         
         purchase_dt = datetime.fromisoformat(purchase_date_normalized)
         sale_dt = datetime.fromisoformat(sale_date_normalized)
+        # Normalize to naive: mixing a tz-aware date (e.g. a trailing 'Z') with a
+        # naive one raises TypeError on subtraction. We only need whole days.
+        purchase_dt = purchase_dt.replace(tzinfo=None)
+        sale_dt = sale_dt.replace(tzinfo=None)
         holding_period = (sale_dt - purchase_dt).days
         
         is_long_term = holding_period > 730  # 2 years

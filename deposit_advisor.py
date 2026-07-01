@@ -8,7 +8,6 @@ import os
 import sys
 import logging
 import subprocess
-import base64
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 import pandas as pd
@@ -16,35 +15,17 @@ import numpy as np
 import market_data
 from portfolio_analyzer import PortfolioAnalyzer
 from advanced_analysis import AdvancedAnalyzer
+import etf_universe
+import github_secret
+import scoring
 
-# Leveraged ETF classification (single source of truth, was duplicated inline).
-LEVERAGED_2X = ["SSO", "QLD", "UWM", "EFO"]
-LEVERAGED_3X = ["TQQQ", "SPXL", "UPRO", "TNA", "FAS", "CURE", "SOXL", "LABU", "TECL"]
-LEVERAGED_INVERSE = ["SQQQ", "SPXS", "SPXU", "TZA", "FAZ", "SOXS", "LABD", "TECS"]
-ALL_LEVERAGED_TICKERS = set(LEVERAGED_2X) | set(LEVERAGED_3X) | set(LEVERAGED_INVERSE)
-
-# Satellite ETF categories used by the critical-alert scan (hoisted to avoid
-# duplicate literal lists across modules).
-SATELLITE_CATEGORIES = [
-    "US_SMALL_CAP", "TECHNOLOGY", "HEALTHCARE", "EMERGING_MARKETS",
-    "AI_AND_ROBOTICS", "QUANTUM_COMPUTING", "SEMICONDUCTORS", "CLOUD_COMPUTING", "CYBERSECURITY",
-    "ELECTRIC_VEHICLES", "CLEAN_ENERGY", "REAL_ESTATE", "INFRASTRUCTURE",
-    "DIVIDEND", "GROWTH", "VALUE", "FINANCIAL", "ENERGY", "CONSUMER", "ESG", "BIOTECH",
-]
-
-# Try to import requests for GitHub API
-try:
-    import requests
-    HAS_REQUESTS = True
-except ImportError:
-    HAS_REQUESTS = False
-
-# Try to import PyNaCl for encryption (required for GitHub Secrets API)
-try:
-    from nacl import encoding, public
-    HAS_PYNACL = True
-except ImportError:
-    HAS_PYNACL = False
+# ETF classifications - the single source of truth lives in etf_universe.py.
+# Re-exported here so existing ``from deposit_advisor import SATELLITE_CATEGORIES``
+# (used by critical_alert) keeps working.
+from etf_universe import (  # noqa: F401
+    LEVERAGED_2X, LEVERAGED_3X, LEVERAGED_INVERSE,
+    ALL_LEVERAGED_TICKERS, SATELLITE_CATEGORIES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -384,7 +365,7 @@ class DepositAdvisor:
             analysis["sharpe_lower_95"] = round(float(sharpe_lower_95), 3)
             analysis["geometric_annual_return"] = round(geometric_annual_return, 2)
 
-            sharpe_norm = max(0.0, min(1.0, (sharpe + 1) / 4.0))
+            sharpe_norm = scoring.sharpe_score(sharpe)
             sub_scores['risk_adjusted_return'] = sharpe_norm
 
             if sharpe_raw > 1.5:
@@ -410,7 +391,7 @@ class DepositAdvisor:
             # Blend: 60% short-term (20d) + 40% mid-term (60d)
             blended_momentum = 0.6 * recent_return + 0.4 * mid_return
             # Normalize: map [-15, 15] -> [0, 1]
-            momentum_norm = max(0.0, min(1.0, (blended_momentum + 15) / 30.0))
+            momentum_norm = scoring.momentum_score(blended_momentum)
             sub_scores['momentum'] = momentum_norm
             
             if blended_momentum > 5:
@@ -426,7 +407,7 @@ class DepositAdvisor:
                 adjusted_vol = volatility
             
             # Normalize: map [5, 40] -> [1, 0] (inverse — lower vol = higher score)
-            vol_norm = max(0.0, min(1.0, 1.0 - (adjusted_vol - 5) / 35.0))
+            vol_norm = scoring.volatility_score(adjusted_vol)
             sub_scores['volatility'] = vol_norm
             
             if analysis["is_leveraged"]:
@@ -439,7 +420,7 @@ class DepositAdvisor:
             # 4. Expense ratio — weight: 0.10
             exp_ratio = analysis["expense_ratio"]
             # Normalize: map [0, 1.0] -> [1, 0] (lower expense = higher score)
-            expense_norm = max(0.0, min(1.0, 1.0 - exp_ratio / 1.0))
+            expense_norm = scoring.clamp01(1.0 - exp_ratio / 1.0)
             sub_scores['expense_ratio'] = expense_norm
             
             if exp_ratio < 0.1:
@@ -452,7 +433,7 @@ class DepositAdvisor:
             # Normalize: log scale, map [50k, 10M] -> [0, 1]
             if avg_volume > 0:
                 log_vol = np.log10(avg_volume)
-                liquidity_norm = max(0.0, min(1.0, (log_vol - np.log10(50_000)) / (np.log10(10_000_000) - np.log10(50_000))))
+                liquidity_norm = scoring.clamp01((log_vol - np.log10(50_000)) / (np.log10(10_000_000) - np.log10(50_000)))
             else:
                 liquidity_norm = 0.0
             sub_scores['liquidity'] = liquidity_norm
@@ -473,7 +454,7 @@ class DepositAdvisor:
 
             if sma_50 > 0:
                 trend_strength = ((current_price / sma_50) - 1) * 100
-                trend_norm = max(0.0, min(1.0, (trend_strength + 10) / 20.0))
+                trend_norm = scoring.clamp01((trend_strength + 10) / 20.0)
             else:
                 trend_norm = 0.5
             sub_scores['trend'] = trend_norm
@@ -493,9 +474,9 @@ class DepositAdvisor:
                 'trend': 0.15
             }
             
-            weighted_score = sum(sub_scores.get(k, 0.5) * w for k, w in weights_map.items())
+            weighted = scoring.weighted_score(sub_scores, weights_map)
             # Map [0, 1] -> [0, 80] — reserve 20 points for refinement factors
-            score = weighted_score * 80
+            score = weighted * 80
             
             analysis["sub_scores"] = sub_scores
             
@@ -759,7 +740,7 @@ class DepositAdvisor:
         # bond_etfs already defined above (allocation section); reuse it.
 
         # Exclude high-risk categories
-        excluded_categories = ["LEVERAGED_2X", "LEVERAGED_3X", "LEVERAGED_INVERSE", "CRYPTO"]
+        excluded_categories = etf_universe.EXCLUDED_CATEGORIES
         excluded_tickers = []
         for cat in excluded_categories:
             if cat in self.ETF_CATEGORIES:
@@ -1124,105 +1105,10 @@ class DepositAdvisor:
         print(f"   Remaining cash: ${new_cash_usd:,.2f} (₪{new_cash_usd * exchange_rate:,.2f})")
         print(f"   Portfolio saved to {self.portfolio_file}\n")
     
-    def _run_update_secret(self) -> None:
-        """Run update-secret script so GitHub secret is updated (every time user confirms 'yes')."""
-        try:
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            result = subprocess.run(
-                [sys.executable, os.path.join(script_dir, "update_github_secret.py")],
-                cwd=script_dir,
-                timeout=15,
-                capture_output=False,
-            )
-            if result.returncode == 0:
-                print("   ✅ GitHub secret updated automatically!")
-        except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
-            print("   ⚠️  Run 'make update-secret' manually to sync the GitHub secret.")
-    
     def _try_update_github_secret(self, portfolio: Dict):
-        """Try to update GitHub secret automatically (silently, no errors if fails)."""
-        # Method 1: Try GitHub CLI first (easiest)
-        try:
-            result = subprocess.run(
-                ["gh", "--version"],
-                capture_output=True,
-                text=True,
-                timeout=2
-            )
-            if result.returncode == 0:
-                # GitHub CLI is available, try to update secret
-                portfolio_json_str = json.dumps(portfolio, ensure_ascii=False, indent=2)
-                process = subprocess.Popen(
-                    ["gh", "secret", "set", "PORTFOLIO_JSON", "--repo", "liorFri2392/lior-s_broker"],
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True
-                )
-                stdout, stderr = process.communicate(input=portfolio_json_str, timeout=10)
-                if process.returncode == 0:
-                    logger.info("✅ GitHub secret updated automatically (via GitHub CLI)")
-                    print("   ✅ GitHub secret updated automatically!")
-                    return True
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass  # GitHub CLI not available, try API method
-        
-        # Method 2: Try GitHub API with token (if requests and PyNaCl available)
-        github_token = os.getenv("GITHUB_TOKEN")
-        if github_token and HAS_REQUESTS and HAS_PYNACL:
-            try:
-                if self._update_secret_via_api(github_token, portfolio):
-                    print("   ✅ GitHub secret updated automatically!")
-                    return True
-            except Exception as e:
-                logger.debug(f"GitHub API update failed: {e}")
-        
-        # If both methods fail, silently return False
-        return False
-    
-    def _update_secret_via_api(self, token: str, portfolio: Dict) -> bool:
-        """Update GitHub secret using GitHub API with token."""
-        repo_owner = "liorFri2392"
-        repo_name = "lior-s_broker"
-        secret_name = "PORTFOLIO_JSON"
-        
-        # Get public key
-        public_key_url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/actions/secrets/public-key"
-        headers = {
-            "Authorization": f"token {token}",
-            "Accept": "application/vnd.github.v3+json"
-        }
-        
-        try:
-            response = requests.get(public_key_url, headers=headers, timeout=10)
-            response.raise_for_status()
-            public_key_data = response.json()
-            public_key = public_key_data["key"]
-            key_id = public_key_data["key_id"]
-            
-            # Encrypt the secret using public key
-            portfolio_json_str = json.dumps(portfolio, ensure_ascii=False, indent=2)
-            public_key_obj = public.PublicKey(public_key.encode("utf-8"), encoding.Base64Encoder())
-            sealed_box = public.SealedBox(public_key_obj)
-            encrypted = sealed_box.encrypt(portfolio_json_str.encode("utf-8"))
-            encrypted_value = base64.b64encode(encrypted).decode("utf-8")
-            
-            # Update the secret
-            secret_url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/actions/secrets/{secret_name}"
-            payload = {
-                "encrypted_value": encrypted_value,
-                "key_id": key_id
-            }
-            
-            response = requests.put(secret_url, headers=headers, json=payload, timeout=10)
-            response.raise_for_status()
-            logger.info("✅ GitHub secret updated automatically (via GitHub API)")
-            return True
-            
-        except Exception as e:
-            logger.debug(f"GitHub API secret update failed: {e}")
-            return False
-    
+        """Best-effort sync of the portfolio to the GitHub secret (shared impl)."""
+        return github_secret.update_portfolio_secret(portfolio, verbose=True)
+
     def ask_confirmation(self) -> bool:
         """Ask user for confirmation."""
         while True:

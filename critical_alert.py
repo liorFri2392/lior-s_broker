@@ -5,14 +5,16 @@ Runs deep analysis to find critical buy/sell opportunities
 """
 
 import json
+import math
 import os
 import sys
 import logging
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from portfolio_analyzer import PortfolioAnalyzer
-from deposit_advisor import DepositAdvisor, SATELLITE_CATEGORIES
+from deposit_advisor import DepositAdvisor
 from email_notifier import EmailNotifier
+from etf_universe import SATELLITE_CATEGORIES, EXCLUDED_CATEGORIES
 import market_data
 
 logger = logging.getLogger(__name__)
@@ -172,7 +174,7 @@ class CriticalAlertSystem:
         Detect emerging trends across all categories.
         This automatically identifies new hot sectors and trends.
         """
-        excluded_categories = ["LEVERAGED_2X", "LEVERAGED_3X", "LEVERAGED_INVERSE", "CRYPTO"]
+        excluded_categories = EXCLUDED_CATEGORIES
         emerging_trends = self.advisor.detect_emerging_trends(excluded_categories)
         
         # Filter to only very strong trends for critical alerts
@@ -555,7 +557,7 @@ class CriticalAlertSystem:
         # Exclude high-risk categories (leveraged, crypto)
         # Note: Crypto is excluded by default for balanced risk profile
         # To enable crypto, remove "CRYPTO" from excluded_categories (not recommended for young families)
-        excluded_categories = ["LEVERAGED_2X", "LEVERAGED_3X", "LEVERAGED_INVERSE", "CRYPTO"]
+        excluded_categories = EXCLUDED_CATEGORIES
         
         # Core ETFs (essential for portfolio stability)
         core_etfs = ["SPY", "VOO", "IVV", "VXUS", "VEA"]
@@ -672,9 +674,11 @@ class CriticalAlertSystem:
                     expected_return = analysis.get("mid_term_forecast", {}).get("expected_3yr_return", 0)
                     reasons = analysis.get("reasons", [])
                     
-                    # Filter out unrealistic returns (>50% is not realistic for 3 years)
-                    if expected_return > 50 or expected_return < -50:
-                        logger.debug(f"Skipping {etf} - unrealistic expected return: {expected_return:.1f}%")
+                    # Filter out unrealistic returns (>50% is not realistic for 3
+                    # years) and non-finite forecasts (NaN/inf slip past bare >/<
+                    # comparisons, which are always False for NaN).
+                    if not math.isfinite(expected_return) or expected_return > 50 or expected_return < -50:
+                        logger.debug(f"Skipping {etf} - unrealistic expected return: {expected_return}")
                         continue
                     
                     # For Core and Bonds, lower the expected return requirement

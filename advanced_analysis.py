@@ -7,10 +7,8 @@ Includes: Candlestick patterns, statistical models, bond analysis, yield optimiz
 import pandas as pd
 import numpy as np
 from sklearn.linear_model import LinearRegression
-from sklearn.preprocessing import PolynomialFeatures
 from sklearn.covariance import LedoitWolf
 from typing import Dict, List, Optional, Tuple
-import yfinance as yf
 import market_data
 import logging
 import warnings
