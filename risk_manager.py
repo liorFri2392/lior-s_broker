@@ -9,8 +9,8 @@ import numpy as np
 import pandas as pd
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
-import yfinance as yf
 import market_data
+import portfolio_io
 import logging
 
 logger = logging.getLogger(__name__)
@@ -127,10 +127,7 @@ class RiskManager:
     
     def load_portfolio(self) -> Dict:
         """Load portfolio from JSON file."""
-        if os.path.exists(self.portfolio_file):
-            with open(self.portfolio_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        return {"holdings": [], "cash": 0}
+        return portfolio_io.load_portfolio(self.portfolio_file)
     
     def check_stop_loss_take_profit(self, portfolio: Dict = None) -> List[Dict]:
         """

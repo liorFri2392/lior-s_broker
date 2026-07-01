@@ -115,7 +115,7 @@ class EmailNotifier:
                         try:
                             start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
                             start_date_str = start_dt.strftime("%Y-%m-%d")
-                        except:
+                        except (ValueError, TypeError):
                             pass
                     
                     # Format period

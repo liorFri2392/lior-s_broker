@@ -59,6 +59,7 @@ class MarketData:
         self._price_cache: Dict[str, Tuple[float, datetime]] = {}
         self._history_cache: Dict[str, Tuple[pd.DataFrame, datetime]] = {}
         self._info_cache: Dict[str, Tuple[dict, datetime]] = {}
+        self._news_cache: Dict[str, Tuple[list, datetime]] = {}
 
         self._fx_rate: float = _DEFAULT_FX
         self._fx_time: Optional[datetime] = None
@@ -328,6 +329,25 @@ class MarketData:
         return info
 
     # ------------------------------------------------------------------ #
+    # News headlines - cached (avoids re-fetching the same ticker's news
+    # across the several analysis passes in one run).
+    # ------------------------------------------------------------------ #
+    def get_news(self, ticker: str) -> list:
+        now = datetime.now()
+        with self._lock:
+            hit = self._news_cache.get(ticker)
+            if hit and now - hit[1] < _TTL_INFO:
+                return hit[0]
+        try:
+            news = yf.Ticker(ticker).news or []
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"Failed to fetch news for {ticker}: {e}")
+            news = []
+        with self._lock:
+            self._news_cache[ticker] = (news, now)
+        return news
+
+    # ------------------------------------------------------------------ #
     # Risk-free rate (^IRX) - memoized.
     # ------------------------------------------------------------------ #
     def get_risk_free_rate(self) -> float:
@@ -420,6 +440,9 @@ def get_prices(tickers: List[str]) -> Tuple[Dict[str, float], Optional[bool], st
 
 def get_info(ticker: str) -> dict:
     return market.get_info(ticker)
+
+def get_news(ticker: str) -> list:
+    return market.get_news(ticker)
 
 def get_risk_free_rate() -> float:
     return market.get_risk_free_rate()

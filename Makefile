@@ -1,4 +1,4 @@
-.PHONY: analyze deposit refresh-prices setup install venv clean backtest risk tax alerts backfill-cost-basis
+.PHONY: analyze deposit refresh-prices setup install venv clean backtest risk tax alerts backfill-cost-basis test
 
 # Virtual environment directory
 VENV = venv
@@ -99,6 +99,10 @@ backfill-cost-basis: install
 tax: install
 	@echo "Analyzing tax implications for current portfolio..."
 	@$(PYTHON) tax_report.py
+
+test: install
+	@echo "Running offline test suite..."
+	@$(PYTHON) -m pytest -q
 
 update-secret: install
 	@echo "Updating GitHub secret with current portfolio..."

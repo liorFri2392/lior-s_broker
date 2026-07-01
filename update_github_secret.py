@@ -9,51 +9,32 @@ Two methods:
 """
 
 import json
-import os
 import sys
-import subprocess
 from pathlib import Path
+
+import github_secret
 
 def update_github_secret():
     """Update PORTFOLIO_JSON secret in GitHub repository."""
-    
+
     # Read portfolio.json
     portfolio_file = Path("portfolio.json")
     if not portfolio_file.exists():
         print("❌ Error: portfolio.json not found!")
         print("   Run 'make analyze' first to create/update portfolio.json")
         return False
-    
+
     with open(portfolio_file, 'r', encoding='utf-8') as f:
         portfolio_data = json.load(f)
-    
+
     portfolio_json_str = json.dumps(portfolio_data, ensure_ascii=False, indent=2)
-    
-    # Try GitHub CLI first (easiest method)
-    try:
-        result = subprocess.run(
-            ["gh", "--version"],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        if result.returncode == 0:
-            print("✅ GitHub CLI found - using it to update secret...")
-            # Use gh secret set
-            process = subprocess.Popen(
-                ["gh", "secret", "set", "PORTFOLIO_JSON", "--repo", "liorFri2392/lior-s_broker"],
-                stdin=subprocess.PIPE,
-                text=True
-            )
-            process.communicate(input=portfolio_json_str)
-            if process.returncode == 0:
-                print("✅ Successfully updated PORTFOLIO_JSON secret in GitHub!")
-                return True
-            else:
-                print("⚠️  GitHub CLI update failed, showing manual method...")
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass  # GitHub CLI not available, use manual method
-    
+
+    # Try the automatic paths (GitHub CLI, then REST API) via the shared helper.
+    if github_secret.update_portfolio_secret(portfolio_data, verbose=True):
+        print("✅ Successfully updated PORTFOLIO_JSON secret in GitHub!")
+        return True
+    print("⚠️  Automatic update unavailable, showing manual method...")
+
     # Manual method - show content to copy
     print("\n" + "="*60)
     print("UPDATE GITHUB SECRET - Manual Method")
