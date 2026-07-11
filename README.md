@@ -139,10 +139,19 @@ make deposit
 
 פקודה זו:
 - מבקשת ממך להכניס סכום הפקדה בשקלים
-- מנתחת את התיק הנוכחי
-- בודקת מאות ETF פוטנציאליים
-- מספקת המלצות מפורטות על אילו ETF לקנות (80/20 Balanced Growth Strategy)
-- מציינת האם לקנות חדשים או להגדיל החזקות קיימות
+- מסווגת כל החזקה לקבוצת-שקילות (SPY=VOO=IVV, BND=AGG, TIP=SCHP=VTIP וכו')
+- משווה את המשקל הנוכחי של כל קבוצה מול יעד ה-80/20 (50 ליבה / 30 לוויין / 20 אג"ח)
+- מקצה כל דולר לפער הגדול ביותר מתחת ליעד — תמיד מגדילה החזקה קיימת בקבוצה לפני קניית טיקר חדש
+- עודף שלא מספיק למניה שלמה נשאר כמזומן ומצטרף לתקציב של החודש הבא
+
+(המנגנון הישן מבוסס-ציונים זמין עם `DEPOSIT_ADVISOR_LEGACY=1`)
+
+### מעקב תשואה אמיתית 📒
+
+כל הפקדה וכל עסקה נרשמות ב-`transactions` בתוך `portfolio.json`.
+הדוח של `make analyze` מציג:
+- **TRUE INVESTMENT PERFORMANCE** — רווח נטו בניכוי הכסף שהופקד + תשואה שנתית משוקללת-כסף (XIRR)
+- שורת "צמיחת ערך" הישנה מסומנת במפורש ככוללת את ההפקדות שלך (היא איננה תשואה)
 
 ### Backtesting - בדיקת אסטרטגיות
 
@@ -150,18 +159,22 @@ make deposit
 make backtest
 ```
 
+`make backtest` מריץ עכשיו את האסטרטגיה **האמיתית** של האפליקציה: הפקדות
+חודשיות שמוקצות ע"י מנוע ה-gap-fill, מול בנצ'מרק DCA של 100% SPY.
+התוצאות מוצגות בניכוי הפקדות (XIRR), לא כתשואת סכום-חד-פעמי.
+
 או ישירות ב-Python:
 
 ```python
 from backtesting import Backtester
 
-backtester = Backtester(initial_capital=10000)
+backtester = Backtester(initial_capital=1000)
 results = backtester.backtest_strategy(
-    tickers=["SPY", "VXUS", "BND"],
-    start_date="2020-01-01",
-    end_date="2023-12-31",
-    strategy="buy_and_hold",
-    allocation={"SPY": 0.5, "VWO": 0.3, "BND": 0.2}
+    tickers=["SPY", "VEA", "VWO", "IWM", "VTV", "XLK", "XLV", "XLE", "PAVE", "BND", "VTIP"],
+    start_date="2019-01-01",
+    end_date="2024-12-31",
+    strategy="monthly_deposit",
+    monthly_deposit=2000,
 )
 backtester.print_results(results)
 ```
