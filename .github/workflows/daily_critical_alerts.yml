@@ -2,9 +2,8 @@ name: Daily Critical Portfolio Alerts
 
 on:
   schedule:
-    # GitHub cron is UTC. Workflow takes ~2h (analysis + alerts), so start earlier than desired delivery.
-    # 15:00 UTC ≈ 18:00 IDT / 17:00 IST → email typically arrives ~20:00–21:00 Israel time.
-    # (Was 18:00 UTC → ~23:00 IDT after runtime.)
+    # GitHub cron is UTC. 15:00 UTC ≈ 18:00 IDT / 17:00 IST → email typically
+    # arrives in the evening Israel time.
     - cron: '0 15 * * 1-5'  # 15:00 UTC weekdays (Mon–Fri)
   workflow_dispatch:  # Allow manual trigger
 
@@ -12,21 +11,22 @@ jobs:
   check-critical-alerts:
     runs-on: ubuntu-latest
     name: Check for Critical Portfolio Actions
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      
+          cache: 'pip'  # cuts minutes off every daily run
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-      
+
       - name: Create portfolio.json from secret
         env:
           PORTFOLIO_JSON: ${{ secrets.PORTFOLIO_JSON }}
@@ -37,21 +37,10 @@ jobs:
             echo "::error::PORTFOLIO_JSON secret is not set — refusing to run alerts on an empty portfolio."
             exit 1
           fi
-      
-      - name: Set up email credentials
-        env:
-          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
-          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
-          EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}
-        run: |
-          echo "EMAIL_SENDER=$EMAIL_SENDER" >> $GITHUB_ENV
-          echo "EMAIL_PASSWORD=$EMAIL_PASSWORD" >> $GITHUB_ENV
-          if [ -n "$EMAIL_RECIPIENT" ]; then
-            echo "EMAIL_RECIPIENT=$EMAIL_RECIPIENT" >> $GITHUB_ENV
-          else
-            echo "EMAIL_RECIPIENT=$EMAIL_SENDER" >> $GITHUB_ENV
-          fi
-      
+
+      # Email credentials are passed per-step below; never exported to
+      # $GITHUB_ENV (that made the password ambient for every later step).
+
       - name: Check 30-day analyze reminder
         env:
           EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
@@ -60,21 +49,21 @@ jobs:
         run: |
           python send_analyze_reminder.py
         continue-on-error: true
-      
-      - name: Run Portfolio Analysis
+
+      - name: Run Portfolio Analysis (informational artifact)
         env:
           ANALYZE_READONLY: "1"
         run: |
           echo "📊 Running portfolio analysis..."
-          python portfolio_analyzer.py > analysis_output.txt 2>&1 || true
-        continue-on-error: true
-        
-      - name: Run Risk Management Check
+          python portfolio_analyzer.py > analysis_output.txt 2>&1
+        continue-on-error: true  # informational; the alert step below is the one that must succeed
+
+      - name: Run Risk Management Check (informational artifact)
         run: |
           echo "🛡️ Checking portfolio risk..."
-          python -c "from risk_manager import RiskManager; rm = RiskManager(); rm.print_risk_report()" > risk_output.txt 2>&1 || true
+          python -c "from risk_manager import RiskManager; rm = RiskManager(); rm.print_risk_report()" > risk_output.txt 2>&1
         continue-on-error: true
-      
+
       - name: Run Critical Alert Check
         env:
           ANALYZE_READONLY: "1"
@@ -84,35 +73,23 @@ jobs:
         run: |
           echo "⚠️ Checking for critical alerts..."
           python critical_alert.py
-        continue-on-error: true  # Don't fail workflow if alerts are sent
-      
+        # No continue-on-error: a crash here must fail the workflow visibly.
+        # (critical_alert exits 0 whether or not alerts were found; non-zero
+        # means the pipeline itself broke.)
+
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: portfolio-analysis-results
           path: |
-            portfolio.json
             analysis_output.txt
             risk_output.txt
           retention-days: 7
-      
-      - name: Display portfolio update reminder
+
+      - name: Reminder
         if: always()
         run: |
-          echo "📝 IMPORTANT: Update GitHub Secret"
-          echo "=================================="
-          echo ""
-          echo "The portfolio.json has been updated. To keep GitHub Actions in sync:"
-          echo ""
-          echo "Option 1 - Automatic (recommended):"
-          echo "  Run locally: make update-secret"
-          echo ""
-          echo "Option 2 - Manual:"
-          echo "  1. Download portfolio.json from artifacts above"
-          echo "  2. Go to: https://github.com/${{ github.repository }}/settings/secrets/actions"
-          echo "  3. Update PORTFOLIO_JSON secret with the new content"
-          echo ""
-          echo "This ensures critical alerts use your latest portfolio data."
-
-
+          echo "ℹ️ Recommendations are never auto-applied. After you execute trades"
+          echo "   at your broker, run locally: make analyze (confirm trades), then"
+          echo "   make update-secret to sync PORTFOLIO_JSON for the next run."

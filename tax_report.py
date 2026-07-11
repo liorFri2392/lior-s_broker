@@ -31,8 +31,7 @@ def main():
     print("💰 Tax Analysis by Holding:\n")
     
     total_potential_tax = 0
-    long_term_holdings = []
-    
+
     for holding in holdings:
         ticker = holding.get("ticker")
         quantity = holding.get("quantity", 0)
@@ -61,11 +60,6 @@ def main():
         if gain_ils > 0:
             total_potential_tax += tax_ils
         
-        # Check if long-term
-        holding_period = tax_calc.get("holding_period_days", 0)
-        if holding_period > 730:
-            long_term_holdings.append(ticker)
-        
         print(f"   {ticker}:")
         print(f"      Quantity: {quantity} shares")
         print(f"      Purchase Price: ${purchase_price:.2f}")
@@ -74,8 +68,6 @@ def main():
         
         if gain_ils > 0:
             print(f"      Potential Tax: {tax_ils:,.2f} ILS ({tax_calc.get('effective_tax_rate', 0):.1f}%)")
-            if tax_calc.get("is_long_term"):
-                print(f"      ✅ Long-term holding - tax reduction applied")
         elif gain_ils < 0:
             print(f"      💡 Loss - can offset gains")
         
@@ -91,13 +83,10 @@ def main():
     else:
         print("💰 No capital gains tax if all holdings sold now")
     
-    if long_term_holdings:
-        print(f"\n✅ Long-term Holdings (>2 years) - Eligible for tax reduction:")
-        for ticker in long_term_holdings:
-            print(f"   • {ticker}")
-    
+    # Note: Israeli tax on securities is a flat 25% regardless of holding period —
+    # there is no long-term reduction, so no "eligible holdings" list is shown.
+
     print("\n💡 Tax Optimization Tips:")
-    print("   • Hold positions >2 years for tax reduction")
     print("   • Offset gains with losses")
     print("   • Consider selling losers before year-end")
     print("   • Consult tax advisor for accurate calculations")

@@ -201,7 +201,9 @@ class RiskManager:
                     "ticker": ticker,
                     "reason": f"Take-profit reached: {return_pct:.2f}% gain (threshold: {self.take_profit_percent}%)",
                     "priority": "HIGH",
-                    "quantity": int(quantity * 0.5),
+                    # max(1, ...): int(qty*0.5) recommended "sell 0 shares"
+                    # for every 1-share position.
+                    "quantity": max(1, round(quantity * 0.5)) if quantity >= 1 else 0,
                     "current_price": current_price,
                     "purchase_price": cost_basis,
                     "return_pct": return_pct,
@@ -496,14 +498,15 @@ class RiskManager:
         if not holdings:
             return {}
         
-        # Get current prices and calculate metrics
-        total_value = portfolio.get("total_value", 0)
-        if total_value == 0:
-            total_value = sum(h.get("current_value", 0) for h in holdings)
-        
-        if total_value == 0:
+        # HHI weights must be over INVESTED value only. The stored total_value
+        # includes cash, which deflated every weight (weights didn't sum to 1),
+        # understating HHI and overstating effective_n.
+        holdings_value = sum(h.get("current_value", 0) for h in holdings)
+        total_with_cash = holdings_value + max(portfolio.get("cash", 0), 0)
+
+        if holdings_value == 0:
             return {}
-        
+
         # Concentration (Herfindahl–Hirschman Index). HHI ∈ [1/n, 1].
         # The reciprocal 1/HHI is the canonical "effective number of holdings"
         # — interpretable as the number of equally-weighted positions that
@@ -511,7 +514,7 @@ class RiskManager:
         # portfolio has HHI=0.20, effective_n=5.0. The previous metric
         # `1 − HHI` is bounded above by `1 − 1/n` and is misleading for
         # small portfolios.
-        weights = [h.get("current_value", 0) / total_value for h in holdings if total_value > 0]
+        weights = [h.get("current_value", 0) / holdings_value for h in holdings]
         concentration = sum(w**2 for w in weights)
         effective_n = (1.0 / concentration) if concentration > 0 else 0.0
 
@@ -548,7 +551,7 @@ class RiskManager:
             "effective_number_holdings": round(effective_n, 2),  # 1 / HHI — canonical
             "diversification_score": 1 - concentration,      # legacy (Gini-Simpson), kept for back-compat
             "max_position_weight": max(weights) * 100 if weights else 0,
-            "cash_percent": (portfolio.get("cash", 0) / total_value * 100) if total_value > 0 else 0
+            "cash_percent": (portfolio.get("cash", 0) / total_with_cash * 100) if total_with_cash > 0 else 0
         }
         
         if portfolio_volatility is not None:

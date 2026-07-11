@@ -50,19 +50,23 @@ class Backtester:
         end_date: str,
         strategy: str = "buy_and_hold",
         rebalance_frequency: str = "monthly",
-        allocation: Dict[str, float] = None
+        allocation: Dict[str, float] = None,
+        monthly_deposit: float = 0.0,
     ) -> Dict:
         """
         Backtest a strategy on historical data.
-        
+
         Args:
             tickers: List of tickers to backtest
             start_date: Start date (YYYY-MM-DD)
             end_date: End date (YYYY-MM-DD)
-            strategy: Strategy type ("buy_and_hold", "rebalance", "momentum")
+            strategy: Strategy type ("buy_and_hold", "rebalance", "momentum",
+                "monthly_deposit" - DCA using the app's actual gap-fill allocator)
             rebalance_frequency: "daily", "weekly", "monthly", "quarterly"
             allocation: Dict of {ticker: weight} for rebalancing
-        
+            monthly_deposit: USD added on the first trading day of each month
+                (monthly_deposit strategy only)
+
         Returns:
             Dict with performance metrics
         """
@@ -151,13 +155,133 @@ class Backtester:
             results = self._backtest_rebalance(data, common_dates, rebalance_frequency, allocation, prices)
         elif strategy == "momentum":
             results = self._backtest_momentum(data, common_dates, prices)
+        elif strategy == "monthly_deposit":
+            results = self._backtest_monthly_deposit(common_dates, prices, monthly_deposit)
         else:
             return {"error": f"Unknown strategy: {strategy}"}
-        
+
         # Calculate metrics
         metrics = self._calculate_metrics(results, start_date, end_date)
         results.update(metrics)
-        
+
+        # For DCA, the lump-sum annualization of total_return is meaningless;
+        # the money-weighted (XIRR) figure computed by the strategy wins.
+        if "money_weighted_annual_return" in results:
+            results["annualized_return"] = results["money_weighted_annual_return"]
+
+        return results
+
+    def _backtest_monthly_deposit(
+        self,
+        dates: pd.DatetimeIndex,
+        prices: pd.DataFrame,
+        monthly_deposit: float,
+    ) -> Dict:
+        """DCA backtest of the app's ACTUAL strategy: on the first trading day
+        of each month, deposit cash and allocate it with the same target-weight
+        gap-filling engine `make deposit` uses (allocation.gap_fill_allocate).
+
+        Returns deposit-adjusted performance: total_return is gain over money
+        put in, and money_weighted_annual_return is the XIRR of the flows.
+        """
+        import allocation as alloc
+        import ledger
+
+        tickers = list(prices.columns)
+        price_mat = prices.to_numpy(dtype=float)
+        dates_series = pd.Series(dates, index=dates)
+        deposit_dates = set(pd.DatetimeIndex(
+            dates_series.groupby(dates.to_period('M')).head(1).index
+        ))
+
+        cash = float(self.initial_capital)
+        positions: Dict[str, int] = {t: 0 for t in tickers}
+        portfolio_values: List[float] = []
+        daily_returns: List[float] = []
+        flows: List[Dict] = []
+        total_costs = 0.0
+        deposits_made = 0
+        prev_value = None
+        first_deposit = True
+
+        for i, date in enumerate(dates):
+            row = price_mat[i]
+            day_prices = {t: float(row[j]) for j, t in enumerate(tickers)
+                          if np.isfinite(row[j]) and row[j] > 0}
+
+            flow = 0.0
+            if date in deposit_dates:
+                if first_deposit:
+                    flow = float(self.initial_capital)
+                    first_deposit = False
+                else:
+                    cash += monthly_deposit
+                    flow = float(monthly_deposit)
+                    deposits_made += 1
+                flows.append({"date": pd.Timestamp(date).to_pydatetime(), "amount": flow})
+
+                if len(tickers) == 1:
+                    # Single-ticker benchmark mode: all-in DCA (the gap-fill
+                    # engine would cap one ticker at its group's target weight).
+                    t = tickers[0]
+                    p = day_prices.get(t, 0)
+                    shares = int(cash // p) if p > 0 else 0
+                    if shares > 0:
+                        notional = shares * p
+                        cost = self._trade_cost(notional, self.slippage_bps,
+                                                self.commission_per_trade)
+                        cash -= notional + cost
+                        total_costs += cost
+                        positions[t] += shares
+                else:
+                    holdings = [
+                        {"ticker": t, "quantity": q,
+                         "last_price": day_prices.get(t, 0),
+                         "current_value": q * day_prices.get(t, 0)}
+                        for t, q in positions.items() if q > 0
+                    ]
+                    for b in alloc.gap_fill_allocate(holdings, cash, day_prices):
+                        cost = self._trade_cost(b["amount"], self.slippage_bps,
+                                                self.commission_per_trade)
+                        cash -= b["amount"] + cost
+                        total_costs += cost
+                        positions[b["ticker"]] = positions.get(b["ticker"], 0) + b["shares"]
+
+            value = cash + sum(q * day_prices.get(t, 0) for t, q in positions.items())
+            # Deposit-adjusted daily return: strip the same-day inflow so a
+            # deposit doesn't register as a +% "market" day.
+            if prev_value is not None and prev_value > 0:
+                daily_returns.append(((value - flow) / prev_value - 1) * 100)
+            portfolio_values.append(value)
+            prev_value = value
+
+        final_value = portfolio_values[-1] if portfolio_values else float(self.initial_capital)
+        net_invested = float(self.initial_capital) + deposits_made * float(monthly_deposit)
+        total_return = (final_value / net_invested - 1) * 100 if net_invested > 0 else 0.0
+
+        xirr_pct = None
+        if flows and len(dates) > 0:
+            r = ledger._xirr(flows, final_value, pd.Timestamp(dates[-1]).to_pydatetime())
+            if r is not None:
+                xirr_pct = r * 100.0
+
+        results = {
+            "strategy": "monthly_deposit",
+            "initial_capital": self.initial_capital,
+            "monthly_deposit": monthly_deposit,
+            "deposits_made": deposits_made,
+            "net_invested": round(net_invested, 2),
+            "final_value": final_value,
+            "total_return": total_return,  # gain over money put in
+            "portfolio_values": portfolio_values,
+            "daily_returns": daily_returns,
+            "positions": {t: q for t, q in positions.items() if q > 0},
+            "dates": dates.tolist(),
+            "total_trading_costs": round(total_costs, 2),
+            "rebalances_executed": deposits_made + 1,
+        }
+        if xirr_pct is not None:
+            results["money_weighted_annual_return"] = xirr_pct
         return results
     
     def _backtest_buy_and_hold(
@@ -505,9 +629,17 @@ class Backtester:
         
         print(f"\n💰 Performance:")
         print(f"   Initial Capital: ${results.get('initial_capital', 0):,.2f}")
+        if results.get('strategy') == 'monthly_deposit':
+            print(f"   Monthly Deposit: ${results.get('monthly_deposit', 0):,.2f}"
+                  f" x {results.get('deposits_made', 0)} deposits")
+            print(f"   Money Put In: ${results.get('net_invested', 0):,.2f}")
         print(f"   Final Value: ${results.get('final_value', 0):,.2f}")
-        print(f"   Total Return: {results.get('total_return', 0):.2f}%")
-        print(f"   Annualized Return: {results.get('annualized_return', 0):.2f}%")
+        print(f"   Total Return: {results.get('total_return', 0):.2f}%"
+              + (" (gain over money put in)" if results.get('strategy') == 'monthly_deposit' else ""))
+        if 'money_weighted_annual_return' in results:
+            print(f"   Money-Weighted Annual Return (XIRR): {results['money_weighted_annual_return']:.2f}%")
+        else:
+            print(f"   Annualized Return: {results.get('annualized_return', 0):.2f}%")
         
         print(f"\n📊 Risk Metrics:")
         print(f"   Volatility: {results.get('volatility', 0):.2f}%")
@@ -530,17 +662,33 @@ class Backtester:
         print(f"\n{'='*60}\n")
 
 if __name__ == "__main__":
-    # Example usage
-    backtester = Backtester(initial_capital=10000)
-    
-    # Test buy and hold
+    # Backtest the app's ACTUAL strategy: monthly deposits allocated by the
+    # gap-fill engine over the model portfolio, vs a 100% S&P DCA benchmark.
+    import allocation as alloc
+
+    START, END = "2019-01-01", "2024-12-31"
+    INITIAL, MONTHLY = 1000, 2000
+
+    model_tickers = sorted({g["tickers"][0] for g in alloc.TARGET_GROUPS})
+
+    backtester = Backtester(initial_capital=INITIAL)
     results = backtester.backtest_strategy(
-        tickers=["SPY", "VXUS", "BND"],
-        start_date="2020-01-01",
-        end_date="2023-12-31",
-        strategy="buy_and_hold",
-        allocation={"SPY": 0.5, "VXUS": 0.3, "BND": 0.2}
+        tickers=model_tickers,
+        start_date=START,
+        end_date=END,
+        strategy="monthly_deposit",
+        monthly_deposit=MONTHLY,
     )
-    
     backtester.print_results(results)
+
+    print("\n--- Benchmark: same deposits, all-in 100% SPY DCA ---")
+    bench = Backtester(initial_capital=INITIAL)
+    bench_results = bench.backtest_strategy(
+        tickers=["SPY"],
+        start_date=START,
+        end_date=END,
+        strategy="monthly_deposit",
+        monthly_deposit=MONTHLY,
+    )
+    bench.print_results(bench_results)
 

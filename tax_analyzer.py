@@ -18,16 +18,16 @@ class TaxAnalyzer:
     # Israeli tax rates (2024)
     CAPITAL_GAINS_TAX = 0.25  # 25% on capital gains
     DIVIDEND_TAX = 0.25  # 25% on dividends
-    US_WITHHOLDING_TAX = 0.15  # 15% US withholding (with W-8BEN form)
-    
+    # US-Israel treaty withholding on portfolio dividends for Israeli individuals
+    # is 25% (Israel is an exception to the common 15% treaty rate).
+    US_WITHHOLDING_TAX = 0.25
+
     # Tax exemptions
     ANNUAL_EXEMPTION_ILS = 0  # No exemption for capital gains (as of 2024)
-    # ⚠️ UNVERIFIED: Israeli capital-gains tax on marketable securities is a flat 25%
-    # with no general "long-term holding" reduction — this 20% reduction looks like a
-    # US-style concept misapplied. It is left configurable (default preserves the old
-    # behavior) but should be CONFIRMED WITH A TAX ADVISOR before relying on it.
-    # Set LONG_TERM_REDUCTION=0 in the environment to disable it.
-    LONG_TERM_REDUCTION = float(os.getenv("LONG_TERM_REDUCTION", "0.20"))
+    # Israeli capital-gains tax on marketable securities is a flat 25% with no
+    # long-term holding reduction (that is a US-style concept). Default is 0;
+    # LONG_TERM_REDUCTION stays configurable only for experimentation.
+    LONG_TERM_REDUCTION = float(os.getenv("LONG_TERM_REDUCTION", "0"))
 
     def __init__(self, portfolio_file: str = "portfolio.json", exchange_rate: float = None):
         self.portfolio_file = portfolio_file
@@ -185,18 +185,17 @@ class TaxAnalyzer:
             exchange_rate = self.exchange_rate_usd_ils
         
         dividend_ils = dividend_amount_usd * exchange_rate
-        
-        # US withholding tax (if W-8BEN form filed)
+
+        # US withholding tax (with W-8BEN form; US-Israel treaty rate 25%)
         us_withholding_usd = dividend_amount_usd * self.US_WITHHOLDING_TAX
         us_withholding_ils = us_withholding_usd * exchange_rate
-        
-        # Remaining dividend after US tax
-        remaining_dividend_usd = dividend_amount_usd - us_withholding_usd
-        remaining_dividend_ils = remaining_dividend_usd * exchange_rate
-        
-        # Israeli tax on remaining dividend
-        israeli_tax_ils = remaining_dividend_ils * self.DIVIDEND_TAX
-        
+
+        # Israel taxes the GROSS dividend at 25% and credits the US withholding
+        # (foreign tax credit) — the two are not stacked. With 25% withheld in
+        # the US, the additional Israeli tax is 0 and the total burden is 25%.
+        israeli_gross_tax_ils = dividend_ils * self.DIVIDEND_TAX
+        israeli_tax_ils = max(0.0, israeli_gross_tax_ils - us_withholding_ils)
+
         # Total tax
         total_tax_ils = us_withholding_ils + israeli_tax_ils
         
@@ -284,21 +283,8 @@ class TaxAnalyzer:
                 f"Consider offsetting gains with losses: {tax_analysis['total_losses']:,.2f} ILS available"
             )
         
-        # Check for long-term holdings
-        long_term_holdings = []
-        for holding in holdings:
-            purchase_date = holding.get("purchase_date") or portfolio.get("last_updated")
-            if purchase_date:
-                purchase_dt = datetime.fromisoformat(purchase_date.replace('Z', '+00:00'))
-                days_held = (datetime.now() - purchase_dt).days
-                if days_held > 730:
-                    long_term_holdings.append(holding.get("ticker"))
-        
-        if long_term_holdings:
-            tax_analysis["recommendations"].append(
-                f"Long-term holdings (>2 years) eligible for tax reduction: {', '.join(long_term_holdings)}"
-            )
-        
+        # Note: no long-term recommendation — Israeli securities tax is a flat 25%
+        # regardless of holding period.
         return tax_analysis
     
     def print_tax_report(self, tax_analysis: Dict):
@@ -314,8 +300,6 @@ class TaxAnalyzer:
                 print(f"      Gain: ${sale['total_gain_usd']:,.2f} ({sale['total_gain_ils']:,.2f} ILS)")
                 print(f"      Tax: {sale['capital_gains_tax_ils']:,.2f} ILS ({sale['effective_tax_rate']:.1f}%)")
                 print(f"      Net Proceeds: {sale['net_proceeds_ils']:,.2f} ILS")
-                if sale['is_long_term']:
-                    print(f"      ✅ Long-term holding - tax reduction applied")
             
             print(f"\n   Total Capital Gains Tax: {tax_analysis['total_capital_gains_tax']:,.2f} ILS")
             if tax_analysis['total_losses'] > 0:

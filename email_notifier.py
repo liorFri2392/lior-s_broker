@@ -42,7 +42,9 @@ class EmailNotifier:
 
     def _send(self, msg: MIMEMultipart) -> None:
         """Send a prepared message via Gmail SMTP (shared by all senders)."""
-        with smtplib.SMTP('smtp.gmail.com', 587) as server:
+        # timeout: a hung SMTP connection previously stalled the CI job until
+        # its 6-hour limit.
+        with smtplib.SMTP('smtp.gmail.com', 587, timeout=60) as server:
             server.starttls()
             server.login(self.sender_email, self.sender_password)
             server.send_message(msg)

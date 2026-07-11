@@ -138,7 +138,24 @@ class CriticalAlertSystem:
                 best_by_ticker[t] = item
         
         merged_sells = list(best_by_ticker.values())
-        merged = non_sell + merged_sells
+
+        # A ticker may be sold by at most ONE item. REPLACE entries whose
+        # sell_ticker already has a SELL (or an earlier REPLACE) are dropped -
+        # otherwise apply-time decrements the same position twice and credits
+        # cash for shares that were already sold.
+        sell_tickers = set(best_by_ticker.keys())
+        seen_replace_sells: set = set()
+        deduped_non_sell: List[Dict] = []
+        for item in non_sell:
+            if item.get("type") == "REPLACE":
+                st = (item.get("sell_ticker") or "").upper()
+                if st and (st in sell_tickers or st in seen_replace_sells):
+                    continue
+                if st:
+                    seen_replace_sells.add(st)
+            deduped_non_sell.append(item)
+
+        merged = deduped_non_sell + merged_sells
         any_critical = any(
             i.get("type") == "SELL" and i.get("priority") == "CRITICAL"
             for i in merged_sells
@@ -206,9 +223,12 @@ class CriticalAlertSystem:
         
         critical_items = []
         
-        # 1. Analyze current portfolio for urgent sells
+        # 1. Analyze current portfolio for urgent sells.
+        # record_run=False: an automated alert scan is not a conscious "make analyze"
+        # run, so it must not stamp last_analyze_run_date (that would silence the
+        # 30-day reminder and keep the review cooldown permanently active).
         print("Analyzing current portfolio for urgent actions...")
-        portfolio_analysis = self.analyzer.analyze()
+        portfolio_analysis = self.analyzer.analyze(record_run=False)
         
         if portfolio_analysis:
             holdings_analysis = portfolio_analysis.get("holdings_analysis", [])
@@ -254,6 +274,31 @@ class CriticalAlertSystem:
                             "current_price": next((h.get("current_price", 0) for h in holdings_analysis if h.get("ticker") == rec.get("ticker")), 0),
                         })
         
+        # 1b. Stop-loss / take-profit triggers from the risk manager. These
+        # previously went only to a CI text artifact and never reached the
+        # email - a CRITICAL stop-loss was effectively invisible.
+        try:
+            from risk_manager import RiskManager
+            rm = RiskManager(self.portfolio_file)
+            for act in rm.check_stop_loss_take_profit():
+                qty = int(act.get("quantity", 0) or 0)
+                price = float(act.get("current_price", 0) or 0)
+                if qty <= 0 or price <= 0:
+                    continue
+                critical_items.append({
+                    "type": "SELL",
+                    "ticker": act.get("ticker", ""),
+                    "priority": act.get("priority", "HIGH"),
+                    "reason": act.get("reason", "Risk trigger"),
+                    "amount": round(qty * price, 2),
+                    "shares": qty,
+                    "score": 0 if act.get("priority") == "CRITICAL" else 50,
+                    "current_price": price,
+                    "quantity": qty,
+                })
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Risk-manager stop-loss check failed: {e}")
+
         # 2. Scan for critical buy opportunities (high-yield ETFs)
         # Only if portfolio is significantly unbalanced and cash available
         portfolio = self.analyzer.load_portfolio()
@@ -645,16 +690,15 @@ class CriticalAlertSystem:
                     logger.debug(f"Skipping {etf} - portfolio already has {bonds_percent:.1f}% bonds")
                     continue
                 
-                # Only recommend Core/Satellite if portfolio has < 80% stocks
+                # Only recommend Core/Satellite if portfolio has < 80% stocks.
+                # (The old "still allow if bonds < 20%" carve-out was inverted:
+                # when stocks are >=80%, bonds are almost always <20%, so stock
+                # buys were never blocked - the opposite of balancing.)
                 stocks_value = portfolio_value - bonds_value
                 stocks_percent = (stocks_value / portfolio_value * 100) if portfolio_value > 0 else 100
-                if (is_core or not is_bond) and stocks_percent >= 80:
-                    # Still allow if bonds are needed (to balance)
-                    if bonds_percent < 20:
-                        pass  # Allow to balance
-                    else:
-                        logger.debug(f"Skipping {etf} - portfolio already has {stocks_percent:.1f}% stocks")
-                        continue
+                if not is_bond and stocks_percent >= 80:
+                    logger.debug(f"Skipping {etf} - portfolio already has {stocks_percent:.1f}% stocks")
+                    continue
                 
                 # Boost score for Core and Bonds (they're essential) - but cap at 100
                 if is_core:
@@ -746,7 +790,12 @@ class CriticalAlertSystem:
                             "leverage_multiplier": 1.0,
                             "category": "CORE" if is_core else ("BONDS" if is_bond else "SATELLITE")
                         })
-                
+                        # Buys share ONE cash pool: deduct so the next candidate
+                        # is sized against what's actually left (previously every
+                        # buy was sized against the full balance and the total
+                        # could exceed cash).
+                        cash_available -= recommended_amount
+
                 # Progress indicator
                 if (i + 1) % 10 == 0:
                     print(f"   Progress: {i + 1}/{min(len(analyzed_etfs), 60)} ETFs analyzed...")
@@ -1266,13 +1315,20 @@ class CriticalAlertSystem:
             
             # Send email alerts
             email_sent = self.send_alerts(results)
-            
-            # After sending email, automatically apply recommendations to portfolio
-            if email_sent and specific_actions:
+
+            # Recommendations are NOT applied automatically: portfolio.json must
+            # reflect trades actually executed at the broker, not suggestions.
+            # (The old auto_apply-after-email recorded phantom trades daily in CI.)
+            # Opt back in explicitly with ALERTS_AUTO_APPLY=1 if you really want it.
+            auto_apply_env = os.environ.get("ALERTS_AUTO_APPLY", "").strip().lower() in ("1", "true", "yes")
+            if email_sent and specific_actions and auto_apply_env:
                 print("\n" + "="*60)
-                print("AUTO-UPDATING PORTFOLIO FROM EMAIL RECOMMENDATIONS")
+                print("AUTO-UPDATING PORTFOLIO FROM EMAIL RECOMMENDATIONS (ALERTS_AUTO_APPLY=1)")
                 print("="*60)
                 self.apply_recommendations_to_portfolio(specific_actions, auto_apply=True)
+            elif email_sent and specific_actions:
+                print("\nℹ️  Portfolio NOT modified. After you execute trades at your broker,")
+                print("   run 'make analyze' and confirm them there.")
         elif trends_only:
             print(f"\n📊 Detected {len(trends_only)} hot trend(s), but no specific actionable recommendations:")
             for item in trends_only:
@@ -1290,7 +1346,9 @@ class CriticalAlertSystem:
 if __name__ == "__main__":
     alert_system = CriticalAlertSystem()
     results = alert_system.run()
-    
-    # Exit with code 0 if no critical items, 1 if critical items found
-    sys.exit(0 if not results.get("has_critical") else 1)
+
+    # Finding alerts is a SUCCESSFUL run - exit 0 either way. (The old
+    # exit-1-on-alerts forced continue-on-error in CI, which also masked real
+    # crashes; now a non-zero exit always means the pipeline itself broke.)
+    sys.exit(0)
 

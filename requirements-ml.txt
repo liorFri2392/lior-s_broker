@@ -1,0 +1,4 @@
+# Optional ML extras - only needed for ml_predictor.py LSTM experiments.
+# The rest of the app (analyze/deposit/alerts/risk/tax) never imports this.
+-r requirements.txt
+tensorflow>=2.13.0
