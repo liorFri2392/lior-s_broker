@@ -206,9 +206,12 @@ class CriticalAlertSystem:
         
         critical_items = []
         
-        # 1. Analyze current portfolio for urgent sells
+        # 1. Analyze current portfolio for urgent sells.
+        # record_run=False: an automated alert scan is not a conscious "make analyze"
+        # run, so it must not stamp last_analyze_run_date (that would silence the
+        # 30-day reminder and keep the review cooldown permanently active).
         print("Analyzing current portfolio for urgent actions...")
-        portfolio_analysis = self.analyzer.analyze()
+        portfolio_analysis = self.analyzer.analyze(record_run=False)
         
         if portfolio_analysis:
             holdings_analysis = portfolio_analysis.get("holdings_analysis", [])
@@ -1266,13 +1269,20 @@ class CriticalAlertSystem:
             
             # Send email alerts
             email_sent = self.send_alerts(results)
-            
-            # After sending email, automatically apply recommendations to portfolio
-            if email_sent and specific_actions:
+
+            # Recommendations are NOT applied automatically: portfolio.json must
+            # reflect trades actually executed at the broker, not suggestions.
+            # (The old auto_apply-after-email recorded phantom trades daily in CI.)
+            # Opt back in explicitly with ALERTS_AUTO_APPLY=1 if you really want it.
+            auto_apply_env = os.environ.get("ALERTS_AUTO_APPLY", "").strip().lower() in ("1", "true", "yes")
+            if email_sent and specific_actions and auto_apply_env:
                 print("\n" + "="*60)
-                print("AUTO-UPDATING PORTFOLIO FROM EMAIL RECOMMENDATIONS")
+                print("AUTO-UPDATING PORTFOLIO FROM EMAIL RECOMMENDATIONS (ALERTS_AUTO_APPLY=1)")
                 print("="*60)
                 self.apply_recommendations_to_portfolio(specific_actions, auto_apply=True)
+            elif email_sent and specific_actions:
+                print("\nℹ️  Portfolio NOT modified. After you execute trades at your broker,")
+                print("   run 'make analyze' and confirm them there.")
         elif trends_only:
             print(f"\n📊 Detected {len(trends_only)} hot trend(s), but no specific actionable recommendations:")
             for item in trends_only:

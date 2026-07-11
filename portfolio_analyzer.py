@@ -1759,13 +1759,16 @@ class PortfolioAnalyzer:
         
         return rebalancing
     
-    def analyze(self) -> Dict:
-        """Main analysis function."""
-        # Record that analyze was run (for 30-day reminder in GitHub Actions)
-        portfolio = self.load_portfolio()
-        portfolio["last_analyze_run_date"] = datetime.now().strftime("%Y-%m-%d")
-        self.save_portfolio(portfolio)
-        
+    def analyze(self, record_run: bool = True) -> Dict:
+        """Main analysis function.
+
+        ``record_run`` controls whether ``last_analyze_run_date`` is stamped at the
+        END of the run. It used to be stamped here at the start, which made the
+        30-day rebalancing cooldown see "today" on every run and therefore be
+        permanently active (check_rebalancing reloads the portfolio from disk).
+        Automated callers (critical_alert / CI) pass record_run=False so the
+        30-day "run make analyze" reminder still reflects conscious user runs.
+        """
         print("=" * 60)
         print("Portfolio Analysis Starting...")
         print("=" * 60)
@@ -1921,12 +1924,20 @@ class PortfolioAnalyzer:
         
         # Print results
         self.print_analysis_results(results)
-        
+
         # Read-only mode: never ask to update portfolio (CI, make analyze-preview, or no TTY)
         read_only = (
             os.environ.get("ANALYZE_READONLY", "").strip().lower() in ("1", "true", "yes")
             or not sys.stdin.isatty()
         )
+
+        # Stamp the run date now that the analysis (and its cooldown checks,
+        # which read the PREVIOUS stamp) has completed. Read-only/CI runs never
+        # stamp, so the 30-day reminder tracks conscious interactive runs only.
+        if record_run and not read_only:
+            portfolio["last_analyze_run_date"] = datetime.now().strftime("%Y-%m-%d")
+            self.save_portfolio(portfolio)
+
         if read_only:
             print("\n📋 Read-only mode: portfolio was not modified. Run 'make analyze' (without read-only) to update after you execute trades.\n")
             return results
