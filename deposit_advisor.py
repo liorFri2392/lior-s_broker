@@ -15,6 +15,7 @@ import numpy as np
 import market_data
 from portfolio_analyzer import PortfolioAnalyzer
 from advanced_analysis import AdvancedAnalyzer
+import allocation
 import etf_universe
 import github_secret
 import ledger
@@ -1131,15 +1132,85 @@ class DepositAdvisor:
             else:
                 print("Please enter 'yes' or 'no' (כן/לא)")
     
+    def recommend_gap_fill(self, deposit_amount_ils: float, portfolio: Dict) -> List[Dict]:
+        """Target-weight gap-filling deposit recommendations (the default).
+
+        Instead of ranking momentum scores (which fragmented the portfolio into
+        dozens of near-duplicate dust positions), classify holdings into
+        equivalence groups, compare against the 80/20 target weights, and send
+        every deposit dollar to the largest below-target gap - always topping
+        up the held ticker in a group before ever buying a new one.
+        """
+        exchange_rate = self.get_exchange_rate()
+        deposit_usd = deposit_amount_ils / exchange_rate
+        holdings = portfolio.get("holdings", [])
+        # Idle cash joins the budget so leftovers from whole-share flooring
+        # get invested next month instead of accumulating forever.
+        budget_usd = deposit_usd + max(float(portfolio.get("cash", 0) or 0), 0.0)
+
+        # Prices: prefer freshly refreshed holding prices; batch-fetch the rest.
+        prices = {(h.get("ticker") or "").upper(): float(h.get("last_price", 0) or 0)
+                  for h in holdings}
+        needed = {allocation.choose_instrument(g["key"], holdings)
+                  for g in allocation.TARGET_GROUPS}
+        missing = [t for t in needed if prices.get(t, 0) <= 0]
+        if missing:
+            fetched, _, _ = market_data.get_prices(missing)
+            prices.update({k.upper(): v for k, v in (fetched or {}).items()})
+
+        buys = allocation.gap_fill_allocate(holdings, budget_usd, prices)
+
+        # Report: current vs target, then the buys.
+        print("\n" + "-" * 60)
+        print("CURRENT vs TARGET ALLOCATION (80/20 - 50 core / 30 satellite / 20 bonds)")
+        print("-" * 60)
+        for row in allocation.allocation_report(holdings, portfolio.get("cash", 0)):
+            drift = row["current_pct"] - row["target_pct"]
+            marker = "🔻" if drift < -1 else ("🔺" if drift > 1 else "✅")
+            print(f"  {marker} {row['group']:<22} {row['current_pct']:5.1f}%"
+                  f"  (target {row['target_pct']:4.1f}%)  via {row['instrument']}")
+
+        print("\n" + "-" * 60)
+        print(f"RECOMMENDED PURCHASES  (deposit ${deposit_usd:,.2f}"
+              f" + idle cash = budget ${budget_usd:,.2f})")
+        print("-" * 60)
+        if not buys:
+            print("  Nothing affordable below target this month - budget stays as cash")
+            print("  and rolls into next month's deposit.")
+        recommendations = []
+        for i, b in enumerate(buys, 1):
+            status = "increase existing holding" if not b["is_new"] else "NEW position (group not held yet)"
+            print(f"\n  {i}. BUY {b['shares']} x {b['ticker']} @ ${b['price']:.2f}"
+                  f" = ${b['amount']:,.2f}")
+            print(f"     Group: {b['group']} ({b['category']}) - {status}")
+            recommendations.append({
+                "ticker": b["ticker"],
+                "shares": b["shares"],
+                "price": b["price"],
+                "allocation_amount": b["amount"],
+                "category": b["category"],
+                "reason": f"Fills largest below-target gap ({b['group']})",
+            })
+        spent = sum(r["allocation_amount"] for r in recommendations)
+        print("\n" + "-" * 60)
+        print(f"  Total: ${spent:,.2f}   Left as cash: ${budget_usd - spent:,.2f}")
+        print(f"  (₪ reference: total ₪{spent * exchange_rate:,.2f} @ {exchange_rate:.4f})")
+        print("-" * 60)
+        return recommendations
+
     def advise(self, deposit_amount_ils: float):
         """Main advisory function."""
+        if deposit_amount_ils is None or deposit_amount_ils <= 0:
+            print("Error: deposit amount must be a positive number of ILS.")
+            return []
+
         print("=" * 60)
         print("DEPOSIT ADVISORY SYSTEM")
         print("=" * 60)
-        
+
         # Refresh prices before deposit advice (same data source as make analyze, without trade prompts)
         portfolio = self.analyzer.refresh_portfolio_prices(verbose=True)
-        
+
         if not os.path.exists(self.portfolio_file):
             print("Warning: Portfolio file not found. Creating new portfolio structure.")
             portfolio = {
@@ -1149,14 +1220,18 @@ class DepositAdvisor:
                 "last_updated": None,
                 "total_value": 0
             }
-        
-        # Get recommendations
-        recommendations = self.recommend_etfs(deposit_amount_ils, portfolio)
-        
-        # Print recommendations
+
         exchange_rate = self.get_exchange_rate()
         deposit_amount_usd = deposit_amount_ils / exchange_rate
-        self.print_recommendations(deposit_amount_ils, recommendations, portfolio)
+
+        # Default: convergent gap-filling toward the 80/20 target weights.
+        # DEPOSIT_ADVISOR_LEGACY=1 restores the old score-ranked picker.
+        use_legacy = os.environ.get("DEPOSIT_ADVISOR_LEGACY", "").strip().lower() in ("1", "true", "yes")
+        if use_legacy:
+            recommendations = self.recommend_etfs(deposit_amount_ils, portfolio)
+            self.print_recommendations(deposit_amount_ils, recommendations, portfolio)
+        else:
+            recommendations = self.recommend_gap_fill(deposit_amount_ils, portfolio)
         
         # Ask for confirmation
         if recommendations:
@@ -1288,9 +1363,12 @@ if __name__ == "__main__":
     
     try:
         deposit_amount = float(sys.argv[1])
-        advisor = DepositAdvisor()
-        advisor.advise(deposit_amount)
     except ValueError:
         print("Error: Please provide a valid deposit amount in ILS")
         sys.exit(1)
+    if deposit_amount <= 0:
+        print("Error: Deposit amount must be positive (ILS)")
+        sys.exit(1)
+    advisor = DepositAdvisor()
+    advisor.advise(deposit_amount)
 
