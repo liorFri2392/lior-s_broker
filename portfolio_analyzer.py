@@ -19,6 +19,7 @@ from advanced_analysis import AdvancedAnalyzer
 from tax_analyzer import TaxAnalyzer
 import market_data
 import etf_universe
+import ledger
 import portfolio_io
 import github_secret
 import scoring
@@ -602,6 +603,10 @@ class PortfolioAnalyzer:
                 except Exception as e:
                     logger.debug(f"Failed to parse start_date: {e}")
         
+        # True (deposit-adjusted) performance from the ledger. The baseline
+        # "cumulative return" above counts deposits as gains; this one doesn't.
+        true_performance = ledger.performance(portfolio, total_value)
+
         return {
             "total_value": total_value,
             "cash": portfolio.get("cash", 0),
@@ -615,7 +620,8 @@ class PortfolioAnalyzer:
             "days_since_start": days_since_start,
             "hours_since_start": hours_since_start,
             "minutes_since_start": minutes_since_start,
-            "start_date": start_date
+            "start_date": start_date,
+            "true_performance": true_performance,
         }
     
     def find_best_etfs_to_buy(self, amount_usd: float, current_holdings: List[str], exclude_tickers: List[str] = None) -> List[Dict]:
@@ -1807,11 +1813,20 @@ class PortfolioAnalyzer:
             for h in portfolio["holdings"]:
                 price = prices.get(h["ticker"], h.get("last_price", 0))
                 baseline_value += h["quantity"] * price
-            
+
             portfolio["baseline_value"] = baseline_value
             portfolio["start_date"] = datetime.now(timezone.utc).isoformat()
             self.save_portfolio(portfolio)
             logger.info(f"📊 Initialized baseline tracking: ${baseline_value:,.2f} on {portfolio['start_date']}")
+
+        # Seed the deposit/trade ledger if missing so true (deposit-adjusted)
+        # returns can be tracked from now on.
+        current_total = portfolio.get("cash", 0) + sum(
+            h["quantity"] * prices.get(h["ticker"], h.get("last_price", 0))
+            for h in portfolio["holdings"]
+        )
+        if ledger.ensure_ledger(portfolio, current_total):
+            self.save_portfolio(portfolio)
         
         # Display market status
         print(f"\n📊 Market Status: {market_message}")
@@ -2021,15 +2036,18 @@ class PortfolioAnalyzer:
                 "last_price": price,
                 "current_value": shares * price,
             })
+        ledger.record_trade(portfolio, "buy", ticker, shares, price)
 
-    def _apply_sell(self, portfolio: Dict, ticker: str, shares: int, price: float = 0) -> float:
+    def _apply_sell(self, portfolio: Dict, ticker: str, shares: int, price: float = 0) -> Tuple[float, int]:
         """Reduce/remove ``shares`` of ``ticker`` from the portfolio. ``price`` (if
-        > 0) updates last_price on the remaining position. Returns the price used
-        for the holding's valuation (caller decides how to handle cash proceeds)."""
+        > 0) updates last_price on the remaining position. Returns
+        ``(used_price, shares_actually_sold)`` — the sold count is clamped to the
+        held quantity so callers never credit cash for shares that don't exist."""
         for holding in portfolio.get("holdings", []):
             if holding["ticker"] == ticker:
                 current_quantity = holding.get("quantity", 0)
-                new_quantity = max(0, current_quantity - shares)
+                sold = min(max(shares, 0), current_quantity)
+                new_quantity = current_quantity - sold
                 used_price = price if price > 0 else holding.get("last_price", 0)
                 if new_quantity > 0:
                     holding["quantity"] = new_quantity
@@ -2037,8 +2055,10 @@ class PortfolioAnalyzer:
                     holding["current_value"] = new_quantity * used_price
                 else:
                     portfolio["holdings"].remove(holding)
-                return used_price
-        return price
+                if sold > 0 and used_price > 0:
+                    ledger.record_trade(portfolio, "sell", ticker, sold, used_price)
+                return used_price, sold
+        return price, 0
 
     def update_portfolio_from_rebalancing(self, portfolio: Dict, rebalancing: Dict, analyses: List[Dict]):
         """Update portfolio.json based on rebalancing recommendations."""
@@ -2049,9 +2069,9 @@ class PortfolioAnalyzer:
             if rec["action"] == "SELL":
                 ticker = rec["ticker"]
                 shares_to_sell = rec.get("reduce_shares", rec.get("sell_shares", 0))
-                used_price = self._apply_sell(portfolio, ticker, shares_to_sell, rec.get("current_price_usd", 0))
-                # Add proceeds to cash
-                portfolio["cash"] = portfolio.get("cash", 0) + shares_to_sell * used_price
+                used_price, sold = self._apply_sell(portfolio, ticker, shares_to_sell, rec.get("current_price_usd", 0))
+                # Add proceeds to cash (only for shares actually held/sold)
+                portfolio["cash"] = portfolio.get("cash", 0) + sold * used_price
 
         # Process BUY actions
         for rec in rebalancing.get("buy_recommendations", []):
@@ -2110,7 +2130,12 @@ class PortfolioAnalyzer:
                     break
 
             # SELL: Reduce or remove the old holding
-            self._apply_sell(portfolio, sell_ticker, shares_to_sell, sell_price)
+            used_price, sold = self._apply_sell(portfolio, sell_ticker, shares_to_sell, sell_price)
+            if sold < shares_to_sell:
+                # Fewer shares held than the recommendation assumed - shrink the
+                # proceeds so cash reflects reality, not the plan.
+                sell_amount = sold * used_price
+                remaining_cash = sell_amount - buy_amount
 
             # BUY: Add or update the new holding
             self._apply_buy(portfolio, buy_ticker, shares_to_buy, buy_price)
@@ -2180,7 +2205,7 @@ class PortfolioAnalyzer:
                         pass
                 
                 print("\n" + "-" * 60)
-                print("📈 CUMULATIVE PERFORMANCE (Since Start)")
+                print("📈 VALUE GROWTH SINCE START (includes your deposits - NOT investment return)")
                 print("-" * 60)
                 print(f"Baseline Value: ₪{baseline_ils:,.2f} (${baseline:,.2f})")
                 print(f"Start Date: {start_date_str}")
@@ -2214,16 +2239,25 @@ class PortfolioAnalyzer:
                     return_icon = "📉"
                     return_color = ""
                 
-                print(f"{return_icon} Cumulative Return: {return_color}₪{cumulative_return_ils:+,.2f} (${cumulative_return:+,.2f})")
-                print(f"{return_icon} Return Percentage: {return_color}{cumulative_return_pct:+.2f}%")
-                
-                # Annualized return if we have enough days
-                if days_since_start and days_since_start >= 30 and baseline > 0:
-                    try:
-                        annualized_return = ((metrics['total_value'] / baseline) ** (365.25 / days_since_start) - 1) * 100
-                        print(f"📊 Annualized Return: {annualized_return:+.2f}%")
-                    except Exception as e:
-                        logger.debug(f"Failed to calculate annualized return: {e}")
+                print(f"{return_icon} Value Growth: {return_color}₪{cumulative_return_ils:+,.2f} (${cumulative_return:+,.2f})")
+                print(f"{return_icon} Growth Percentage: {return_color}{cumulative_return_pct:+.2f}% (deposits inflate this number)")
+
+        # True performance: gains net of deposits, from the transaction ledger.
+        perf = metrics.get("true_performance")
+        if perf:
+            gain_ils = perf["gain_usd"] * exchange_rate
+            invested_ils = perf["net_invested_usd"] * exchange_rate
+            icon = "📈" if perf["gain_usd"] >= 0 else "📉"
+            print("\n" + "-" * 60)
+            print("💵 TRUE INVESTMENT PERFORMANCE (net of deposits)")
+            print("-" * 60)
+            print(f"Tracking Since: {perf['ledger_start_date']} ({perf['days']} days)")
+            print(f"Money Put In: ₪{invested_ils:,.2f} (${perf['net_invested_usd']:,.2f})")
+            print(f"{icon} Investment Gain: ₪{gain_ils:+,.2f} (${perf['gain_usd']:+,.2f})  [{perf['gain_pct']:+.2f}%]")
+            if perf.get("xirr_pct") is not None:
+                print(f"📊 Money-Weighted Annual Return (XIRR): {perf['xirr_pct']:+.2f}%")
+            else:
+                print("📊 Money-Weighted Annual Return (XIRR): available after 30 days of tracking")
         
         # Show 80/20 balance status
         balance_info = results["rebalancing"].get("balance_80_20", {})

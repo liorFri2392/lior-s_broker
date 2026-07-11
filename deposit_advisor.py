@@ -17,6 +17,7 @@ from portfolio_analyzer import PortfolioAnalyzer
 from advanced_analysis import AdvancedAnalyzer
 import etf_universe
 import github_secret
+import ledger
 import scoring
 
 # ETF classifications - the single source of truth lives in etf_universe.py.
@@ -1091,6 +1092,16 @@ class DepositAdvisor:
                 }
                 portfolio["holdings"].append(new_holding)
         
+        # Ledger: record the deposit and each executed buy so returns are
+        # computed net of money put in (deposits are not "gains").
+        ledger.record_deposit(
+            portfolio, deposit_amount_usd,
+            amount_ils=deposit_amount_usd * exchange_rate,
+            exchange_rate=exchange_rate,
+        )
+        for rec in recommendations:
+            ledger.record_trade(portfolio, "buy", rec["ticker"], rec["shares"], rec["price"])
+
         # Save updated portfolio
         portfolio["last_updated"] = datetime.now().isoformat()
         with open(self.portfolio_file, 'w', encoding='utf-8') as f:
