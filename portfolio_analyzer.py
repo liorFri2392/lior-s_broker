@@ -324,23 +324,36 @@ class PortfolioAnalyzer:
             # News via the shared cached market layer (free, no API key needed).
             news = market_data.get_news(ticker)
 
+            def _fields(article: Dict) -> Tuple[str, str, str]:
+                """Title/source/published across yfinance schemas: old flat
+                (title/publisher/providerPublishTime) and new nested content
+                (content.title/content.provider.displayName/content.pubDate)."""
+                content = article.get('content') if isinstance(article.get('content'), dict) else {}
+                title = article.get('title') or content.get('title') or ''
+                provider = content.get('provider') if isinstance(content.get('provider'), dict) else {}
+                source = article.get('publisher') or provider.get('displayName') or 'Unknown'
+                published = 'Unknown'
+                if article.get('providerPublishTime'):
+                    published = datetime.fromtimestamp(article['providerPublishTime']).isoformat()
+                elif content.get('pubDate'):
+                    published = str(content['pubDate'])
+                return title, source, published
+
             if news:
+                parsed = [_fields(a) for a in news]
                 sentiment["articles_count"] = len(news)
                 sentiment["recent_news"] = [
-                    {
-                        "title": article.get('title', ''),
-                        "source": article.get('publisher', 'Unknown'),
-                        "published": datetime.fromtimestamp(article.get('providerPublishTime', 0)).isoformat() if article.get('providerPublishTime') else 'Unknown'
-                    }
-                    for article in news[:5]
+                    {"title": title, "source": source, "published": published}
+                    for title, source, published in parsed[:5]
                 ]
-                
+
                 # Simple sentiment analysis based on titles
                 positive_words = ['gain', 'rise', 'up', 'growth', 'profit', 'beat', 'strong', 'bullish', 'surge']
                 negative_words = ['fall', 'drop', 'down', 'loss', 'miss', 'weak', 'bearish', 'decline', 'crash']
-                
-                positive_count = sum(1 for article in news if any(word in article.get('title', '').lower() for word in positive_words))
-                negative_count = sum(1 for article in news if any(word in article.get('title', '').lower() for word in negative_words))
+
+                titles = [title.lower() for title, _, _ in parsed]
+                positive_count = sum(1 for t in titles if any(word in t for word in positive_words))
+                negative_count = sum(1 for t in titles if any(word in t for word in negative_words))
                 
                 if positive_count > negative_count:
                     sentiment["score"] = 50 + min(positive_count * 5, 30)

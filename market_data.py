@@ -248,10 +248,15 @@ class MarketData:
             try:
                 if raw is None or raw.empty:
                     df = pd.DataFrame()
+                elif isinstance(raw.columns, pd.MultiIndex):
+                    # yfinance >= 0.2.x returns MultiIndex columns with
+                    # group_by="ticker" even for a SINGLE ticker; the old
+                    # len(misses)==1 fast path returned that frame unchanged,
+                    # so "Close" lookups downstream silently found nothing.
+                    if t in raw.columns.get_level_values(0):
+                        df = raw[t].dropna(how="all")
                 elif len(misses) == 1:
                     df = raw.dropna(how="all")
-                elif isinstance(raw.columns, pd.MultiIndex) and t in raw.columns.get_level_values(0):
-                    df = raw[t].dropna(how="all")
             except Exception:  # noqa: BLE001
                 df = pd.DataFrame()
 

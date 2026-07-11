@@ -284,7 +284,11 @@ class DepositAdvisor:
             info = market_data.get_info(ticker)
             analysis["name"] = info.get("longName", ticker)
             analysis["category"] = info.get("category", "Unknown")
-            analysis["expense_ratio"] = info.get("annualReportExpenseRatio", 0) * 100
+            # yfinance often returns the key with a None value; `None * 100`
+            # raised TypeError into the broad except below, silently dropping
+            # the candidate from consideration entirely.
+            expense = info.get("annualReportExpenseRatio")
+            analysis["expense_ratio"] = (expense * 100) if isinstance(expense, (int, float)) else 0
 
             # Get historical data for analysis. auto_adjust=True so 'Close'
             # is the dividend- and split-adjusted total-return series — without
