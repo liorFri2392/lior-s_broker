@@ -325,8 +325,10 @@ class CriticalAlertSystem:
             critical_buys = self.scan_critical_buy_opportunities()
             
             # Filter to only most critical (limit to top 3-5)
-            # Prioritize bonds if portfolio lacks bonds
-            if bonds_percent < 15:
+            # Prioritize bonds if meaningfully under the bond target (75% of it)
+            import allocation as _alloc
+            bond_priority_pct = _alloc.category_targets().get("BONDS", 0.15) * 100 * 0.75
+            if bonds_percent < bond_priority_pct:
                 bond_buys = [b for b in critical_buys if b.get("category") == "BONDS"]
                 other_buys = [b for b in critical_buys if b.get("category") != "BONDS"]
                 # Top 2 bonds + top 2 others (max 4 total)
@@ -679,24 +681,28 @@ class CriticalAlertSystem:
                         logger.debug(f"Skipping {etf} - already has {holding_weight:.1f}% allocation")
                         continue
                 
-                # Check if portfolio actually needs this (80/20 balance check)
-                # Calculate current allocation
-                bonds_value = sum(h.get("current_value", 0) for h in portfolio.get("holdings", []) 
+                # Check if portfolio actually needs this (strategy balance check;
+                # targets from allocation.py - same source as analyze/deposit)
+                import allocation as _alloc
+                _cats = _alloc.category_targets()
+                target_bonds_pct = _cats.get("BONDS", 0.15) * 100
+                target_stocks_pct = 100 - target_bonds_pct
+                bonds_value = sum(h.get("current_value", 0) for h in portfolio.get("holdings", [])
                                 if h.get("ticker", "").upper() in [b.upper() for b in bond_etfs])
                 bonds_percent = (bonds_value / portfolio_value * 100) if portfolio_value > 0 else 0
-                
-                # Only recommend bonds if portfolio has < 20% bonds
-                if is_bond and bonds_percent >= 20:
+
+                # Only recommend bonds if the portfolio is under its bond target
+                if is_bond and bonds_percent >= target_bonds_pct:
                     logger.debug(f"Skipping {etf} - portfolio already has {bonds_percent:.1f}% bonds")
                     continue
-                
-                # Only recommend Core/Satellite if portfolio has < 80% stocks.
+
+                # Only recommend Core/Satellite while stocks are under target.
                 # (The old "still allow if bonds < 20%" carve-out was inverted:
-                # when stocks are >=80%, bonds are almost always <20%, so stock
-                # buys were never blocked - the opposite of balancing.)
+                # when stocks are over target, bonds are almost always under, so
+                # stock buys were never blocked - the opposite of balancing.)
                 stocks_value = portfolio_value - bonds_value
                 stocks_percent = (stocks_value / portfolio_value * 100) if portfolio_value > 0 else 100
-                if not is_bond and stocks_percent >= 80:
+                if not is_bond and stocks_percent >= target_stocks_pct:
                     logger.debug(f"Skipping {etf} - portfolio already has {stocks_percent:.1f}% stocks")
                     continue
                 
@@ -755,8 +761,8 @@ class CriticalAlertSystem:
                             recommended_amount = min(1500, cash_available * 0.3, cash_available * 0.5)
                             category_note = "Core holding - increase allocation"
                         elif is_bond:
-                            # Bonds get moderate allocation, prioritize if portfolio lacks bonds
-                            if bonds_percent < 15:
+                            # Bonds get moderate allocation, prioritize if well under target
+                            if bonds_percent < target_bonds_pct * 0.75:
                                 recommended_amount = min(1000, cash_available * 0.4, cash_available * 0.6)
                             else:
                                 recommended_amount = min(1000, cash_available * 0.2, cash_available * 0.3)

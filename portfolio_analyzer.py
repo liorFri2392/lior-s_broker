@@ -17,6 +17,7 @@ import numpy as np
 from newsapi import NewsApiClient
 from advanced_analysis import AdvancedAnalyzer
 from tax_analyzer import TaxAnalyzer
+import allocation
 import market_data
 import etf_universe
 import ledger
@@ -759,28 +760,37 @@ class PortfolioAnalyzer:
     
     def check_80_20_balance(self, portfolio_metrics: Dict, analyses: List[Dict]) -> Dict:
         """
-        Check if portfolio follows 80/20 Balanced Growth Strategy:
-        - 80% Stocks (50% Core + 30% Satellite)
-        - 20% Bonds
-        Returns recommendations to achieve proper balance.
+        Check the portfolio against the model strategy defined in allocation.py
+        (single source of truth for both this report and `make deposit`).
+        Classification: allocation groups (so VXUS/VEA/IEFA/VWO/EEM are all CORE);
+        targets: allocation.category_targets() (currently 85/15 - 70 core /
+        15 satellite / 15 bonds). Returns recommendations to achieve balance.
         """
+        cat_targets = allocation.category_targets()
+        target_core = cat_targets.get("CORE", 0) * 100
+        target_satellite = cat_targets.get("SATELLITE", 0) * 100
+        target_bonds = cat_targets.get("BONDS", 0) * 100
+        target_stocks = target_core + target_satellite
+
         balance_check = {
             "is_balanced": False,
             "stocks_percent": 0,
             "bonds_percent": 0,
             "core_percent": 0,
             "satellite_percent": 0,
+            "targets": {
+                "stocks": target_stocks, "bonds": target_bonds,
+                "core": target_core, "satellite": target_satellite,
+            },
             "recommendations": []
         }
-        
-        core_upper = {e.upper() for e in self.CORE_ETFS}
-        bond_upper = {e.upper() for e in self.BOND_ETFS}
 
         total_value = portfolio_metrics["total_value"]
         if total_value == 0:
             return balance_check
 
-        # Calculate current allocation
+        # Calculate current allocation via the shared allocation groups.
+        # Unclassified tickers count as satellite (equity risk, no target).
         stocks_value = 0
         bonds_value = 0
         core_value = 0
@@ -789,33 +799,30 @@ class PortfolioAnalyzer:
         for analysis in analyses:
             ticker = analysis["ticker"]
             value = analysis["current_value"]
+            group_key = allocation.classify(ticker)
+            category = allocation.GROUP_BY_KEY[group_key]["category"] if group_key else "SATELLITE"
 
-            if ticker.upper() in bond_upper:
+            if category == "BONDS":
                 bonds_value += value
             else:
                 stocks_value += value
-                if ticker.upper() in core_upper:
+                if category == "CORE":
                     core_value += value
                 else:
                     satellite_value += value
-        
+
         # Calculate percentages
         stocks_percent = (stocks_value / total_value) * 100 if total_value > 0 else 0
         bonds_percent = (bonds_value / total_value) * 100 if total_value > 0 else 0
         core_percent = (core_value / total_value) * 100 if total_value > 0 else 0
         satellite_percent = (satellite_value / total_value) * 100 if total_value > 0 else 0
-        
+
         balance_check["stocks_percent"] = stocks_percent
         balance_check["bonds_percent"] = bonds_percent
         balance_check["core_percent"] = core_percent
         balance_check["satellite_percent"] = satellite_percent
-        
+
         # Check if balanced (with tolerance of ±5%)
-        target_stocks = 80
-        target_bonds = 20
-        target_core = 50
-        target_satellite = 30
-        
         tolerance = 5
         is_balanced = (
             abs(stocks_percent - target_stocks) <= tolerance and
@@ -834,7 +841,7 @@ class PortfolioAnalyzer:
                 recommendations.append({
                     "action": "BUY_BONDS",
                     "amount": needed_bonds,
-                    "reason": f"Portfolio has {bonds_percent:.1f}% bonds, target is {target_bonds}%. Need ${needed_bonds:,.2f} in bonds for protection."
+                    "reason": f"Portfolio has {bonds_percent:.1f}% bonds, target is {target_bonds:.0f}%. Need ${needed_bonds:,.2f} in bonds for protection."
                 })
             
             # Check if need more core stocks
@@ -843,7 +850,7 @@ class PortfolioAnalyzer:
                 recommendations.append({
                     "action": "BUY_CORE",
                     "amount": needed_core,
-                    "reason": f"Portfolio has {core_percent:.1f}% core stocks, target is {target_core}%. Need ${needed_core:,.2f} in core ETFs (SPY, VXUS)."
+                    "reason": f"Portfolio has {core_percent:.1f}% core stocks, target is {target_core:.0f}%. Need ${needed_core:,.2f} in core ETFs (SPY, VXUS)."
                 })
             
             # Check if too many bonds
@@ -852,7 +859,7 @@ class PortfolioAnalyzer:
                 recommendations.append({
                     "action": "REDUCE_BONDS",
                     "amount": excess_bonds,
-                    "reason": f"Portfolio has {bonds_percent:.1f}% bonds, target is {target_bonds}%. Consider reducing by ${excess_bonds:,.2f} to increase growth."
+                    "reason": f"Portfolio has {bonds_percent:.1f}% bonds, target is {target_bonds:.0f}%. Consider reducing by ${excess_bonds:,.2f} to increase growth."
                 })
             
             # Check if too many stocks
@@ -861,7 +868,7 @@ class PortfolioAnalyzer:
                 recommendations.append({
                     "action": "REDUCE_STOCKS",
                     "amount": excess_stocks,
-                    "reason": f"Portfolio has {stocks_percent:.1f}% stocks, target is {target_stocks}%. Consider reducing by ${excess_stocks:,.2f} and adding bonds for protection."
+                    "reason": f"Portfolio has {stocks_percent:.1f}% stocks, target is {target_stocks:.0f}%. Consider reducing by ${excess_stocks:,.2f} and adding bonds for protection."
                 })
             
             balance_check["recommendations"] = recommendations
@@ -892,16 +899,17 @@ class PortfolioAnalyzer:
         core_etfs = self.CORE_ETFS
         bond_etfs = self.BOND_ETFS
 
-        # Check what we need
-        target_bonds = total_value * 0.20
+        # Check what we need - targets from allocation.py (single source).
+        cat_targets = allocation.category_targets()
+        target_bonds = total_value * cat_targets.get("BONDS", 0.15)
         current_bonds = total_value * (bonds_percent / 100)
         needed_bonds = max(0, target_bonds - current_bonds)
 
-        target_core = total_value * 0.50
+        target_core = total_value * cat_targets.get("CORE", 0.70)
         current_core = total_value * (core_percent / 100)
         needed_core = max(0, target_core - current_core)
 
-        target_satellite = total_value * 0.30
+        target_satellite = total_value * cat_targets.get("SATELLITE", 0.15)
         current_satellite = total_value * (satellite_percent / 100)
         needed_satellite = max(0, target_satellite - current_satellite)
 
@@ -925,7 +933,7 @@ class PortfolioAnalyzer:
                         shares = int(amount_to_recommend / price)
                         if shares > 0:
                             actual_amount = shares * price
-                            reason = f"Add bonds to reach 20% target (currently {bonds_percent:.1f}%)"
+                            reason = f"Add bonds to reach {cat_targets.get('BONDS', 0.15)*100:.0f}% target (currently {bonds_percent:.1f}%)"
                             if cash_available < needed_bonds:
                                 reason += f" | Need ${needed_bonds:,.2f} total, but only ${cash_available:,.2f} cash available"
                             recommendations.append({
@@ -954,7 +962,7 @@ class PortfolioAnalyzer:
                         shares = int(amount_to_recommend / price)
                         if shares > 0:
                             actual_amount = shares * price
-                            reason = f"Increase core holdings to reach 50% target (currently {core_percent:.1f}%)"
+                            reason = f"Increase core holdings to reach {cat_targets.get('CORE', 0.70)*100:.0f}% target (currently {core_percent:.1f}%)"
                             if remaining_cash < needed_core:
                                 reason += f" | Need ${needed_core:,.2f} total, but only ${remaining_cash:,.2f} cash available"
                             recommendations.append({
@@ -1615,10 +1623,11 @@ class PortfolioAnalyzer:
             stocks_percent = balance_check.get("stocks_percent", 0)
             cash_available = portfolio_metrics.get("cash", 0)
             
-            # If we have too many stocks (>80%) and too few bonds (<20%)
-            if stocks_percent > 80 and bonds_percent < 20:
-                target_stocks = 80
-                target_bonds = 20
+            # If stocks exceed target and bonds fall short (targets from allocation.py)
+            _cats = allocation.category_targets()
+            target_stocks = (_cats.get("CORE", 0) + _cats.get("SATELLITE", 0)) * 100
+            target_bonds = _cats.get("BONDS", 0) * 100
+            if stocks_percent > target_stocks and bonds_percent < target_bonds:
                 excess_stocks = stocks_percent - target_stocks
                 needed_bonds = target_bonds - bonds_percent
                 
@@ -2272,28 +2281,34 @@ class PortfolioAnalyzer:
             else:
                 print("📊 Money-Weighted Annual Return (XIRR): available after 30 days of tracking")
         
-        # Show 80/20 balance status
+        # Show strategy balance status (targets come from allocation.py -
+        # the same source `make deposit` uses).
         balance_info = results["rebalancing"].get("balance_80_20", {})
         if balance_info:
+            tgts = balance_info.get("targets", {})
+            t_stocks = tgts.get("stocks", 85)
+            t_core = tgts.get("core", 70)
+            t_sat = tgts.get("satellite", 15)
+            t_bonds = tgts.get("bonds", 15)
             print("\n" + "-" * 60)
-            print("80/20 BALANCED GROWTH STRATEGY STATUS")
+            print(f"STRATEGY STATUS ({allocation.strategy_summary()})")
             print("-" * 60)
             stocks_pct = balance_info.get("stocks_percent", 0)
             bonds_pct = balance_info.get("bonds_percent", 0)
             core_pct = balance_info.get("core_percent", 0)
             satellite_pct = balance_info.get("satellite_percent", 0)
             is_balanced = balance_info.get("is_balanced", False)
-            
+
             status_icon = "✅" if is_balanced else "⚠️"
-            print(f"{status_icon} Stocks: {stocks_pct:.1f}% (Target: 80%)")
-            print(f"   ├─ Core: {core_pct:.1f}% (Target: 50%)")
-            print(f"   └─ Satellite: {satellite_pct:.1f}% (Target: 30%)")
-            print(f"{status_icon} Bonds: {bonds_pct:.1f}% (Target: 20%)")
-            
+            print(f"{status_icon} Stocks: {stocks_pct:.1f}% (Target: {t_stocks:.0f}%)")
+            print(f"   ├─ Core: {core_pct:.1f}% (Target: {t_core:.0f}%)")
+            print(f"   └─ Satellite: {satellite_pct:.1f}% (Target: {t_sat:.0f}%)")
+            print(f"{status_icon} Bonds: {bonds_pct:.1f}% (Target: {t_bonds:.0f}%)")
+
             if not is_balanced:
                 recommendations = balance_info.get("recommendations", [])
                 if recommendations:
-                    print(f"\n📋 Recommendations to achieve 80/20 balance:")
+                    print(f"\n📋 Recommendations to achieve target balance:")
                     for rec in recommendations:
                         print(f"   • {rec.get('reason', 'N/A')}")
                     
