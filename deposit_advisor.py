@@ -1183,7 +1183,7 @@ class DepositAdvisor:
 
         Instead of ranking momentum scores (which fragmented the portfolio into
         dozens of near-duplicate dust positions), classify holdings into
-        equivalence groups, compare against the 80/20 target weights, and send
+        equivalence groups, compare against the target weights, and send
         every deposit dollar to the largest below-target gap - always topping
         up the held ticker in a group before ever buying a new one.
 
@@ -1204,10 +1204,12 @@ class DepositAdvisor:
         tilted_targets = allocation.tilt_satellite_targets(mom_group)
 
         # Prices: prefer freshly refreshed holding prices; batch-fetch the rest.
+        # Fetch EVERY group member (not just the preferred instrument) so the
+        # allocator can fall back to a cheaper equivalent (VOO/IVV for SPY) when
+        # the preferred ticker's share price exceeds the monthly budget.
         prices = {(h.get("ticker") or "").upper(): float(h.get("last_price", 0) or 0)
                   for h in holdings}
-        needed = {allocation.choose_instrument(g["key"], holdings, mom_ticker)
-                  for g in allocation.TARGET_GROUPS}
+        needed = {t.upper() for g in allocation.TARGET_GROUPS for t in g["tickers"]}
         missing = [t for t in needed if prices.get(t, 0) <= 0]
         if missing:
             fetched, _, _ = market_data.get_prices(missing)
@@ -1219,7 +1221,7 @@ class DepositAdvisor:
         )
 
         # Report: current vs target, then the buys.
-        header = "CURRENT vs TARGET ALLOCATION (80/20 - 50 core / 30 satellite / 20 bonds)"
+        header = f"CURRENT vs TARGET ALLOCATION ({allocation.strategy_summary()})"
         if mom_group:
             header += "  [satellite targets trend-tilted]"
         print("\n" + "-" * 60)
@@ -1289,7 +1291,7 @@ class DepositAdvisor:
         exchange_rate = self.get_exchange_rate()
         deposit_amount_usd = deposit_amount_ils / exchange_rate
 
-        # Default: convergent gap-filling toward the 80/20 target weights.
+        # Default: convergent gap-filling toward the model target weights.
         # DEPOSIT_ADVISOR_LEGACY=1 restores the old score-ranked picker.
         use_legacy = os.environ.get("DEPOSIT_ADVISOR_LEGACY", "").strip().lower() in ("1", "true", "yes")
         if use_legacy:

@@ -62,9 +62,13 @@ def test_gap_fill_sends_money_to_biggest_gap():
 
 
 def test_gap_fill_tops_up_held_ticker_not_twin():
-    # AGG held, BND not: bond money must go to AGG (no new near-duplicate).
-    holdings = [_holding("AGG", 500), _holding("SPY", 20000)]
-    buys = allocation.gap_fill_allocate(holdings, 2000.0, PRICES)
+    # Equity fully at target, only bonds under target, AGG held (not BND):
+    # bond money must top up AGG, never buy the BND near-duplicate.
+    base = 100_000.0
+    holdings = [_holding(g["tickers"][0], g["target"] * base)
+                for g in allocation.TARGET_GROUPS if g["category"] != "BONDS"]
+    holdings.append(_holding("AGG", 200))  # tiny, deeply under bond target
+    buys = allocation.gap_fill_allocate(holdings, 3000.0, PRICES)
     tickers = {b["ticker"] for b in buys}
     assert "AGG" in tickers and "BND" not in tickers
 
@@ -100,10 +104,12 @@ def test_gap_fill_converges_over_monthly_deposits():
     ]
     start_tickers = {h["ticker"] for h in holdings}
 
+    us_core_target = allocation.GROUP_BY_KEY["US_CORE"]["target"]
+
     def us_core_drift():
         values = allocation.group_values(holdings)
         total = sum(values.values())
-        return abs(values["US_CORE"] / total - 0.30)
+        return abs(values["US_CORE"] / total - us_core_target)
 
     drift_before = us_core_drift()
     for _ in range(12):  # a year of ~$2000 monthly deposits, flat prices
@@ -122,6 +128,27 @@ def test_gap_fill_converges_over_monthly_deposits():
     assert drift_after < 0.05          # and close to target within a year
     # Every group had a held member, so NO new tickers should ever appear.
     assert {h["ticker"] for h in holdings} == start_tickers
+
+
+def test_gap_fill_funds_group_via_cheaper_equivalent_when_preferred_unaffordable():
+    # US_CORE is deeply underweight (big holdings elsewhere) but SPY ($745)
+    # exceeds a $600 budget; the allocator must still fund US_CORE via a cheaper
+    # equivalent (VOO/IVV), not leak the money to less-underweight groups.
+    holdings = [_holding("VEA", 10000), _holding("BND", 5000), _holding("SPY", 745, qty=1)]
+    buys = allocation.gap_fill_allocate(holdings, 600.0, PRICES)  # can't afford SPY
+    by_group = {b["group"]: b for b in buys}
+    assert "US_CORE" in by_group
+    assert by_group["US_CORE"]["ticker"] in ("VOO", "IVV")  # cheaper equivalent
+    assert by_group["US_CORE"]["price"] <= 600.0
+
+
+def test_gap_fill_prefers_held_when_affordable():
+    # US_CORE underweight and the budget affords SPY: the held/preferred ticker
+    # wins (no gratuitous switch to a cheaper twin).
+    holdings = [_holding("VEA", 10000), _holding("SPY", 745, qty=1)]
+    buys = allocation.gap_fill_allocate(holdings, 1000.0, PRICES)
+    us_core = next(b for b in buys if b["group"] == "US_CORE")
+    assert us_core["ticker"] == "SPY"
 
 
 def test_gap_fill_skips_unpriced_instruments():
@@ -201,4 +228,4 @@ def test_tilt_still_converges_stock_bond_split():
     buys = allocation.gap_fill_allocate(holdings, 3000.0, PRICES, targets=tilt)
     bond_target_total = sum(v for k, v in tilt.items()
                             if allocation.GROUP_BY_KEY[k]["category"] == "BONDS")
-    assert bond_target_total == pytest.approx(0.20)
+    assert bond_target_total == pytest.approx(allocation.category_targets()["BONDS"])
