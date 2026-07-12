@@ -1136,6 +1136,48 @@ class DepositAdvisor:
             else:
                 print("Please enter 'yes' or 'no' (כן/לא)")
     
+    def _satellite_momentum(self, holdings: List[Dict]):
+        """Trend signal for the bounded tilt (opt-out with DEPOSIT_TREND_TILT=0).
+
+        Returns (momentum_by_ticker, momentum_by_group) as 3-month % returns for
+        every SATELLITE group member. Used only to (a) tilt satellite target
+        weights toward trending sectors and (b) choose which ticker enters an
+        EMPTY satellite group - never to touch core/bonds or add duplicates.
+        Returns ({}, {}) on failure so allocation falls back to pure gap-fill.
+        """
+        if os.environ.get("DEPOSIT_TREND_TILT", "1").strip().lower() in ("0", "false", "no"):
+            return {}, {}
+        sat_groups = [g for g in allocation.TARGET_GROUPS if g["category"] == "SATELLITE"]
+        members = sorted({t.upper() for g in sat_groups for t in g["tickers"]})
+        try:
+            market_data.prefetch(members, period="6mo")
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"Momentum prefetch failed: {e}")
+
+        mom_ticker: Dict[str, float] = {}
+        for t in members:
+            try:
+                hist = market_data.get_history(t, period="6mo")
+                if hist is None or hist.empty or "Close" not in hist.columns:
+                    continue
+                closes = hist["Close"].dropna()
+                if len(closes) < 40:
+                    continue
+                # ~3-month (63 trading day) total return, clamped to the last bar.
+                base = closes.iloc[-min(63, len(closes))]
+                last = closes.iloc[-1]
+                if base > 0:
+                    mom_ticker[t] = float((last / base - 1) * 100)
+            except Exception:  # noqa: BLE001
+                continue
+
+        mom_group: Dict[str, float] = {}
+        for g in sat_groups:
+            scores = [mom_ticker[t.upper()] for t in g["tickers"] if t.upper() in mom_ticker]
+            if scores:
+                mom_group[g["key"]] = max(scores)  # sector strength = best member
+        return mom_ticker, mom_group
+
     def recommend_gap_fill(self, deposit_amount_ils: float, portfolio: Dict) -> List[Dict]:
         """Target-weight gap-filling deposit recommendations (the default).
 
@@ -1144,6 +1186,11 @@ class DepositAdvisor:
         equivalence groups, compare against the 80/20 target weights, and send
         every deposit dollar to the largest below-target gap - always topping
         up the held ticker in a group before ever buying a new one.
+
+        Bounded trend tilt (DEPOSIT_TREND_TILT=1, default): momentum may reweight
+        the satellite sleeve toward trending sectors and pick which ticker enters
+        an empty satellite group - within caps that never move core/bonds, grow
+        the satellite budget, or add a duplicate to a held sector.
         """
         exchange_rate = self.get_exchange_rate()
         deposit_usd = deposit_amount_ils / exchange_rate
@@ -1152,27 +1199,41 @@ class DepositAdvisor:
         # get invested next month instead of accumulating forever.
         budget_usd = deposit_usd + max(float(portfolio.get("cash", 0) or 0), 0.0)
 
+        # Trend signal (bounded) for satellite tilt + empty-group entry choice.
+        mom_ticker, mom_group = self._satellite_momentum(holdings)
+        tilted_targets = allocation.tilt_satellite_targets(mom_group)
+
         # Prices: prefer freshly refreshed holding prices; batch-fetch the rest.
         prices = {(h.get("ticker") or "").upper(): float(h.get("last_price", 0) or 0)
                   for h in holdings}
-        needed = {allocation.choose_instrument(g["key"], holdings)
+        needed = {allocation.choose_instrument(g["key"], holdings, mom_ticker)
                   for g in allocation.TARGET_GROUPS}
         missing = [t for t in needed if prices.get(t, 0) <= 0]
         if missing:
             fetched, _, _ = market_data.get_prices(missing)
             prices.update({k.upper(): v for k, v in (fetched or {}).items()})
 
-        buys = allocation.gap_fill_allocate(holdings, budget_usd, prices)
+        buys = allocation.gap_fill_allocate(
+            holdings, budget_usd, prices,
+            targets=tilted_targets, momentum_by_ticker=mom_ticker,
+        )
 
         # Report: current vs target, then the buys.
+        header = "CURRENT vs TARGET ALLOCATION (80/20 - 50 core / 30 satellite / 20 bonds)"
+        if mom_group:
+            header += "  [satellite targets trend-tilted]"
         print("\n" + "-" * 60)
-        print("CURRENT vs TARGET ALLOCATION (80/20 - 50 core / 30 satellite / 20 bonds)")
+        print(header)
         print("-" * 60)
         for row in allocation.allocation_report(holdings, portfolio.get("cash", 0)):
             drift = row["current_pct"] - row["target_pct"]
             marker = "🔻" if drift < -1 else ("🔺" if drift > 1 else "✅")
+            tgt = tilted_targets.get(row["group"], row["target_pct"] / 100.0) * 100.0
+            trend = ""
+            if row["group"] in mom_group:
+                trend = f"  [3mo {mom_group[row['group']]:+.0f}%, tilt→{tgt:.1f}%]"
             print(f"  {marker} {row['group']:<22} {row['current_pct']:5.1f}%"
-                  f"  (target {row['target_pct']:4.1f}%)  via {row['instrument']}")
+                  f"  (target {row['target_pct']:4.1f}%)  via {row['instrument']}{trend}")
 
         print("\n" + "-" * 60)
         print(f"RECOMMENDED PURCHASES  (deposit ${deposit_usd:,.2f}"

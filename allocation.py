@@ -78,27 +78,82 @@ def group_values(holdings: List[Dict]) -> Dict[str, float]:
     return values
 
 
-def choose_instrument(group_key: str, holdings: List[Dict]) -> str:
-    """The ticker new money in this group should buy: the held group member
-    with the largest value (consolidate), else the group's default."""
+# Bounded trend tilt: trends may reweight SATELLITE groups by at most this
+# factor around their base target (0.5x..1.5x), and choose which ticker ENTERS
+# an empty satellite group - but they never touch core/bond targets, never grow
+# the satellite budget as a whole, and never add a duplicate to a held group.
+SATELLITE_TILT_STRENGTH = 0.5
+_TILT_MIN, _TILT_MAX = 0.5, 1.5
+
+
+def choose_instrument(group_key: str, holdings: List[Dict],
+                      momentum_by_ticker: Optional[Dict[str, float]] = None) -> str:
+    """The ticker new money in this group should buy.
+
+    If a group member is already held, keep consolidating into the largest one
+    (one ticker per group - no fragmentation). Only for an EMPTY group may
+    momentum pick which member to enter; otherwise the group's default.
+    """
     group = GROUP_BY_KEY[group_key]
-    members = {t.upper() for t in group["tickers"]}
+    members = [t.upper() for t in group["tickers"]]
     held = [h for h in holdings
-            if (h.get("ticker") or "").upper() in members
+            if (h.get("ticker") or "").upper() in set(members)
             and float(h.get("quantity", 0) or 0) > 0]
     if held:
         best = max(held, key=lambda h: float(h.get("current_value", 0) or 0))
         return best["ticker"].upper()
+    if momentum_by_ticker and group["category"] == "SATELLITE":
+        ranked = [(momentum_by_ticker.get(m), m) for m in members
+                  if momentum_by_ticker.get(m) is not None]
+        if ranked:
+            return max(ranked)[1]
     return group["tickers"][0]
 
 
+def tilt_satellite_targets(momentum_by_group: Dict[str, float],
+                           strength: float = SATELLITE_TILT_STRENGTH) -> Dict[str, float]:
+    """Reweight the SATELLITE group targets by relative momentum, bounded.
+
+    Core and bond targets are untouched, the satellite total is preserved
+    exactly (so 80/20 and 50/30/20 hold), and each satellite group moves at
+    most _TILT_MIN.._TILT_MAX around its base weight. Returns a full
+    {group_key: target} dict usable as ``gap_fill_allocate(targets=...)``.
+    """
+    out = {g["key"]: g["target"] for g in TARGET_GROUPS}
+    sats = [g for g in TARGET_GROUPS if g["category"] == "SATELLITE"]
+    if not momentum_by_group or not sats:
+        return out
+
+    base = {g["key"]: g["target"] for g in sats}
+    sat_total = sum(base.values())
+    m = {k: float(momentum_by_group.get(k, 0.0) or 0.0) for k in base}
+    vals = list(m.values())
+    mean = sum(vals) / len(vals)
+    half_spread = (max(vals) - min(vals)) / 2.0 or 1.0
+
+    raw = {}
+    for k in base:
+        z = (m[k] - mean) / half_spread          # ~[-1, 1]
+        factor = min(_TILT_MAX, max(_TILT_MIN, 1.0 + strength * z))
+        raw[k] = base[k] * factor
+    scale = sat_total / sum(raw.values()) if sum(raw.values()) > 0 else 1.0
+    for k in base:
+        out[k] = raw[k] * scale
+    return out
+
+
 def gap_fill_allocate(holdings: List[Dict], budget_usd: float,
-                      prices: Dict[str, float]) -> List[Dict]:
+                      prices: Dict[str, float],
+                      targets: Optional[Dict[str, float]] = None,
+                      momentum_by_ticker: Optional[Dict[str, float]] = None) -> List[Dict]:
     """Allocate ``budget_usd`` across the target groups, one share at a time,
     always to the group with the largest remaining dollar gap.
 
     ``prices`` must contain a positive price for each group's chosen
     instrument; groups with a missing/invalid price are skipped (never guessed).
+    ``targets`` optionally overrides per-group target weights (e.g. from
+    ``tilt_satellite_targets``); ``momentum_by_ticker`` optionally lets trend
+    pick which ticker enters an empty satellite group.
 
     Returns aggregated buys:
       [{ticker, shares, price, amount, group, category, is_new}], largest first.
@@ -106,17 +161,21 @@ def gap_fill_allocate(holdings: List[Dict], budget_usd: float,
     if budget_usd is None or budget_usd <= 0:
         return []
 
+    tgt = {g["key"]: g["target"] for g in TARGET_GROUPS}
+    if targets:
+        tgt.update({k: v for k, v in targets.items() if k in tgt})
+
     values = group_values(holdings)
     total_after = sum(values.values()) + budget_usd
+    held_tickers = {(h.get("ticker") or "").upper() for h in holdings
+                    if float(h.get("quantity", 0) or 0) > 0}
 
     instruments: Dict[str, Dict] = {}
     for g in TARGET_GROUPS:
-        ticker = choose_instrument(g["key"], holdings)
+        ticker = choose_instrument(g["key"], holdings, momentum_by_ticker)
         price = float(prices.get(ticker, 0) or 0)
         if price <= 0:
             continue
-        held_tickers = {(h.get("ticker") or "").upper() for h in holdings
-                        if float(h.get("quantity", 0) or 0) > 0}
         instruments[g["key"]] = {
             "ticker": ticker,
             "price": price,
@@ -130,7 +189,7 @@ def gap_fill_allocate(holdings: List[Dict], budget_usd: float,
         for key, inst in instruments.items():
             if inst["price"] > remaining:
                 continue
-            gap = GROUP_BY_KEY[key]["target"] * total_after - values[key]
+            gap = tgt[key] * total_after - values[key]
             # Buy only while the group stays at-or-below target after the share.
             if gap >= inst["price"] * 0.5 and gap > best_gap:
                 best_key, best_gap = key, gap
