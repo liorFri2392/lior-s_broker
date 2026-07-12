@@ -140,3 +140,65 @@ def test_other_group_never_receives_money():
     holdings = [_holding("QQQ_WEIRD", 5000)]  # unclassified
     buys = allocation.gap_fill_allocate(holdings, 1000.0, PRICES)
     assert all(b["ticker"] != "QQQ_WEIRD" for b in buys)
+
+
+# --------------------------------------------------------------------------- #
+# Bounded trend tilt.
+# --------------------------------------------------------------------------- #
+def _sat_total(targets):
+    return sum(v for k, v in targets.items()
+               if allocation.GROUP_BY_KEY[k]["category"] == "SATELLITE")
+
+
+def test_tilt_preserves_satellite_total_and_core_bonds():
+    base_sat = _sat_total({g["key"]: g["target"] for g in allocation.TARGET_GROUPS})
+    tilt = allocation.tilt_satellite_targets({"TECH": 30.0, "ENERGY": -20.0, "HEALTHCARE": 5.0})
+    # Satellite sleeve total unchanged (still 30%).
+    assert _sat_total(tilt) == pytest.approx(base_sat)
+    # Core/bond targets untouched.
+    for g in allocation.TARGET_GROUPS:
+        if g["category"] != "SATELLITE":
+            assert tilt[g["key"]] == pytest.approx(g["target"])
+
+
+def test_tilt_favors_trending_sector_within_bounds():
+    tilt = allocation.tilt_satellite_targets({"TECH": 40.0, "ENERGY": -30.0})
+    tech_base = allocation.GROUP_BY_KEY["TECH"]["target"]
+    energy_base = allocation.GROUP_BY_KEY["ENERGY"]["target"]
+    assert tilt["TECH"] > tech_base       # winner up
+    assert tilt["ENERGY"] < energy_base   # laggard down
+    # Bounded: no satellite group moves beyond 0.5x..1.5x its base.
+    for g in allocation.TARGET_GROUPS:
+        if g["category"] == "SATELLITE":
+            assert 0.5 * g["target"] - 1e-9 <= tilt[g["key"]] <= 1.5 * g["target"] + 1e-9
+
+
+def test_tilt_empty_momentum_is_identity():
+    tilt = allocation.tilt_satellite_targets({})
+    for g in allocation.TARGET_GROUPS:
+        assert tilt[g["key"]] == pytest.approx(g["target"])
+
+
+def test_momentum_picks_entry_ticker_for_empty_group_only():
+    # TECH empty: momentum picks the trending member instead of the default.
+    mom = {"XLK": 5.0, "SMH": 40.0, "VGT": 3.0}
+    assert allocation.choose_instrument("TECH", [], mom) == "SMH"
+    # But when a member is already held, consolidation wins - momentum ignored.
+    held = [_holding("XLK", 1000)]
+    assert allocation.choose_instrument("TECH", held, mom) == "XLK"
+
+
+def test_momentum_never_overrides_core_group():
+    # Core groups ignore momentum entirely (no trend-picking of core).
+    mom = {"VOO": 99.0, "IVV": 98.0}
+    assert allocation.choose_instrument("US_CORE", [], mom) == "SPY"
+
+
+def test_tilt_still_converges_stock_bond_split():
+    # With a strong tilt, the stock/bond split must still hold: bonds ~20%.
+    holdings = [_holding("SPY", 5000), _holding("BND", 500)]
+    tilt = allocation.tilt_satellite_targets({"TECH": 50.0})
+    buys = allocation.gap_fill_allocate(holdings, 3000.0, PRICES, targets=tilt)
+    bond_target_total = sum(v for k, v in tilt.items()
+                            if allocation.GROUP_BY_KEY[k]["category"] == "BONDS")
+    assert bond_target_total == pytest.approx(0.20)
