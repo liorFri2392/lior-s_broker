@@ -30,29 +30,33 @@ from typing import Dict, List, Optional
 #   Satellite 30 = SMALL_CAP 5 + US_STYLE 5 + TECH 8 + HEALTHCARE 4 + ENERGY 4 + INFRASTRUCTURE 4
 #   Bonds 20 = BONDS_AGG 12 + TIPS 8
 TARGET_GROUPS: List[Dict] = [
-    {"key": "US_CORE", "category": "CORE", "target": 0.30,
+    {"key": "US_CORE", "category": "CORE", "target": 0.42,
      "tickers": ["SPY", "VOO", "IVV"]},
-    {"key": "INTL_DEVELOPED", "category": "CORE", "target": 0.14,
+    {"key": "INTL_DEVELOPED", "category": "CORE", "target": 0.18,
      "tickers": ["VEA", "VXUS", "IEFA"]},
-    {"key": "EMERGING", "category": "CORE", "target": 0.06,
+    {"key": "EMERGING", "category": "CORE", "target": 0.10,
      "tickers": ["VWO", "EEM"]},
-    {"key": "US_SMALL_CAP", "category": "SATELLITE", "target": 0.05,
+    {"key": "US_SMALL_CAP", "category": "SATELLITE", "target": 0.03,
      "tickers": ["IWM", "VB"]},
-    {"key": "US_STYLE", "category": "SATELLITE", "target": 0.05,
+    {"key": "US_STYLE", "category": "SATELLITE", "target": 0.02,
      "tickers": ["VTV", "IVW", "SCHD"]},
-    {"key": "TECH", "category": "SATELLITE", "target": 0.08,
+    {"key": "TECH", "category": "SATELLITE", "target": 0.04,
      "tickers": ["XLK", "VGT", "SMH", "HACK", "ROBO", "QTUM", "DRIV"]},
-    {"key": "HEALTHCARE", "category": "SATELLITE", "target": 0.04,
+    {"key": "HEALTHCARE", "category": "SATELLITE", "target": 0.02,
      "tickers": ["XLV", "VHT", "XBI"]},
-    {"key": "ENERGY", "category": "SATELLITE", "target": 0.04,
+    {"key": "ENERGY", "category": "SATELLITE", "target": 0.02,
      "tickers": ["XLE", "VDE", "ICLN"]},
-    {"key": "INFRASTRUCTURE", "category": "SATELLITE", "target": 0.04,
+    {"key": "INFRASTRUCTURE", "category": "SATELLITE", "target": 0.02,
      "tickers": ["PAVE", "IFRA"]},
-    {"key": "BONDS_AGG", "category": "BONDS", "target": 0.12,
+    {"key": "BONDS_AGG", "category": "BONDS", "target": 0.09,
      "tickers": ["BND", "AGG"]},
-    {"key": "TIPS", "category": "BONDS", "target": 0.08,
+    {"key": "TIPS", "category": "BONDS", "target": 0.06,
      "tickers": ["VTIP", "TIP", "SCHP"]},
 ]
+
+# Strategy: 85% equity (70% broad core + 15% sector satellites, trend-tilted)
+# / 15% bonds. Sized for a long (30-year) horizon: high equity, sector bets
+# capped small to limit concentration risk. Change these targets to re-risk.
 
 GROUP_BY_KEY: Dict[str, Dict] = {g["key"]: g for g in TARGET_GROUPS}
 _TICKER_TO_GROUP: Dict[str, str] = {
@@ -60,6 +64,23 @@ _TICKER_TO_GROUP: Dict[str, str] = {
 }
 
 assert abs(sum(g["target"] for g in TARGET_GROUPS) - 1.0) < 1e-9
+
+
+def category_targets() -> Dict[str, float]:
+    """Total target weight per category: {'CORE':.., 'SATELLITE':.., 'BONDS':..}."""
+    out: Dict[str, float] = {}
+    for g in TARGET_GROUPS:
+        out[g["category"]] = out.get(g["category"], 0.0) + g["target"]
+    return out
+
+
+def strategy_summary() -> str:
+    """Human string like '85/15 - 70 core / 15 satellite / 15 bonds'."""
+    c = category_targets()
+    equity = c.get("CORE", 0) + c.get("SATELLITE", 0)
+    return (f"{equity*100:.0f}/{c.get('BONDS',0)*100:.0f} - "
+            f"{c.get('CORE',0)*100:.0f} core / {c.get('SATELLITE',0)*100:.0f} satellite / "
+            f"{c.get('BONDS',0)*100:.0f} bonds")
 
 
 def classify(ticker: str) -> Optional[str]:
@@ -170,45 +191,68 @@ def gap_fill_allocate(holdings: List[Dict], budget_usd: float,
     held_tickers = {(h.get("ticker") or "").upper() for h in holdings
                     if float(h.get("quantity", 0) or 0) > 0}
 
-    instruments: Dict[str, Dict] = {}
+    # Per group: the preferred instrument (held / trend / default) plus every
+    # priced member sorted cheapest-first. The cheapest member lets the most
+    # underweight group still be funded when its preferred ticker's share price
+    # exceeds the budget (e.g. SPY at $745 vs a $600 deposit) - money reaches
+    # the right sleeve via an equivalent (VOO/IVV) instead of leaking to
+    # cheaper, less-needed groups.
+    preferred: Dict[str, str] = {}
+    members_by_price: Dict[str, list] = {}
     for g in TARGET_GROUPS:
-        ticker = choose_instrument(g["key"], holdings, momentum_by_ticker)
-        price = float(prices.get(ticker, 0) or 0)
-        if price <= 0:
+        priced = [(t.upper(), float(prices.get(t.upper(), 0) or 0)) for t in g["tickers"]]
+        priced = [(t, p) for t, p in priced if p > 0]
+        if not priced:
             continue
-        instruments[g["key"]] = {
-            "ticker": ticker,
-            "price": price,
-            "is_new": ticker not in held_tickers,
-        }
+        members_by_price[g["key"]] = sorted(priced, key=lambda tp: tp[1])
+        preferred[g["key"]] = choose_instrument(g["key"], holdings, momentum_by_ticker)
+
+    def _pick(key: str, remaining: float):
+        """Which (ticker, price) to buy for this group, or None if unaffordable.
+
+        Preferred (held/trend/default) ticker wins when affordable. Only CORE
+        and BONDS groups fall back to a cheaper equivalent (SPY->VOO, their
+        members are true substitutes); SATELLITE groups stay strict so an
+        unaffordable held ticker never spawns a cheap thematic twin."""
+        pref = preferred[key]
+        pref_price = float(prices.get(pref, 0) or 0)
+        if pref_price and pref_price <= remaining:
+            return pref, pref_price
+        if GROUP_BY_KEY[key]["category"] in ("CORE", "BONDS"):
+            for t, p in members_by_price[key]:
+                if p <= remaining:
+                    return t, p
+        return None
 
     remaining = float(budget_usd)
-    bought: Dict[str, Dict] = {}
+    bought: Dict[tuple, Dict] = {}
     while True:
-        best_key, best_gap = None, 0.0
-        for key, inst in instruments.items():
-            if inst["price"] > remaining:
+        best_key, best_gap, best_pick = None, 0.0, None
+        for key in members_by_price:
+            pick = _pick(key, remaining)
+            if pick is None:
                 continue
             gap = tgt[key] * total_after - values[key]
             # Buy only while the group stays at-or-below target after the share.
-            if gap >= inst["price"] * 0.5 and gap > best_gap:
-                best_key, best_gap = key, gap
+            if gap >= pick[1] * 0.5 and gap > best_gap:
+                best_key, best_gap, best_pick = key, gap, pick
         if best_key is None:
             break
-        inst = instruments[best_key]
-        values[best_key] += inst["price"]
-        remaining -= inst["price"]
-        rec = bought.setdefault(best_key, {
-            "ticker": inst["ticker"],
+
+        ticker, price = best_pick
+        values[best_key] += price
+        remaining -= price
+        rec = bought.setdefault((best_key, ticker), {
+            "ticker": ticker,
             "shares": 0,
-            "price": inst["price"],
+            "price": price,
             "amount": 0.0,
             "group": best_key,
             "category": GROUP_BY_KEY[best_key]["category"],
-            "is_new": inst["is_new"],
+            "is_new": ticker not in held_tickers,
         })
         rec["shares"] += 1
-        rec["amount"] = round(rec["shares"] * inst["price"], 2)
+        rec["amount"] = round(rec["shares"] * price, 2)
 
     return sorted(bought.values(), key=lambda r: -r["amount"])
 

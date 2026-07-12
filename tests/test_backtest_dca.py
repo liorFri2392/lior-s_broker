@@ -46,10 +46,10 @@ def test_dca_multi_ticker_uses_gap_fill_targets():
     res = bt._backtest_monthly_deposit(prices.index, prices, monthly_deposit=2000.0)
     positions = res["positions"]
     assert len(positions) >= 8  # most groups received money
-    # US_CORE (30% target) must hold ~2.5x the value of BONDS_AGG (12% target).
+    # US_CORE (the dominant target) is filled to roughly its target weight.
     total = sum(positions.values()) * 50.0
     us_core = positions.get("SPY", 0) * 50.0
-    assert us_core / total == pytest.approx(0.30, abs=0.05)
+    assert us_core / total == pytest.approx(alloc.GROUP_BY_KEY["US_CORE"]["target"], abs=0.05)
 
 
 def test_dca_costs_reduce_value():
