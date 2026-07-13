@@ -221,7 +221,10 @@ tax_calc = analyzer.calculate_capital_gains_tax(
 analyzer.print_tax_report({"sales_analysis": [tax_calc]})
 ```
 
-### Machine Learning - תחזיות LSTM
+### Machine Learning - תחזיות LSTM (אופציונלי)
+
+דורש התקנת tensorflow: `pip install -r requirements-ml.txt` (המודול אינו
+בשימוש בהמלצות — נשמר לניסויים בלבד).
 
 ```python
 from ml_predictor import MLPredictor
@@ -229,16 +232,6 @@ from ml_predictor import MLPredictor
 predictor = MLPredictor()
 result = predictor.predict_with_lstm("SPY", periods=30)
 print(f"Predicted return: {result['expected_return']:.2f}%")
-```
-
-### ניתוח Sentiment משופר
-
-```python
-from sentiment_analyzer import SentimentAnalyzer
-
-analyzer = SentimentAnalyzer()
-result = analyzer.analyze_news_sentiment("SPY")
-print(f"Sentiment: {result['sentiment']} (Score: {result['score']})")
 ```
 
 ## מבנה קבצים

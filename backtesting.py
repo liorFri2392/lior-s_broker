@@ -220,12 +220,20 @@ class Backtester:
                     deposits_made += 1
                 flows.append({"date": pd.Timestamp(date).to_pydatetime(), "amount": flow})
 
+                # Size buys against a cost-reserved budget: buys sized on the
+                # full cash and THEN debited slippage+commission drove cash
+                # slightly negative (phantom margin). Reserve is conservative
+                # (slippage on the whole budget + a few commissions).
+                slip_frac = self.slippage_bps / 10_000.0
+                # 12 commissions covers the max distinct buys per deposit (11 groups).
+                budget = max(0.0, (cash - 12 * self.commission_per_trade) / (1.0 + slip_frac))
+
                 if len(tickers) == 1:
                     # Single-ticker benchmark mode: all-in DCA (the gap-fill
                     # engine would cap one ticker at its group's target weight).
                     t = tickers[0]
                     p = day_prices.get(t, 0)
-                    shares = int(cash // p) if p > 0 else 0
+                    shares = int(budget // p) if p > 0 else 0
                     if shares > 0:
                         notional = shares * p
                         cost = self._trade_cost(notional, self.slippage_bps,
@@ -240,12 +248,13 @@ class Backtester:
                          "current_value": q * day_prices.get(t, 0)}
                         for t, q in positions.items() if q > 0
                     ]
-                    for b in alloc.gap_fill_allocate(holdings, cash, day_prices):
+                    for b in alloc.gap_fill_allocate(holdings, budget, day_prices):
                         cost = self._trade_cost(b["amount"], self.slippage_bps,
                                                 self.commission_per_trade)
                         cash -= b["amount"] + cost
                         total_costs += cost
                         positions[b["ticker"]] = positions.get(b["ticker"], 0) + b["shares"]
+                assert cash > -1e-6, f"cash went negative: {cash}"
 
             value = cash + sum(q * day_prices.get(t, 0) for t, q in positions.items())
             # Deposit-adjusted daily return: strip the same-day inflow so a

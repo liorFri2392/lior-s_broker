@@ -123,22 +123,6 @@ class PortfolioAnalyzer:
         """Best-effort sync of the portfolio to the GitHub secret (shared impl)."""
         return github_secret.update_portfolio_secret(portfolio)
 
-    def _run_update_secret(self) -> None:
-        """Run make update-secret so GitHub secret is updated (runs every time user confirms 'yes')."""
-        try:
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            result = subprocess.run(
-                [sys.executable, os.path.join(script_dir, "update_github_secret.py")],
-                cwd=script_dir,
-                timeout=15,
-                capture_output=False,
-            )
-            if result.returncode == 0:
-                print("   ✅ GitHub secret updated automatically!")
-        except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
-            logger.debug(f"update-secret run failed: {e}")
-            print("   ⚠️  Run 'make update-secret' manually to sync the GitHub secret.")
-    
     def is_market_open(self) -> Tuple[bool, str]:
         """Check if US stock market (NYSE/NASDAQ) is currently open (DST-correct)."""
         return market_data.is_market_open()
@@ -640,7 +624,7 @@ class PortfolioAnalyzer:
     
     def find_best_etfs_to_buy(self, amount_usd: float, current_holdings: List[str], exclude_tickers: List[str] = None) -> List[Dict]:
         """
-        Find best ETFs to buy following 80/20 Balanced Growth Strategy.
+        Find best ETFs to buy following the model target-weight strategy.
         Prioritizes Core ETFs and Bonds over high-risk trends.
         """
         from deposit_advisor import DepositAdvisor
@@ -882,7 +866,7 @@ class PortfolioAnalyzer:
         holdings_analysis: List[Dict],
         exchange_rate: float
     ) -> List[Dict]:
-        """Generate concrete buy recommendations to achieve 80/20 balance."""
+        """Generate concrete buy recommendations to achieve target balance."""
         recommendations = []
         
         bonds_percent = balance_info.get("bonds_percent", 0)
@@ -1016,7 +1000,7 @@ class PortfolioAnalyzer:
         """
         Deep analysis: Compare ALL existing holdings with market alternatives.
         Finds better ETFs even if current holdings are not weak.
-        This ensures portfolio is always optimized according to 80/20 strategy.
+        This ensures portfolio is always optimized according to the target-weight strategy.
         """
         from deposit_advisor import DepositAdvisor
         
@@ -1360,7 +1344,7 @@ class PortfolioAnalyzer:
                                             "expected_return": analysis.get("mid_term_forecast", {}).get("expected_3yr_return", 0),
                                             "current_return": holding.get("mid_term_forecast", {}).get("expected_3yr_return", 0) if isinstance(holding.get("mid_term_forecast"), dict) else 0,
                                             "replace_percentage": replace_percentage,
-                                            "reason": f"Satellite too high ({satellite_pct:.1f}%) + Core too low ({core_pct:.1f}%) - Rebalance to 80/20"
+                                            "reason": f"Satellite too high ({satellite_pct:.1f}%) + Core too low ({core_pct:.1f}%) - Rebalance toward targets"
                                         })
                                         break  # Only one Core recommendation per Satellite holding
                         except Exception:
@@ -1838,7 +1822,9 @@ class PortfolioAnalyzer:
 
             portfolio["baseline_value"] = baseline_value
             portfolio["start_date"] = datetime.now(timezone.utc).isoformat()
-            self.save_portfolio(portfolio)
+            # Intermediate save - the single GitHub-secret sync happens once
+            # at the end of analyze() (each sync is a subprocess call).
+            self.save_portfolio(portfolio, sync_github_secret=False)
             logger.info(f"📊 Initialized baseline tracking: ${baseline_value:,.2f} on {portfolio['start_date']}")
 
         # Seed the deposit/trade ledger if missing so true (deposit-adjusted)
@@ -1848,7 +1834,7 @@ class PortfolioAnalyzer:
             for h in portfolio["holdings"]
         )
         if ledger.ensure_ledger(portfolio, current_total):
-            self.save_portfolio(portfolio)
+            self.save_portfolio(portfolio, sync_github_secret=False)
         
         # Display market status
         print(f"\n📊 Market Status: {market_message}")
@@ -1932,9 +1918,9 @@ class PortfolioAnalyzer:
                 holding["last_price"] = analysis["current_price"]
                 holding["current_value"] = analysis["current_value"]
         
-        # Save updated portfolio
-        self.save_portfolio(portfolio)
-        
+        # Save updated portfolio (sync deferred to the single end-of-run sync)
+        self.save_portfolio(portfolio, sync_github_secret=False)
+
         # Check for better alternatives (like critical_alert does)
         print("\n🔍 Checking for better ETF alternatives...")
         replacement_opportunities = self.find_better_alternatives(analyses, portfolio_metrics)
@@ -1968,37 +1954,36 @@ class PortfolioAnalyzer:
             or not sys.stdin.isatty()
         )
 
-        # Stamp the run date now that the analysis (and its cooldown checks,
-        # which read the PREVIOUS stamp) has completed. Read-only/CI runs never
-        # stamp, so the 30-day reminder tracks conscious interactive runs only.
-        if record_run and not read_only:
-            portfolio["last_analyze_run_date"] = datetime.now().strftime("%Y-%m-%d")
-            self.save_portfolio(portfolio)
-
         if read_only:
             print("\n📋 Read-only mode: portfolio was not modified. Run 'make analyze' (without read-only) to update after you execute trades.\n")
             return results
-        
+
         # Ask for confirmation if rebalancing is needed
         if rebalancing["needed"] and (rebalancing["recommendations"] or rebalancing["buy_recommendations"]):
             confirmed = self.ask_rebalancing_confirmation()
             if confirmed:
                 self.update_portfolio_from_rebalancing(portfolio, rebalancing, analyses)
                 print("\n✅ Portfolio updated successfully based on rebalancing actions!\n")
-                self._run_update_secret()
             else:
                 print("\n❌ Portfolio not updated. No changes were made.\n")
-        
+
         # Ask for confirmation if replacement opportunities exist
         if rebalancing.get("replacement_opportunities"):
             confirmed = self.ask_replacement_confirmation()
             if confirmed:
                 self.update_portfolio_from_replacements(portfolio, rebalancing["replacement_opportunities"], analyses)
                 print("\n✅ Portfolio updated successfully based on replacement recommendations!\n")
-                self._run_update_secret()
             else:
                 print("\n❌ Portfolio not updated. No changes were made.\n")
-        
+
+        # Stamp the run date now that the analysis (and its cooldown checks,
+        # which read the PREVIOUS stamp) has completed, then do the SINGLE
+        # save+GitHub-secret sync for the whole interactive run. Read-only/CI
+        # runs return above without stamping or syncing.
+        if record_run:
+            portfolio["last_analyze_run_date"] = datetime.now().strftime("%Y-%m-%d")
+        self.save_portfolio(portfolio, sync_github_secret=True)
+
         return results
     
     def ask_rebalancing_confirmation(self) -> bool:
@@ -2117,7 +2102,7 @@ class PortfolioAnalyzer:
         portfolio["last_rebalancing_date"] = datetime.now().strftime("%Y-%m-%d")
         
         # Save updated portfolio
-        self.save_portfolio(portfolio)
+        self.save_portfolio(portfolio, sync_github_secret=False)  # analyze() syncs once at end
         
         # Print summary
         print("\n" + "-" * 60)
@@ -2173,7 +2158,7 @@ class PortfolioAnalyzer:
         portfolio["total_value"] = total_value
         
         # Save updated portfolio
-        self.save_portfolio(portfolio)
+        self.save_portfolio(portfolio, sync_github_secret=False)  # analyze() syncs once at end
         
         # Print summary
         print("\n" + "-" * 60)

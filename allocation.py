@@ -136,9 +136,11 @@ def tilt_satellite_targets(momentum_by_group: Dict[str, float],
     """Reweight the SATELLITE group targets by relative momentum, bounded.
 
     Core and bond targets are untouched, the satellite total is preserved
-    exactly (so 80/20 and 50/30/20 hold), and each satellite group moves at
-    most _TILT_MIN.._TILT_MAX around its base weight. Returns a full
-    {group_key: target} dict usable as ``gap_fill_allocate(targets=...)``.
+    exactly (so the equity/bond and core/satellite splits hold), and each
+    satellite group ends within _TILT_MIN.._TILT_MAX of its base weight -
+    enforced AFTER renormalization (a single rescale can push a clamped group
+    past its bound, e.g. two small hot sectors + large cold ones). Returns a
+    full {group_key: target} dict usable as ``gap_fill_allocate(targets=...)``.
     """
     out = {g["key"]: g["target"] for g in TARGET_GROUPS}
     sats = [g for g in TARGET_GROUPS if g["category"] == "SATELLITE"]
@@ -152,14 +154,29 @@ def tilt_satellite_targets(momentum_by_group: Dict[str, float],
     mean = sum(vals) / len(vals)
     half_spread = (max(vals) - min(vals)) / 2.0 or 1.0
 
+    lo = {k: base[k] * _TILT_MIN for k in base}
+    hi = {k: base[k] * _TILT_MAX for k in base}
     raw = {}
     for k in base:
         z = (m[k] - mean) / half_spread          # ~[-1, 1]
         factor = min(_TILT_MAX, max(_TILT_MIN, 1.0 + strength * z))
         raw[k] = base[k] * factor
-    scale = sat_total / sum(raw.values()) if sum(raw.values()) > 0 else 1.0
-    for k in base:
-        out[k] = raw[k] * scale
+
+    # Iteratively rescale to the sleeve total, re-clamping each pass; bounds
+    # are symmetric around base so the total is always reachable.
+    for _ in range(20):
+        s = sum(raw.values())
+        if s <= 0 or abs(s - sat_total) < 1e-12:
+            break
+        raw = {k: min(hi[k], max(lo[k], raw[k] * (sat_total / s))) for k in base}
+    # Distribute any tiny residual among groups not pinned at a bound.
+    residual = sat_total - sum(raw.values())
+    if abs(residual) > 1e-12:
+        free = [k for k in base if lo[k] < raw[k] < hi[k]] or list(base)
+        for k in free:
+            raw[k] += residual / len(free)
+
+    out.update(raw)
     return out
 
 

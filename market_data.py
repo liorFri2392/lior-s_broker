@@ -425,6 +425,15 @@ class MarketData:
                 if hist is not None and not hist.empty:
                     raw = float(hist["Close"].iloc[-1])
                     rate = self.normalize_ils_per_usd(raw)
+                    # Plausibility band: ILS/USD has lived in ~2.5-5 for
+                    # decades; anything outside is a data glitch, not a market
+                    # move - keep the cached rate instead of poisoning every
+                    # shekel figure in the app.
+                    if not (2.0 <= rate <= 6.0):
+                        logger.warning(
+                            f"Implausible FX quote from {symbol}: {rate:.4f} ILS/USD - ignoring"
+                        )
+                        continue
                     with self._lock:
                         self._fx_rate = rate
                         self._fx_time = datetime.now()

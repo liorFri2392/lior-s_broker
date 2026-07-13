@@ -15,6 +15,7 @@ from portfolio_analyzer import PortfolioAnalyzer
 from deposit_advisor import DepositAdvisor
 from email_notifier import EmailNotifier
 from etf_universe import SATELLITE_CATEGORIES, EXCLUDED_CATEGORIES
+import allocation
 import market_data
 
 logger = logging.getLogger(__name__)
@@ -326,8 +327,7 @@ class CriticalAlertSystem:
             
             # Filter to only most critical (limit to top 3-5)
             # Prioritize bonds if meaningfully under the bond target (75% of it)
-            import allocation as _alloc
-            bond_priority_pct = _alloc.category_targets().get("BONDS", 0.15) * 100 * 0.75
+            bond_priority_pct = allocation.category_targets().get("BONDS", 0.15) * 100 * 0.75
             if bonds_percent < bond_priority_pct:
                 bond_buys = [b for b in critical_buys if b.get("category") == "BONDS"]
                 other_buys = [b for b in critical_buys if b.get("category") != "BONDS"]
@@ -513,7 +513,7 @@ class CriticalAlertSystem:
                         "score_improvement": opp.get("score_improvement", 0),
                         "reason": f"🔄 OPTIMIZE: {opp.get('sell_ticker', '')} → {opp.get('buy_ticker', '')} - {opp.get('reason', '')}",
                         "details": f"Replace {opp.get('replace_percentage', 0)*100:.0f}% of {opp.get('sell_ticker', '')} with {opp.get('buy_ticker', '')}. Expected return: {opp.get('expected_return', 0):.1f}% vs {opp.get('current_return', 0):.1f}%",
-                        "strategy": "80/20 Balanced Growth"
+                        "strategy": "Balanced Growth (targets from allocation.py)"
                     })
             
             if replacement_opportunities:
@@ -586,7 +586,7 @@ class CriticalAlertSystem:
     
     def scan_critical_buy_opportunities(self) -> List[Dict]:
         """
-        Scan for critical buy opportunities following 80/20 Balanced Growth Strategy.
+        Scan for critical buy opportunities following the model target-weight strategy.
         Prioritizes Core ETFs and Bonds over high-risk trends.
         """
         critical_buys = []
@@ -599,6 +599,11 @@ class CriticalAlertSystem:
         
         logger.info(f"Current portfolio has {len(current_holdings)} holdings: {current_holdings}")
         logger.info(f"Portfolio value: ${portfolio_value:,.2f}, Cash available: ${cash_available:,.2f}")
+
+        # Strategy targets from allocation.py (computed once, used in the loop)
+        _cats = allocation.category_targets()
+        target_bonds_pct = _cats.get("BONDS", 0.15) * 100
+        target_stocks_pct = 100 - target_bonds_pct
         
         # 80/20 Strategy: Focus on Core, Satellite, and Bonds
         # Exclude high-risk categories (leveraged, crypto)
@@ -640,7 +645,7 @@ class CriticalAlertSystem:
             if etf.upper() not in analyzed_etfs:
                 analyzed_etfs.append(etf)
         
-        print(f"   Analyzing {len(analyzed_etfs)} ETFs (Core, Satellite, Bonds) following 80/20 strategy...")
+        print(f"   Analyzing {len(analyzed_etfs)} ETFs (Core, Satellite, Bonds) following the target-weight strategy...")
         print("   (Excluding leveraged ETFs and crypto for balanced risk)")
 
         # Prefetch the whole candidate universe in one batched download so every
@@ -682,11 +687,7 @@ class CriticalAlertSystem:
                         continue
                 
                 # Check if portfolio actually needs this (strategy balance check;
-                # targets from allocation.py - same source as analyze/deposit)
-                import allocation as _alloc
-                _cats = _alloc.category_targets()
-                target_bonds_pct = _cats.get("BONDS", 0.15) * 100
-                target_stocks_pct = 100 - target_bonds_pct
+                # targets computed once above from allocation.py)
                 bonds_value = sum(h.get("current_value", 0) for h in portfolio.get("holdings", [])
                                 if h.get("ticker", "").upper() in [b.upper() for b in bond_etfs])
                 bonds_percent = (bonds_value / portfolio_value * 100) if portfolio_value > 0 else 0
@@ -791,7 +792,7 @@ class CriticalAlertSystem:
                             "expected_return": display_return,
                             "score": score,
                             "details": "; ".join(reasons[:3]),  # Top 3 reasons
-                            "diversification": "Balanced 80/20 strategy",
+                            "diversification": "Balanced target-weight strategy",
                             "is_leveraged": False,
                             "leverage_multiplier": 1.0,
                             "category": "CORE" if is_core else ("BONDS" if is_bond else "SATELLITE")
@@ -816,7 +817,7 @@ class CriticalAlertSystem:
         """
         Deep analysis: Compare ALL existing holdings with market alternatives.
         Finds better ETFs even if current holdings are not weak.
-        This ensures portfolio is always optimized according to 80/20 strategy.
+        This ensures portfolio is always optimized according to the target-weight strategy.
         """
         replacement_opportunities = []
         
@@ -958,7 +959,7 @@ class CriticalAlertSystem:
                                 "score_improvement": score_diff,
                                 "reason": f"🔄 OPTIMIZE: {ticker} (Score: {current_score:.1f}/100) → {best_alternative} (Score: {best_score:.1f}/100, +{score_diff:.1f} points) - Better performance for {category_name} allocation",
                                 "details": f"Replace {replace_percentage*100:.0f}% of {ticker} with {best_alternative} to improve {category_name} allocation. Expected return: {expected_return:.1f}% vs {current_return:.1f}%",
-                                "strategy": "80/20 Balanced Growth"
+                                "strategy": "Balanced Growth (targets from allocation.py)"
                             })
                             print(f"   🔄 {ticker} (Score: {current_score:.1f}) → {best_alternative} (Score: {best_score:.1f}, +{score_diff:.1f})")
                         else:

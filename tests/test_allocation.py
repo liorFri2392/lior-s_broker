@@ -200,6 +200,21 @@ def test_tilt_favors_trending_sector_within_bounds():
             assert 0.5 * g["target"] - 1e-9 <= tilt[g["key"]] <= 1.5 * g["target"] + 1e-9
 
 
+def test_tilt_bounds_hold_after_renormalization():
+    """Regression: two small hot sectors + large cold ones used to end at
+    ~1.69x base after the rescale-to-sleeve-total step."""
+    tilt = allocation.tilt_satellite_targets({
+        "US_STYLE": 50.0, "HEALTHCARE": 50.0,
+        "US_SMALL_CAP": -10.0, "TECH": -10.0, "ENERGY": -10.0, "INFRASTRUCTURE": -10.0,
+    })
+    for g in allocation.TARGET_GROUPS:
+        if g["category"] == "SATELLITE":
+            ratio = tilt[g["key"]] / g["target"]
+            assert 0.5 - 1e-9 <= ratio <= 1.5 + 1e-9
+    assert _sat_total(tilt) == pytest.approx(
+        sum(g["target"] for g in allocation.TARGET_GROUPS if g["category"] == "SATELLITE"))
+
+
 def test_tilt_empty_momentum_is_identity():
     tilt = allocation.tilt_satellite_targets({})
     for g in allocation.TARGET_GROUPS:
