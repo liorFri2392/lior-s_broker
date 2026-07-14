@@ -1195,9 +1195,28 @@ class DepositAdvisor:
         exchange_rate = self.get_exchange_rate()
         deposit_usd = deposit_amount_ils / exchange_rate
         holdings = portfolio.get("holdings", [])
-        # Idle cash joins the budget so leftovers from whole-share flooring
-        # get invested next month instead of accumulating forever.
-        budget_usd = deposit_usd + max(float(portfolio.get("cash", 0) or 0), 0.0)
+
+        # Budget = the deposit ONLY, by default. Idle cash is offered as an
+        # explicit opt-in (it used to be swept in silently, which recommended
+        # spending far more than the user asked to deposit).
+        idle_cash = max(float(portfolio.get("cash", 0) or 0), 0.0)
+        budget_usd = deposit_usd
+        if idle_cash >= 50:
+            sweep_env = os.environ.get("DEPOSIT_SWEEP_CASH", "").strip().lower()
+            if sweep_env in ("1", "true", "yes"):
+                include_cash = True
+            elif sweep_env in ("0", "false", "no") or not sys.stdin.isatty():
+                include_cash = False
+            else:
+                print(f"\n💰 You also have ${idle_cash:,.2f} (₪{idle_cash * exchange_rate:,.2f}) "
+                      f"uninvested cash tracked in the portfolio.")
+                answer = input("   Include it in this month's purchases, on top of the deposit? (yes/no): ").strip().lower()
+                include_cash = answer in ("yes", "y", "כן", "י")
+            if include_cash:
+                budget_usd += idle_cash
+                print(f"   ✅ Idle cash included - total budget ${budget_usd:,.2f}")
+            else:
+                print(f"   ℹ️  Idle cash left untouched - allocating the deposit only (${deposit_usd:,.2f}).")
 
         # Trend signal (bounded) for satellite tilt + empty-group entry choice.
         mom_ticker, mom_group = self._satellite_momentum(holdings)
@@ -1238,8 +1257,11 @@ class DepositAdvisor:
                   f"  (target {row['target_pct']:4.1f}%)  via {row['instrument']}{trend}")
 
         print("\n" + "-" * 60)
-        print(f"RECOMMENDED PURCHASES  (deposit ${deposit_usd:,.2f}"
-              f" + idle cash = budget ${budget_usd:,.2f})")
+        if budget_usd > deposit_usd:
+            print(f"RECOMMENDED PURCHASES  (deposit ${deposit_usd:,.2f}"
+                  f" + idle cash ${budget_usd - deposit_usd:,.2f} = budget ${budget_usd:,.2f})")
+        else:
+            print(f"RECOMMENDED PURCHASES  (deposit ${deposit_usd:,.2f})")
         print("-" * 60)
         if not buys:
             print("  Nothing affordable below target this month - budget stays as cash")
