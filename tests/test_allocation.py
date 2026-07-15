@@ -170,6 +170,44 @@ def test_other_group_never_receives_money():
 
 
 # --------------------------------------------------------------------------- #
+# Rebalance plan (trade-now option).
+# --------------------------------------------------------------------------- #
+def test_rebalance_plan_sells_overweight_buys_underweight():
+    # ENERGY massively over its 2% target, US_CORE nearly empty.
+    holdings = [
+        _holding("XLE", 5000), _holding("VDE", 800),
+        _holding("SPY", 745, qty=1), _holding("VEA", 3000),
+        _holding("BND", 1500), _holding("VTIP", 1000),
+    ]
+    plan = allocation.rebalance_plan(holdings, 100.0, PRICES)
+    sell_groups = {s["group"] for s in plan["sells"]}
+    assert "ENERGY" in sell_groups
+    buy_groups = {b["group"] for b in plan["buys"]}
+    assert "US_CORE" in buy_groups
+    # Dust-first: VDE (smaller) sold before/instead of gutting XLE entirely.
+    first_energy_sell = next(s for s in plan["sells"] if s["group"] == "ENERGY")
+    assert first_energy_sell["ticker"] == "VDE"
+    # Proceeds are conserved: buys spend at most proceeds + cash.
+    assert sum(b["amount"] for b in plan["buys"]) <= plan["proceeds_usd"] + 100.0 + 1e-6
+
+
+def test_rebalance_plan_no_sells_when_within_tolerance():
+    total = 100_000.0
+    holdings = [_holding(g["tickers"][0], g["target"] * total)
+                for g in allocation.TARGET_GROUPS]
+    plan = allocation.rebalance_plan(holdings, 0.0, PRICES)
+    assert plan["sells"] == []
+
+
+def test_rebalance_plan_other_is_fully_sellable():
+    holdings = [_holding("WEIRDO", 3000, qty=100), _holding("SPY", 7000)]
+    prices = dict(PRICES, WEIRDO=30.0)
+    plan = allocation.rebalance_plan(holdings, 0.0, prices)
+    weirdo_sells = [s for s in plan["sells"] if s["ticker"] == "WEIRDO"]
+    assert weirdo_sells and weirdo_sells[0]["shares"] == 100  # all of it
+
+
+# --------------------------------------------------------------------------- #
 # Bounded trend tilt.
 # --------------------------------------------------------------------------- #
 def _sat_total(targets):

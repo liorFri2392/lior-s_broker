@@ -1352,6 +1352,56 @@ class PortfolioAnalyzer:
         
         return replacement_opportunities
     
+    def _build_rebalance_plan(self, portfolio_metrics: Dict, analyses: List[Dict]) -> Dict:
+        """Two concrete ways to get back to target, for the report:
+
+        Option A (deposits only, no tax): how many months of deposits at the
+        recent pace close the underweight gap.
+        Option B (trade now): allocation.rebalance_plan sells overweight groups
+        down to target (dust first) and reallocates proceeds - each sell
+        annotated with an estimated capital-gains tax where cost basis is known.
+        """
+        portfolio = self.load_portfolio()
+        holdings = portfolio.get("holdings", [])
+        cash = float(portfolio.get("cash", 0) or 0)
+        prices = {a["ticker"].upper(): float(a.get("current_price", 0) or 0)
+                  for a in analyses}
+        # Every group member needs a price so buys can pick equivalents.
+        needed = {t.upper() for g in allocation.TARGET_GROUPS for t in g["tickers"]}
+        missing = [t for t in needed if prices.get(t, 0) <= 0]
+        if missing:
+            fetched, _, _ = market_data.get_prices(missing)
+            prices.update({k.upper(): v for k, v in (fetched or {}).items()})
+
+        plan = allocation.rebalance_plan(holdings, cash, prices)
+
+        # Tax annotation for Option B sells (None = unknown, no cost basis).
+        cost_basis = {(h.get("ticker") or "").upper():
+                      (h.get("cost_basis") or h.get("purchase_price"))
+                      for h in holdings}
+        ta = TaxAnalyzer(self.portfolio_file)
+        total_tax = 0.0
+        tax_known = True
+        for s in plan["sells"]:
+            cb = cost_basis.get(s["ticker"])
+            tax = ta.estimate_sale_tax_usd(cb, s["price"], s["shares"]) if cb else None
+            s["est_tax_usd"] = tax
+            if tax is None:
+                tax_known = False
+            else:
+                total_tax += tax
+        plan["est_total_tax_usd"] = round(total_tax, 2)
+        plan["tax_fully_known"] = tax_known
+
+        # Option A: months to close the gap at the recent deposit pace.
+        monthly = ledger.average_monthly_deposit(portfolio)
+        plan["monthly_deposit_usd"] = monthly
+        plan["months_to_target"] = (
+            round(plan["underweight_usd"] / monthly, 1)
+            if monthly and monthly > 0 else None
+        )
+        return plan
+
     def check_rebalancing(self, portfolio_metrics: Dict, analyses: List[Dict]) -> Dict:
         """Determine if rebalancing is needed, including 80/20 balance check."""
         rebalancing = {
@@ -1371,7 +1421,8 @@ class PortfolioAnalyzer:
             balance_reasons = [r["reason"] for r in balance_check["recommendations"]]
             if not rebalancing["reason"]:
                 rebalancing["reason"] = f"Portfolio off target: {balance_reasons[0] if balance_reasons else 'Needs rebalancing'}"
-        
+            rebalancing["plan"] = self._build_rebalance_plan(portfolio_metrics, analyses)
+
         weights = portfolio_metrics["weights"]
         total_holdings = len(weights)
         total_value_usd = portfolio_metrics["holdings_value"]
@@ -1768,7 +1819,31 @@ class PortfolioAnalyzer:
             if not rebalancing["buy_recommendations"]:
                 buy_recs = self.find_best_etfs_to_buy(total_sell_amount, current_tickers, exclude_tickers=sell_tickers)
                 rebalancing["buy_recommendations"] = buy_recs
-        
+
+        # If the only issue is target drift (no performance/concentration sells),
+        # expose the trade-now plan (Option B) through the standard confirm-apply
+        # flow so answering "yes, I executed these" updates the portfolio.
+        plan = rebalancing.get("plan")
+        if plan and not rebalancing["recommendations"] and not rebalancing["buy_recommendations"]:
+            for s in plan["sells"]:
+                rebalancing["recommendations"].append({
+                    "action": "SELL",
+                    "ticker": s["ticker"],
+                    "sell_shares": s["shares"],
+                    "sell_amount_usd": s["amount"],
+                    "current_price_usd": s["price"],
+                    "reason": f"Rebalance: {s['group']} over target",
+                })
+            for b in plan["buys"]:
+                rebalancing["buy_recommendations"].append({
+                    "ticker": b["ticker"],
+                    "shares": b["shares"],
+                    "price": b["price"],
+                    "allocation_amount": b["amount"],
+                    "name": b["ticker"],
+                    "reasons": [f"Rebalance: fill {b['group']} toward target"],
+                })
+
         return rebalancing
     
     def analyze(self, record_run: bool = True) -> Dict:
@@ -2291,25 +2366,44 @@ class PortfolioAnalyzer:
             print(f"{status_icon} Bonds: {bonds_pct:.1f}% (Target: {t_bonds:.0f}%)")
 
             if not is_balanced:
-                recommendations = balance_info.get("recommendations", [])
-                if recommendations:
-                    print(f"\n📋 Recommendations to achieve target balance:")
-                    for rec in recommendations:
-                        print(f"   • {rec.get('reason', 'N/A')}")
-                    
-                    # Generate concrete buy recommendations
-                    print(f"\n💡 CONCRETE BUY RECOMMENDATIONS:")
-                    concrete_recs = self._generate_concrete_80_20_recommendations(
-                        balance_info, metrics, results["holdings_analysis"], exchange_rate
-                    )
-                    if concrete_recs:
-                        total_needed = sum(r.get('needed_total', 0) for r in concrete_recs if r.get('needed_total'))
-                        total_recommended = sum(r.get('amount', 0) for r in concrete_recs)
-                        if total_needed > 0 and total_needed > total_recommended:
-                            print(f"\n   ⚠️  Total needed: ${total_needed:,.2f}, but only ${total_recommended:,.2f} recommended (limited by available cash)")
-                        for rec in concrete_recs:
-                            print(f"   🟢 BUY: {rec['ticker']} - {rec['shares']} shares × ${rec['price']:.2f} = ${rec['amount']:,.2f} (₪{rec['amount_ils']:,.2f})")
-                            print(f"      Reason: {rec['reason']}")
+                for rec in balance_info.get("recommendations", []):
+                    print(f"   • {rec.get('reason', 'N/A')}")
+
+                plan = results["rebalancing"].get("plan")
+                if plan:
+                    print("\n🧭 REBALANCING PLAN - two ways to get back to target:")
+
+                    # Option A: keep depositing (no sales, no tax).
+                    monthly = plan.get("monthly_deposit_usd")
+                    months = plan.get("months_to_target")
+                    print("\n   Option A - deposits only (no selling, no tax):")
+                    if months is not None:
+                        print(f"      Keep depositing ~${monthly:,.0f}/month (your recent pace);")
+                        print(f"      the ${plan['underweight_usd']:,.0f} underweight gap closes in ~{months:.0f} months.")
+                    else:
+                        print(f"      Future deposits will close the ${plan['underweight_usd']:,.0f} gap"
+                              f" (no deposit history yet to estimate how fast).")
+
+                    # Option B: trade now.
+                    print("\n   Option B - trade now (sell overweight -> buy underweight):")
+                    if not plan["sells"]:
+                        print("      No sensible sells found - use Option A.")
+                    else:
+                        for s in plan["sells"]:
+                            tax = s.get("est_tax_usd")
+                            tax_note = (f", est. tax ${tax:,.0f}" if tax
+                                        else (", no tax (no gain)" if tax == 0.0
+                                              else ", tax unknown (no cost basis)"))
+                            print(f"      🔴 SELL {s['shares']} x {s['ticker']:<5} = ${s['amount']:>9,.2f}"
+                                  f"  [{s['group']}{tax_note}]")
+                        for b in plan["buys"]:
+                            print(f"      🟢 BUY  {b['shares']} x {b['ticker']:<5} = ${b['amount']:>9,.2f}"
+                                  f"  [{b['group']}]")
+                        tax_line = f"${plan['est_total_tax_usd']:,.0f}"
+                        if not plan.get("tax_fully_known"):
+                            tax_line += " + unknown (some positions lack cost basis - run 'make backfill-cost-basis')"
+                        print(f"      Est. capital-gains tax: {tax_line}")
+                        print("      💡 Option A avoids all tax; Option B fixes the drift today.")
         
         print("\n" + "-" * 76)
         print("HOLDINGS (USD, sorted by value - set VERBOSE_HOLDINGS=1 for full details)")

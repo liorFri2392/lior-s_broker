@@ -140,6 +140,26 @@ def _xirr(flows: List[Dict], current_value: float, now: datetime) -> Optional[fl
     return (lo + hi) / 2.0
 
 
+def average_monthly_deposit(portfolio: Dict,
+                            now: Optional[datetime] = None) -> Optional[float]:
+    """Average USD deposited per month, from the ledger's deposit history.
+
+    Total deposits divided by the months elapsed since the first deposit
+    (minimum one month so a burst of early deposits isn't extrapolated).
+    None when no deposits are recorded yet.
+    """
+    deposits = [(d, t) for t in portfolio.get("transactions", []) or []
+                if t.get("type") == "deposit" and t.get("amount_usd", 0) > 0
+                and (d := _parse_date(t.get("date"))) is not None]
+    if not deposits:
+        return None
+    now = now or datetime.now()
+    first = min(d for d, _ in deposits)
+    months = max((now - first).days / 30.44, 1.0)
+    total = sum(t["amount_usd"] for _, t in deposits)
+    return round(total / months, 2)
+
+
 def performance(portfolio: Dict, current_total_value: float,
                 now: Optional[datetime] = None) -> Optional[Dict]:
     """True performance from the ledger, or None when no ledger exists.

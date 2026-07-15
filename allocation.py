@@ -274,6 +274,104 @@ def gap_fill_allocate(holdings: List[Dict], budget_usd: float,
     return sorted(bought.values(), key=lambda r: -r["amount"])
 
 
+def rebalance_plan(holdings: List[Dict], cash_usd: float,
+                   prices: Dict[str, float],
+                   targets: Optional[Dict[str, float]] = None,
+                   tolerance: float = 0.05) -> Dict:
+    """Concrete plan to move the portfolio toward its targets by trading.
+
+    Sell side: groups above target by more than ``tolerance`` (of total value)
+    are sold down to target - smallest positions in the group first (which
+    consolidates dust), the group's largest holding only down to target.
+    Unclassified (_OTHER) tickers have no target and are fully sellable.
+    Buy side: sale proceeds + idle cash are allocated with gap_fill_allocate
+    on the post-sale portfolio.
+
+    Pure function; tax annotation is the caller's job. Returns:
+      {"sells": [{ticker, shares, price, amount, group}],
+       "buys":  [... gap_fill_allocate output ...],
+       "proceeds_usd": float, "underweight_usd": float}
+    """
+    tgt = {g["key"]: g["target"] for g in TARGET_GROUPS}
+    if targets:
+        tgt.update({k: v for k, v in targets.items() if k in tgt})
+
+    values = group_values(holdings)
+    total = sum(values.values()) + max(cash_usd or 0, 0)
+    if total <= 0:
+        return {"sells": [], "buys": [], "proceeds_usd": 0.0, "underweight_usd": 0.0}
+
+    underweight = sum(max(0.0, tgt[g["key"]] * total - values[g["key"]])
+                      for g in TARGET_GROUPS)
+
+    sells: List[Dict] = []
+    proceeds = 0.0
+    post_sale = [dict(h) for h in holdings]
+
+    def _sellable_excess(group_key: Optional[str]) -> float:
+        if group_key is None:
+            return values["_OTHER"]  # no target - fully sellable
+        excess = values[group_key] - tgt[group_key] * total
+        return excess if excess > tolerance * total else 0.0
+
+    # Group members smallest-first so dust positions are liquidated entirely
+    # before the group's main holding is touched.
+    by_group: Dict[Optional[str], List[Dict]] = {}
+    for h in post_sale:
+        by_group.setdefault(classify(h.get("ticker", "")), []).append(h)
+
+    for group_key, members in by_group.items():
+        excess = _sellable_excess(group_key)
+        if excess <= 0:
+            continue
+        members.sort(key=lambda h: float(h.get("current_value", 0) or 0))
+        for h in members:
+            if excess <= 0:
+                break
+            ticker = (h.get("ticker") or "").upper()
+            price = float(prices.get(ticker, 0) or h.get("last_price", 0) or 0)
+            qty = int(h.get("quantity", 0) or 0)
+            if price <= 0 or qty <= 0:
+                continue
+            shares = min(qty, max(1, int(excess / price)))
+            amount = shares * price
+            sells.append({"ticker": ticker, "shares": shares, "price": price,
+                          "amount": round(amount, 2),
+                          "group": group_key or "_OTHER"})
+            h["quantity"] = qty - shares
+            h["current_value"] = h["quantity"] * price
+            proceeds += amount
+            excess -= amount
+
+    remaining_holdings = [h for h in post_sale if float(h.get("quantity", 0) or 0) > 0]
+    budget = proceeds + max(cash_usd or 0, 0)
+    buys = gap_fill_allocate(remaining_holdings, budget, prices, targets=targets)
+
+    # Net out same-ticker churn: a marginal sell whose proceeds flow straight
+    # back into the same ticker (e.g. SELL 1 VEA ... BUY 1 VEA) is pointless.
+    buys_by_ticker = {b["ticker"]: b for b in buys}
+    netted_sells: List[Dict] = []
+    for s in sells:
+        b = buys_by_ticker.get(s["ticker"])
+        if b:
+            offset = min(s["shares"], b["shares"])
+            s = dict(s, shares=s["shares"] - offset,
+                     amount=round((s["shares"] - offset) * s["price"], 2))
+            b["shares"] -= offset
+            b["amount"] = round(b["shares"] * b["price"], 2)
+            proceeds -= offset * s["price"]
+        if s["shares"] > 0:
+            netted_sells.append(s)
+    buys = [b for b in buys if b["shares"] > 0]
+
+    return {
+        "sells": netted_sells,
+        "buys": buys,
+        "proceeds_usd": round(proceeds, 2),
+        "underweight_usd": round(underweight, 2),
+    }
+
+
 def allocation_report(holdings: List[Dict], cash_usd: float = 0.0) -> List[Dict]:
     """Current vs target weight per group - for display.
 

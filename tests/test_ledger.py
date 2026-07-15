@@ -58,6 +58,25 @@ def test_performance_none_without_ledger():
     assert ledger.performance({"transactions": []}, 1000.0) is None
 
 
+def test_average_monthly_deposit():
+    p = {"transactions": [
+        {"type": "opening", "date": "2026-01-01", "value_usd": 1000},
+        {"type": "deposit", "date": "2026-02-01", "amount_usd": 600},
+        {"type": "deposit", "date": "2026-03-01", "amount_usd": 600},
+        {"type": "deposit", "date": "2026-04-01", "amount_usd": 600},
+    ]}
+    avg = ledger.average_monthly_deposit(p, now=datetime(2026, 5, 1))
+    # 1800 over ~2.9 months since first deposit -> ~615/month
+    assert 500 < avg < 700
+    assert ledger.average_monthly_deposit({}) is None
+    # A same-week burst is not extrapolated (min 1 month window).
+    burst = {"transactions": [
+        {"type": "deposit", "date": "2026-06-01", "amount_usd": 1000},
+        {"type": "deposit", "date": "2026-06-03", "amount_usd": 1000},
+    ]}
+    assert ledger.average_monthly_deposit(burst, now=datetime(2026, 6, 5)) == 2000.0
+
+
 def test_short_period_has_no_xirr():
     p = {"transactions": [{"type": "opening", "date": "2026-07-01", "value_usd": 1000}]}
     perf = ledger.performance(p, 1050.0, now=datetime(2026, 7, 10))
