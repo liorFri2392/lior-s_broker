@@ -1370,7 +1370,7 @@ class PortfolioAnalyzer:
             rebalancing["needed"] = True
             balance_reasons = [r["reason"] for r in balance_check["recommendations"]]
             if not rebalancing["reason"]:
-                rebalancing["reason"] = f"Portfolio not balanced (80/20): {balance_reasons[0] if balance_reasons else 'Needs rebalancing'}"
+                rebalancing["reason"] = f"Portfolio off target: {balance_reasons[0] if balance_reasons else 'Needs rebalancing'}"
         
         weights = portfolio_metrics["weights"]
         total_holdings = len(weights)
@@ -1627,7 +1627,7 @@ class PortfolioAnalyzer:
                 if cash_available > needed_bonds_value * 0.5:
                     # Prefer using cash - add note but don't force selling
                     if not rebalancing["reason"]:
-                        rebalancing["reason"] = f"Portfolio not balanced (80/20): Need ${needed_bonds_value:,.2f} in bonds. Consider using ${cash_available:,.2f} cash first, or wait for deposit to avoid tax on sales."
+                        rebalancing["reason"] = f"Portfolio off target: Need ${needed_bonds_value:,.2f} in bonds. Consider using ${cash_available:,.2f} cash first, or wait for deposit to avoid tax on sales."
                 else:
                     # Need to sell - but be smart about it
                     rebalance_percentage = min(excess_stocks, needed_bonds) / 100
@@ -2311,32 +2311,28 @@ class PortfolioAnalyzer:
                             print(f"   🟢 BUY: {rec['ticker']} - {rec['shares']} shares × ${rec['price']:.2f} = ${rec['amount']:,.2f} (₪{rec['amount_ils']:,.2f})")
                             print(f"      Reason: {rec['reason']}")
         
-        print("\n" + "-" * 60)
-        print("HOLDINGS ANALYSIS (All prices and values in USD)")
-        print("-" * 60)
-        
-        for analysis in results["holdings_analysis"]:
-            print(f"\n{analysis['ticker']}:")
-            print(f"  Quantity: {analysis['quantity']} shares")
-            print(f"  Current Price: ${analysis['current_price']:.2f} per share")
-            print(f"  Current Value: ${analysis['current_value']:,.2f}")
-            print(f"  Weight: {results['portfolio_metrics']['weights'].get(analysis['ticker'], 0)*100:.1f}%")
-            print(f"  Recommendation: {analysis['recommendation']} (Score: {analysis['recommendation_score']:.1f}/100)")
-            
-            if analysis["technical_indicators"]:
+        print("\n" + "-" * 76)
+        print("HOLDINGS (USD, sorted by value - set VERBOSE_HOLDINGS=1 for full details)")
+        print("-" * 76)
+        print(f"{'TICKER':<7}{'GROUP':<16}{'QTY':>5}{'PRICE':>10}{'VALUE':>12}{'WT%':>6}{'SCORE':>7}  {'SIGNAL'}")
+        verbose_holdings = os.environ.get("VERBOSE_HOLDINGS", "").strip().lower() in ("1", "true", "yes")
+        sorted_holdings = sorted(results["holdings_analysis"],
+                                 key=lambda a: -a.get("current_value", 0))
+        for analysis in sorted_holdings:
+            weight = results['portfolio_metrics']['weights'].get(analysis['ticker'], 0) * 100
+            rec = analysis['recommendation']
+            marker = {"STRONG SELL": "🔴", "SELL": "🔻", "BUY": "🟢", "STRONG BUY": "🟢"}.get(rec, "")
+            group = allocation.classify(analysis['ticker']) or "-"
+            print(f"{analysis['ticker']:<7}{group:<16}{analysis['quantity']:>5}"
+                  f"{analysis['current_price']:>10,.2f}{analysis['current_value']:>12,.2f}"
+                  f"{weight:>6.1f}{analysis['recommendation_score']:>7.1f}  {marker}{rec if rec != 'HOLD' else ''}")
+            if verbose_holdings and analysis["technical_indicators"]:
                 ti = analysis["technical_indicators"]
-                print(f"  RSI: {ti.get('rsi', 0):.1f}")
-                print(f"  Momentum: {ti.get('momentum', 0):.2f}%")
-                print(f"  Volatility: {ti.get('volatility', 0):.2f}%")
-                print(f"  Trend: {ti.get('trend', 'NEUTRAL')}")
-                if 'beta' in ti:
-                    beta_val = ti.get('beta')
-                    if beta_val is None or (isinstance(beta_val, float) and np.isnan(beta_val)):
-                        print("  Beta: N/A")
-                    else:
-                        print(f"  Beta: {beta_val:.2f}")
-                if 'max_drawdown' in ti:
-                    print(f"  Max Drawdown: {ti.get('max_drawdown', 0):.2f}%")
+                beta_val = ti.get('beta')
+                beta_str = "N/A" if beta_val is None or (isinstance(beta_val, float) and np.isnan(beta_val)) else f"{beta_val:.2f}"
+                print(f"       RSI {ti.get('rsi', 0):.0f} | momentum {ti.get('momentum', 0):+.1f}% | "
+                      f"vol {ti.get('volatility', 0):.1f}% | {ti.get('trend', 'NEUTRAL')} | "
+                      f"beta {beta_str} | maxDD {ti.get('max_drawdown', 0):.1f}%")
         
         print("\n" + "=" * 60)
         print("REBALANCING SUMMARY")
@@ -2347,72 +2343,40 @@ class PortfolioAnalyzer:
 
         if rebalancing["needed"]:
             print("⚠️  REBALANCING IS RECOMMENDED")
-            print(f"Reason: {rebalancing['reason']}\n")
-            
-            # Create summary table
-            print("┌" + "─" * 78 + "┐")
-            print("│" + " " * 20 + "ACTION SUMMARY" + " " * 43 + "│")
-            print("├" + "─" * 78 + "┤")
-            
-            # HOLD section
-            hold_items = [a for a in results["holdings_analysis"] 
-                         if a["ticker"] not in [r["ticker"] for r in rebalancing["recommendations"]]]
-            if hold_items:
-                print("│ ✅ HOLD (Keep as is):" + " " * 57 + "│")
-                for item in hold_items:
-                    value_ils = item["current_value"] * exchange_rate
-                    print(f"│   • {item['ticker']:6s} - {item['quantity']:3d} shares × ${item['current_price']:7.2f} = ${item['current_value']:8,.2f} (₪{value_ils:8,.2f})" + " " * 5 + "│")
-            
-            # SELL section
+            print(f"Reason: {rebalancing['reason']}")
+
+            # Actions only - everything not listed here is a HOLD.
+            total_sell = 0.0
             if rebalancing["recommendations"]:
-                print("│" + "─" * 78 + "│")
-                print("│ 🔴 SELL:" + " " * 70 + "│")
-                total_sell = 0
+                print("\n🔴 SELL:")
                 for rec in rebalancing["recommendations"]:
                     if 'reduce_amount_usd' in rec:
-                        amount = rec['reduce_amount_usd']
-                        shares = rec['reduce_shares']
-                        price = rec['current_price_usd']
+                        amount, shares, price = rec['reduce_amount_usd'], rec['reduce_shares'], rec['current_price_usd']
                     elif 'sell_amount_usd' in rec:
-                        amount = rec['sell_amount_usd']
-                        shares = rec['sell_shares']
-                        price = rec['current_price_usd']
+                        amount, shares, price = rec['sell_amount_usd'], rec['sell_shares'], rec['current_price_usd']
                     else:
                         continue
                     total_sell += amount
-                    amount_ils = amount * exchange_rate
-                    print(f"│   • {rec['ticker']:6s} - Sell {shares:3d} shares × ${price:7.2f} = ${amount:8,.2f} (₪{amount_ils:8,.2f})" + " " * 5 + "│")
-                
+                    print(f"   • {rec['ticker']:<6} {shares} x ${price:,.2f} = ${amount:,.2f} (₪{amount * exchange_rate:,.2f})")
                 if total_sell > 0:
-                    total_sell_ils = total_sell * exchange_rate
-                    print("│" + "─" * 78 + "│")
-                    print(f"│   Total to sell: ${total_sell:10,.2f} (₪{total_sell_ils:10,.2f})" + " " * 44 + "│")
-            
-            # BUY section
+                    print(f"   Total to sell: ${total_sell:,.2f} (₪{total_sell * exchange_rate:,.2f})")
+
+            total_buy = 0.0
             if rebalancing["buy_recommendations"]:
-                print("│" + "─" * 78 + "│")
-                print("│ 🟢 BUY (Recommended replacements):" + " " * 42 + "│")
-                total_buy = 0
+                print("\n🟢 BUY:")
                 for rec in rebalancing["buy_recommendations"]:
                     amount = rec.get('allocation_amount', 0)
                     shares = rec.get('shares', 0)
                     price = rec.get('price', 0)
                     if amount > 0 and shares > 0:
                         total_buy += amount
-                        amount_ils = amount * exchange_rate
-                        name = rec.get('name', rec['ticker'])[:30]
-                        print(f"│   • {rec['ticker']:6s} - Buy {shares:3d} shares × ${price:7.2f} = ${amount:8,.2f} (₪{amount_ils:8,.2f})" + " " * 5 + "│")
-                        print(f"│     {name}" + " " * (78 - len(name) - 5) + "│")
+                        print(f"   • {rec['ticker']:<6} {shares} x ${price:,.2f} = ${amount:,.2f} (₪{amount * exchange_rate:,.2f})")
                         if rec.get('reasons'):
-                            top_reason = rec['reasons'][0][:65]
-                            print(f"│     Reason: {top_reason}" + " " * (78 - len(top_reason) - 12) + "│")
-                
+                            print(f"     {rec['reasons'][0]}")
                 if total_buy > 0:
-                    total_buy_ils = total_buy * exchange_rate
-                    print("│" + "─" * 78 + "│")
-                    print(f"│   Total to buy:  ${total_buy:10,.2f} (₪{total_buy_ils:10,.2f})" + " " * 44 + "│")
-            
-            print("└" + "─" * 78 + "┘")
+                    print(f"   Total to buy: ${total_buy:,.2f} (₪{total_buy * exchange_rate:,.2f})")
+
+            print("\n   (all other holdings: HOLD)")
         else:
             print("✅ Portfolio is well-balanced. No rebalancing needed at this time.")
         
@@ -2460,13 +2424,8 @@ class PortfolioAnalyzer:
         print("\n" + "=" * 60)
         print(f"Analysis completed at: {results['timestamp']}")
         print("=" * 60 + "\n")
-        
-        # Remind user to update GitHub secret if portfolio changed
-        if rebalancing.get("needed") or any(a.get("recommendation") in ["BUY", "SELL"] for a in results["holdings_analysis"]):
-            print("💡 REMINDER: Update GitHub Secret")
-            print("   Your portfolio has changed. Update the secret so GitHub Actions uses the latest data:")
-            print("   Run: make update-secret")
-            print("   Or go to: https://github.com/liorFri2392/lior-s_broker/settings/secrets/actions\n")
+        # (No update-secret reminder: interactive analyze runs sync the GitHub
+        # secret automatically at the end of the run.)
 
 if __name__ == "__main__":
     analyzer = PortfolioAnalyzer()
