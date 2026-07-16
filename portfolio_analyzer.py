@@ -571,7 +571,9 @@ class PortfolioAnalyzer:
         diversification_score = 1 - sum(w**2 for w in weights.values())  # Herfindahl index
         
         # Average recommendation score
-        avg_score = np.mean([a["recommendation_score"] for a in analyses]) if analyses else 50
+        scored = [a["recommendation_score"] for a in analyses
+                  if a.get("recommendation_score") is not None]
+        avg_score = np.mean(scored) if scored else None  # None in fast mode
         
         # Calculate cumulative return since start (baseline tracking)
         baseline_value = portfolio.get("baseline_value")
@@ -965,29 +967,44 @@ class PortfolioAnalyzer:
         print(f"   💾 Prices served via shared cache (window: {'60 min' if market_status else '4 hr'})")
         print()
         
-        # Create DepositAdvisor once (to avoid loading cache multiple times)
-        try:
-            from deposit_advisor import DepositAdvisor
-            advisor = DepositAdvisor(self.portfolio_file)
-        except Exception as e:
-            logger.debug(f"Could not create DepositAdvisor: {e}")
-            advisor = None
-        
-        # Analyze each holding in parallel for better performance
         analyses = []
         holdings_to_analyze = [
             (h["ticker"], h["quantity"], prices.get(h["ticker"], h.get("last_price", 0)))
             for h in portfolio["holdings"]
             if prices.get(h["ticker"], h.get("last_price", 0)) > 0
         ]
-        
-        if holdings_to_analyze:
-                with ThreadPoolExecutor(max_workers=min(5, len(holdings_to_analyze))) as executor:
-                    futures = {
-                        executor.submit(self.analyze_holding, ticker, quantity, price, verbose=True, advisor=advisor): (ticker, quantity, price)
-                        for ticker, quantity, price in holdings_to_analyze
-                    }
-                
+
+        # FAST by default: allocation, drift plan, and true returns only need
+        # prices and values. Per-holding technical scores (1y history + news
+        # per ticker - the slow part) are informational-only now that trades
+        # never come from scores, so they're computed only on request.
+        verbose_holdings = os.environ.get("VERBOSE_HOLDINGS", "").strip().lower() in ("1", "true", "yes")
+
+        if holdings_to_analyze and not verbose_holdings:
+            for ticker, quantity, price in holdings_to_analyze:
+                analyses.append({
+                    "ticker": ticker,
+                    "quantity": quantity,
+                    "current_price": price,
+                    "current_value": quantity * price,
+                    "technical_indicators": {},
+                    "recommendation": "HOLD",
+                    "recommendation_score": None,  # not computed in fast mode
+                })
+        elif holdings_to_analyze:
+            # Full mode (VERBOSE_HOLDINGS=1): compute indicators/scores too.
+            try:
+                from deposit_advisor import DepositAdvisor
+                advisor = DepositAdvisor(self.portfolio_file)
+            except Exception as e:
+                logger.debug(f"Could not create DepositAdvisor: {e}")
+                advisor = None
+            with ThreadPoolExecutor(max_workers=min(5, len(holdings_to_analyze))) as executor:
+                futures = {
+                    executor.submit(self.analyze_holding, ticker, quantity, price, verbose=True, advisor=advisor): (ticker, quantity, price)
+                    for ticker, quantity, price in holdings_to_analyze
+                }
+
                 for future in as_completed(futures):
                     try:
                         analysis = future.result()
@@ -1156,15 +1173,25 @@ class PortfolioAnalyzer:
                 # Subtract from cash
                 portfolio["cash"] = max(0, portfolio.get("cash", 0) - buy_amount)
 
+        # Reconcile with the broker's real remaining cash - actual fills
+        # differ from scan prices, so tracked cash drifts unless corrected.
+        actual = ledger.ask_actual_cash(portfolio.get("cash", 0), exchange_rate)
+        if actual is not None:
+            delta = ledger.reconcile_cash(portfolio, actual,
+                                          note="post-rebalancing broker reconciliation")
+            if delta:
+                print(f"   🔧 Cash reconciled to ${portfolio['cash']:,.2f} "
+                      f"(execution drift {delta:+,.2f} USD logged)")
+
         # Recalculate total value
         total_value = portfolio.get("cash", 0)
         for holding in portfolio.get("holdings", []):
             total_value += holding.get("current_value", 0)
         portfolio["total_value"] = total_value
-        
+
         # Record rebalancing date so we don't recommend again too soon (cooldown)
         portfolio["last_rebalancing_date"] = datetime.now().strftime("%Y-%m-%d")
-        
+
         # Save updated portfolio
         self.save_portfolio(portfolio, sync_github_secret=False)  # analyze() syncs once at end
         
@@ -1196,7 +1223,8 @@ class PortfolioAnalyzer:
         print(f"Holdings Value: ₪{holdings_value_ils:,.2f} (${metrics['holdings_value']:,.2f})")
         print(f"Exchange Rate: 1 USD = {exchange_rate:.4f} ILS  (1 ILS = {1/exchange_rate:.4f} USD)")
         print(f"Diversification Score: {metrics['diversification_score']:.2f} (1.0 = perfect diversification)")
-        print(f"Average Recommendation Score: {metrics['average_recommendation_score']:.1f}/100")
+        if metrics.get('average_recommendation_score') is not None:
+            print(f"Average Recommendation Score: {metrics['average_recommendation_score']:.1f}/100")
         
         # Display cumulative return since start
         if metrics.get("baseline_value") and metrics.get("baseline_value") > 0:
@@ -1351,9 +1379,11 @@ class PortfolioAnalyzer:
         for analysis in sorted_holdings:
             weight = results['portfolio_metrics']['weights'].get(analysis['ticker'], 0) * 100
             group = allocation.classify(analysis['ticker']) or "-"
+            score = analysis.get('recommendation_score')
+            score_str = f"{score:>7.1f}" if score is not None else f"{'-':>7}"
             print(f"{analysis['ticker']:<7}{group:<16}{analysis['quantity']:>5}"
                   f"{analysis['current_price']:>10,.2f}{analysis['current_value']:>12,.2f}"
-                  f"{weight:>6.1f}{analysis['recommendation_score']:>7.1f}")
+                  f"{weight:>6.1f}{score_str}")
             if verbose_holdings and analysis["technical_indicators"]:
                 ti = analysis["technical_indicators"]
                 beta_val = ti.get('beta')

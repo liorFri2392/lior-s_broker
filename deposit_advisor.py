@@ -1107,6 +1107,17 @@ class DepositAdvisor:
         for rec in recommendations:
             ledger.record_trade(portfolio, "buy", rec["ticker"], rec["shares"], rec["price"])
 
+        # Reconcile with reality: real fills differ from scan prices, so the
+        # tracked cash drifts a little every deposit unless corrected here.
+        actual = ledger.ask_actual_cash(new_cash_usd, exchange_rate)
+        if actual is not None:
+            delta = ledger.reconcile_cash(portfolio, actual,
+                                          note="post-deposit broker reconciliation")
+            if delta:
+                new_cash_usd = portfolio["cash"]
+                print(f"   🔧 Cash reconciled to ${new_cash_usd:,.2f} "
+                      f"(execution drift {delta:+,.2f} USD logged)")
+
         # Save updated portfolio
         portfolio["last_updated"] = datetime.now().isoformat()
         with open(self.portfolio_file, 'w', encoding='utf-8') as f:

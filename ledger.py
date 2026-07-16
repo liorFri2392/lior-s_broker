@@ -140,6 +140,58 @@ def _xirr(flows: List[Dict], current_value: float, now: datetime) -> Optional[fl
     return (lo + hi) / 2.0
 
 
+def parse_cash_input(raw: str, ils_per_usd: float) -> Optional[float]:
+    """Parse a user-entered cash amount. Plain numbers are USD; an ILS marker
+    ('ils', 'nis', '₪', 'שח') converts at ``ils_per_usd``. Empty/invalid -> None."""
+    s = (raw or "").strip().lower().replace(",", "")
+    if not s:
+        return None
+    is_ils = any(tok in s for tok in ("₪", "ils", "nis", "שח", 'ש"ח'))
+    for tok in ("₪", "ils", "nis", "שח", 'ש"ח', "usd", "$"):
+        s = s.replace(tok, "")
+    try:
+        val = float(s.strip())
+    except ValueError:
+        return None
+    if val < 0:
+        return None
+    return round(val / ils_per_usd, 2) if is_ils else round(val, 2)
+
+
+def ask_actual_cash(expected_usd: float, ils_per_usd: float) -> Optional[float]:
+    """Interactive prompt for the broker's real remaining cash (None = keep
+    the computed figure / non-interactive session)."""
+    import sys
+    if not sys.stdin.isatty():
+        return None
+    raw = input(f"   Broker's ACTUAL remaining cash "
+                f"[Enter = keep ${expected_usd:,.2f}; e.g. '133.5' USD or '400 ils']: ")
+    return parse_cash_input(raw, ils_per_usd)
+
+
+def reconcile_cash(portfolio: Dict, actual_cash_usd: float,
+                   note: str = "broker cash reconciliation") -> float:
+    """Set tracked cash to the broker's actual figure; return the delta.
+
+    The difference (usually real fills costing more/less than scan prices) is
+    logged as an ``adjustment`` transaction for the audit trail. Adjustments
+    are deliberately NOT external cash flows: the money was really deposited,
+    so execution drift must show up as reduced gain, not reduced investment.
+    """
+    tracked = float(portfolio.get("cash", 0) or 0)
+    delta = round(float(actual_cash_usd) - tracked, 2)
+    if abs(delta) < 0.01:
+        return 0.0
+    portfolio["cash"] = round(float(actual_cash_usd), 2)
+    portfolio.setdefault("transactions", []).append({
+        "type": "adjustment",
+        "date": _today(),
+        "amount_usd": delta,
+        "note": note,
+    })
+    return delta
+
+
 def average_monthly_deposit(portfolio: Dict,
                             now: Optional[datetime] = None) -> Optional[float]:
     """Average USD deposited per month, from the ledger's deposit history.

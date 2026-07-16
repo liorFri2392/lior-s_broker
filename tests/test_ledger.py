@@ -1,6 +1,8 @@
 """Offline tests for ledger.py - deposit tracking and money-weighted returns."""
 from datetime import datetime
 
+import pytest
+
 import ledger
 
 
@@ -75,6 +77,33 @@ def test_average_monthly_deposit():
         {"type": "deposit", "date": "2026-06-03", "amount_usd": 1000},
     ]}
     assert ledger.average_monthly_deposit(burst, now=datetime(2026, 6, 5)) == 2000.0
+
+
+def test_parse_cash_input():
+    assert ledger.parse_cash_input("133.5", 3.0) == 133.5
+    assert ledger.parse_cash_input("400 ils", 3.2) == 125.0
+    assert ledger.parse_cash_input("₪400", 3.2) == 125.0
+    assert ledger.parse_cash_input("1,200 nis", 3.0) == 400.0
+    assert ledger.parse_cash_input("$99", 3.0) == 99.0
+    assert ledger.parse_cash_input("", 3.0) is None
+    assert ledger.parse_cash_input("abc", 3.0) is None
+    assert ledger.parse_cash_input("-5", 3.0) is None
+
+
+def test_reconcile_cash_logs_adjustment_without_touching_flows():
+    p = {"transactions": [{"type": "opening", "date": "2026-01-01", "value_usd": 1000}],
+         "cash": 796.94}
+    delta = ledger.reconcile_cash(p, 133.22)
+    assert delta == pytest.approx(-663.72)
+    assert p["cash"] == 133.22
+    adj = [t for t in p["transactions"] if t["type"] == "adjustment"]
+    assert len(adj) == 1 and adj[0]["amount_usd"] == pytest.approx(-663.72)
+    # Adjustments must NOT change net invested (drift = reduced gain, not a withdrawal).
+    perf = ledger.performance(p, 5000.0, now=datetime(2026, 7, 1))
+    assert perf["net_invested_usd"] == 1000.0
+    # No-op when already matching.
+    assert ledger.reconcile_cash(p, 133.22) == 0.0
+    assert len([t for t in p["transactions"] if t["type"] == "adjustment"]) == 1
 
 
 def test_short_period_has_no_xirr():
