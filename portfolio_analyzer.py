@@ -622,126 +622,6 @@ class PortfolioAnalyzer:
             "true_performance": true_performance,
         }
     
-    def find_best_etfs_to_buy(self, amount_usd: float, current_holdings: List[str], exclude_tickers: List[str] = None) -> List[Dict]:
-        """
-        Find best ETFs to buy following the model target-weight strategy.
-        Prioritizes Core ETFs and Bonds over high-risk trends.
-        """
-        from deposit_advisor import DepositAdvisor
-        
-        exclude_tickers = exclude_tickers or []
-        advisor = DepositAdvisor(self.portfolio_file)
-
-        core_etfs = self.CORE_ETFS
-        # Expanded satellite universe (broader than SATELLITE_ETFS) for candidate search.
-        satellite_etfs = [
-            # Core Satellite (essential diversification)
-            "IWM", "VB", "XLK", "VGT", "VWO", "EEM", "XLV", "VHT",  # Small Cap, Tech, Emerging, Healthcare
-            # High-growth trends
-            "BOTZ", "ROBO", "QUBT", "QTUM",  # AI/Robotics, Quantum Computing
-            "SOXX", "SMH", "WCLD", "SKYY",  # Semiconductors, Cloud
-            "HACK", "CIBR", "ICLN", "QCLN",  # Cybersecurity, Clean Energy
-            "DRIV", "IDRV",  # Electric Vehicles
-            # Defensive growth
-            "VNQ", "SCHH", "IFRA", "PAVE",  # Real Estate, Infrastructure
-            # Investment styles
-            "VYM", "SCHD", "VUG", "IVW", "VTV", "IVE",  # Dividend, Growth, Value
-            # Sector diversification
-            "XLF", "VFH", "XLE", "VDE", "XLY", "VCR"  # Financial, Energy, Consumer
-        ]
-        bond_etfs = self.BOND_ETFS
-
-        # Exclude high-risk categories
-        excluded_categories = etf_universe.EXCLUDED_CATEGORIES
-        excluded_from_categories = []
-        for cat in excluded_categories:
-            if cat in advisor.ETF_CATEGORIES:
-                excluded_from_categories.extend(advisor.ETF_CATEGORIES[cat])
-        
-        # Build candidate list prioritizing Core and Bonds
-        candidate_etfs = []
-        
-        # Add Core ETFs first (highest priority)
-        for etf in core_etfs:
-            if etf not in current_holdings and etf not in exclude_tickers:
-                candidate_etfs.append(etf)
-        
-        # Add Bond ETFs (high priority for protection)
-        for etf in bond_etfs:
-            if etf not in current_holdings and etf not in exclude_tickers:
-                candidate_etfs.append(etf)
-        
-        # Add Satellite ETFs (moderate priority)
-        for etf in satellite_etfs:
-            if (etf not in current_holdings and 
-                etf not in exclude_tickers and 
-                etf not in candidate_etfs and
-                etf not in excluded_from_categories):
-                candidate_etfs.append(etf)
-        
-        core_upper = {e.upper() for e in core_etfs}
-        bond_upper = {e.upper() for e in bond_etfs}
-
-        # Limit to top candidates (prioritize Core and Bonds), then fetch all
-        # their prices in ONE batched request via the shared layer.
-        candidates_to_analyze = candidate_etfs[:10]
-        candidate_prices, _, _ = market_data.get_prices(candidates_to_analyze)
-
-        def analyze_etf_candidate(etf):
-            try:
-                price = candidate_prices.get(etf)
-                if not price or price <= 0:
-                    return None
-                shares = int(amount_usd / price / 3)  # Divide by 3 for 3 recommendations
-                if shares > 0:
-                    # Scoring based on category
-                    score = 60  # Base score
-                    info = market_data.get_info(etf)
-
-                    # Boost for Core and Bonds
-                    if etf.upper() in core_upper:
-                        score += 20
-                        category = "CORE"
-                    elif etf.upper() in bond_upper:
-                        score += 25
-                        category = "BONDS"
-                    else:
-                        category = "SATELLITE"
-
-                    if info.get('annualReportExpenseRatio', 1) < 0.001:
-                        score += 10
-
-                    return {
-                        "ticker": etf,
-                        "name": info.get('longName', etf),
-                        "shares": shares,
-                        "price": price,
-                        "allocation_amount": shares * price,
-                        "score": score,
-                        "recommendation": "BUY",
-                        "reasons": [
-                            f"{category} holding" if category else "Diversification",
-                            "Low expense ratio" if info.get('annualReportExpenseRatio', 1) < 0.001 else "Good diversification"
-                        ],
-                        "category": category
-                    }
-            except Exception as e:
-                logger.debug(f"Failed to analyze ETF candidate {etf}: {e}")
-                pass
-            return None
-
-        recommendations = []
-        with ThreadPoolExecutor(max_workers=min(5, len(candidates_to_analyze))) as executor:
-            futures = [executor.submit(analyze_etf_candidate, etf) for etf in candidates_to_analyze]
-            for future in as_completed(futures):
-                result = future.result()
-                if result:
-                    recommendations.append(result)
-        
-        # Sort by score (Core and Bonds will be prioritized)
-        recommendations.sort(key=lambda x: x['score'], reverse=True)
-        return recommendations[:3]
-    
     def check_80_20_balance(self, portfolio_metrics: Dict, analyses: List[Dict]) -> Dict:
         """
         Check the portfolio against the model strategy defined in allocation.py
@@ -859,499 +739,6 @@ class PortfolioAnalyzer:
         
         return balance_check
     
-    def _generate_concrete_80_20_recommendations(
-        self,
-        balance_info: Dict,
-        portfolio_metrics: Dict,
-        holdings_analysis: List[Dict],
-        exchange_rate: float
-    ) -> List[Dict]:
-        """Generate concrete buy recommendations to achieve target balance."""
-        recommendations = []
-        
-        bonds_percent = balance_info.get("bonds_percent", 0)
-        stocks_percent = balance_info.get("stocks_percent", 0)
-        core_percent = balance_info.get("core_percent", 0)
-        satellite_percent = balance_info.get("satellite_percent", 0)
-        
-        total_value = portfolio_metrics.get("total_value", 0)
-        cash_available = portfolio_metrics.get("cash", 0)
-        
-        if total_value == 0:
-            return recommendations
-        
-        core_etfs = self.CORE_ETFS
-        bond_etfs = self.BOND_ETFS
-
-        # Check what we need - targets from allocation.py (single source).
-        cat_targets = allocation.category_targets()
-        target_bonds = total_value * cat_targets.get("BONDS", 0.15)
-        current_bonds = total_value * (bonds_percent / 100)
-        needed_bonds = max(0, target_bonds - current_bonds)
-
-        target_core = total_value * cat_targets.get("CORE", 0.70)
-        current_core = total_value * (core_percent / 100)
-        needed_core = max(0, target_core - current_core)
-
-        target_satellite = total_value * cat_targets.get("SATELLITE", 0.15)
-        current_satellite = total_value * (satellite_percent / 100)
-        needed_satellite = max(0, target_satellite - current_satellite)
-
-        # Get current holdings
-        current_holdings = [h.get("ticker", "").upper() for h in holdings_analysis]
-
-        # Batch-fetch all candidate prices up front (one request for bonds + core).
-        candidate_prices, _, _ = market_data.get_prices(bond_etfs + core_etfs)
-
-        # Recommend bonds if needed (priority)
-        if needed_bonds > 100:
-            remaining_needed = needed_bonds
-            for bond_etf in bond_etfs:
-                if remaining_needed <= 0 or len(recommendations) >= 3:
-                    break
-                if bond_etf.upper() not in current_holdings or needed_bonds > 500:
-                    price = candidate_prices.get(bond_etf)
-                    if price and price > 0:
-                        # Recommend based on what's needed, but note cash limitation
-                        amount_to_recommend = min(remaining_needed, cash_available) if cash_available > 0 else remaining_needed
-                        shares = int(amount_to_recommend / price)
-                        if shares > 0:
-                            actual_amount = shares * price
-                            reason = f"Add bonds to reach {cat_targets.get('BONDS', 0.15)*100:.0f}% target (currently {bonds_percent:.1f}%)"
-                            if cash_available < needed_bonds:
-                                reason += f" | Need ${needed_bonds:,.2f} total, but only ${cash_available:,.2f} cash available"
-                            recommendations.append({
-                                "ticker": bond_etf,
-                                "shares": shares,
-                                "price": price,
-                                "amount": actual_amount,
-                                "amount_ils": actual_amount * exchange_rate,
-                                "reason": reason,
-                                "needed_total": needed_bonds,
-                                "cash_available": cash_available
-                            })
-                            remaining_needed -= actual_amount
-
-        # Recommend core if needed (only if we have cash left after bonds)
-        remaining_cash = cash_available - sum(r.get("amount", 0) for r in recommendations)
-        if needed_core > 100 and remaining_cash > 100:
-            remaining_needed = needed_core
-            for core_etf in core_etfs:
-                if remaining_needed <= 0 or len(recommendations) >= 5:
-                    break
-                if core_etf.upper() not in current_holdings or needed_core > 500:
-                    price = candidate_prices.get(core_etf)
-                    if price and price > 0:
-                        amount_to_recommend = min(remaining_needed, remaining_cash)
-                        shares = int(amount_to_recommend / price)
-                        if shares > 0:
-                            actual_amount = shares * price
-                            reason = f"Increase core holdings to reach {cat_targets.get('CORE', 0.70)*100:.0f}% target (currently {core_percent:.1f}%)"
-                            if remaining_cash < needed_core:
-                                reason += f" | Need ${needed_core:,.2f} total, but only ${remaining_cash:,.2f} cash available"
-                            recommendations.append({
-                                "ticker": core_etf,
-                                "shares": shares,
-                                "price": price,
-                                "amount": actual_amount,
-                                "amount_ils": actual_amount * exchange_rate,
-                                "reason": reason,
-                                "needed_total": needed_core,
-                                "cash_available": remaining_cash
-                            })
-                            remaining_needed -= actual_amount
-                            remaining_cash -= actual_amount
-
-        return recommendations
-    
-    def _generate_bond_recommendations(self, amount_usd: float, current_tickers: List[str], exchange_rate: float) -> List[Dict]:
-        """Generate bond ETF recommendations for a specific amount."""
-        bond_etfs = self.BOND_ETFS
-        recommendations = []
-
-        current_upper = {t.upper() for t in current_tickers}
-        # One batched price fetch for all bond ETFs.
-        bond_prices, _, _ = market_data.get_prices(bond_etfs)
-        remaining_amount = amount_usd
-
-        for bond_etf in bond_etfs:
-            if remaining_amount <= 0 or len(recommendations) >= 3:
-                break
-
-            if bond_etf.upper() not in current_upper:
-                price = bond_prices.get(bond_etf)
-                if price and price > 0:
-                    shares = int(remaining_amount / price)
-                    if shares > 0:
-                        actual_amount = shares * price
-                        recommendations.append({
-                            "ticker": bond_etf,
-                            "shares": shares,
-                            "price": price,
-                            "allocation_amount": actual_amount,
-                            "name": bond_etf,
-                            "reasons": [f"Rebalancing: Buy bonds to reach 25% target"]
-                        })
-                        remaining_amount -= actual_amount
-
-        return recommendations
-    
-    def find_better_alternatives(self, holdings_analysis: List[Dict], portfolio_metrics: Dict) -> List[Dict]:
-        """
-        Deep analysis: Compare ALL existing holdings with market alternatives.
-        Finds better ETFs even if current holdings are not weak.
-        This ensures portfolio is always optimized according to the target-weight strategy.
-        """
-        from deposit_advisor import DepositAdvisor
-        
-        replacement_opportunities = []
-        advisor = DepositAdvisor(self.portfolio_file)
-        
-        # Get current portfolio
-        portfolio = self.load_portfolio()
-        current_tickers = [h.get("ticker", "").upper() for h in portfolio.get("holdings", [])]
-        total_value = portfolio_metrics.get("total_value", 0)
-
-        # Cost-basis lookup so replacement recs can estimate the tax hit of selling.
-        cost_basis_by_ticker = {
-            h.get("ticker", "").upper(): (h.get("cost_basis") or h.get("purchase_price"))
-            for h in portfolio.get("holdings", [])
-        }
-        # exchange_rate is irrelevant for the USD tax estimate; pass 1.0 to skip
-        # the live FX fetch in TaxAnalyzer.__init__.
-        tax_analyzer = TaxAnalyzer(self.portfolio_file, exchange_rate=1.0)
-
-        # Define categories for comparison
-        core_etfs = self.CORE_ETFS
-        bond_etfs = self.BOND_ETFS
-        satellite_categories = etf_universe.SATELLITE_CATEGORIES
-
-        for holding in holdings_analysis:
-            ticker = holding.get("ticker", "").upper()
-            current_score = holding.get("recommendation_score", 50)
-            current_value = holding.get("current_value", 0)
-            current_weight = (current_value / total_value * 100) if total_value > 0 else 0
-            
-            # Skip if holding is too small (<2% of portfolio) - not worth replacing
-            if current_weight < 2:
-                continue
-            
-            # Determine category
-            is_core = ticker in [e.upper() for e in core_etfs]
-            is_bond = ticker in [e.upper() for e in bond_etfs]
-            
-            # Find candidates in same category
-            candidates = []
-            category_name = ""
-            
-            if is_core:
-                candidates = [e for e in core_etfs if e.upper() != ticker and e.upper() not in current_tickers]
-                category_name = "CORE"
-            elif is_bond:
-                candidates = [e for e in bond_etfs if e.upper() != ticker and e.upper() not in current_tickers]
-                category_name = "BONDS"
-            else:
-                # For satellite ETFs, search in all satellite categories
-                category_name = "SATELLITE"
-                for cat in satellite_categories:
-                    if cat in advisor.ETF_CATEGORIES:
-                        cat_etfs = advisor.ETF_CATEGORIES[cat]
-                        # Add top 2 from each category that we don't already have
-                        for etf in cat_etfs[:2]:
-                            if etf.upper() != ticker and etf.upper() not in current_tickers:
-                                if etf.upper() not in [c.upper() for c in candidates]:
-                                    candidates.append(etf)
-            
-            # Analyze candidates to find better alternatives
-            best_alternative = None
-            best_score = 0
-            best_analysis = None
-            
-            for candidate in candidates[:5]:  # Check top 5 candidates
-                try:
-                    candidate_analysis = advisor.analyze_etf(candidate, verbose=False)
-                    candidate_score = candidate_analysis.get("score", 0)
-                    
-                    # Boost score for Core and Bonds (they're essential for 80/20 strategy)
-                    if is_core:
-                        candidate_score = min(100, candidate_score + 15)
-                    elif is_bond:
-                        candidate_score = min(100, candidate_score + 20)
-                    
-                    # Check if significantly better (at least 15 points higher)
-                    score_diff = candidate_score - current_score
-                    
-                    if score_diff >= 15 and candidate_score > best_score:
-                        # Additional checks: ensure alternative has good fundamentals
-                        expected_return = candidate_analysis.get("mid_term_forecast", {}).get("expected_3yr_return", 0)
-                        
-                        # Filter unrealistic returns
-                        if -50 <= expected_return <= 50:
-                            best_score = candidate_score
-                            best_alternative = candidate
-                            best_analysis = candidate_analysis
-                            
-                except Exception as e:
-                    logger.debug(f"Failed to analyze alternative {candidate}: {e}")
-                    continue
-            
-            # If found significantly better alternative, recommend replacement
-            if best_alternative and best_analysis:
-                score_diff = best_score - current_score
-                
-                # Only recommend if meaningful improvement
-                if score_diff >= 15:
-                    # Recommend replacing 30-50% depending on score difference
-                    replace_percentage = 0.5 if score_diff >= 25 else 0.3
-                    shares_to_sell = int(holding.get("quantity", 0) * replace_percentage)
-                    sell_amount = shares_to_sell * holding.get("current_price", 0)
-                    
-                    if sell_amount > 100:  # Only if meaningful amount
-                        expected_return = best_analysis.get("mid_term_forecast", {}).get("expected_3yr_return", 0)
-                        current_return = holding.get("mid_term_forecast", {}).get("expected_3yr_return", 0) if isinstance(holding.get("mid_term_forecast"), dict) else 0
-                        
-                        # Calculate buy shares
-                        buy_price = best_analysis.get("current_price", 0)
-                        if buy_price > 0:
-                            buy_shares = int(sell_amount / buy_price)
-                            buy_amount = buy_shares * buy_price
-                        else:
-                            buy_shares = 0
-                            buy_amount = 0
-                        
-                        # Only recommend if we can buy at least 1 share
-                        if buy_shares > 0:
-                            # Estimate the realized capital-gains tax of selling
-                            # this portion, so the human weighs it against the
-                            # score gain (a taxable swap can be net-negative).
-                            est_tax = tax_analyzer.estimate_sale_tax_usd(
-                                cost_basis_by_ticker.get(ticker),
-                                holding.get("current_price", 0),
-                                shares_to_sell,
-                            )
-                            if est_tax is None:
-                                tax_note = ("⚠️ No cost basis tracked — tax impact unknown; "
-                                            "selling a gain triggers ~25% capital-gains tax.")
-                            elif est_tax > 0:
-                                tax_note = (f"⚠️ Selling triggers ~${est_tax:,.0f} capital-gains "
-                                            f"tax (25%); the score gain must justify it.")
-                            else:
-                                tax_note = "No capital-gains tax (no gain on the portion sold)."
-                            replacement_opportunities.append({
-                            "sell_ticker": ticker,
-                            "sell_score": current_score,
-                            "sell_shares": shares_to_sell,
-                            "sell_amount": sell_amount,
-                            "buy_ticker": best_alternative,
-                            "buy_score": best_score,
-                            "buy_shares": buy_shares,
-                            "buy_amount": buy_amount,
-                            "buy_price": buy_price,
-                            "score_improvement": score_diff,
-                            "category": category_name,
-                            "expected_return": expected_return,
-                            "current_return": current_return,
-                            "replace_percentage": replace_percentage,
-                            "estimated_sale_tax_usd": est_tax,
-                            "tax_note": tax_note,
-                        })
-        
-        return replacement_opportunities
-    
-    def find_concentration_opportunities(self, holdings_analysis: List[Dict], portfolio_metrics: Dict, emerging_trends: List[Dict] = None) -> List[Dict]:
-        """
-        Find replacement opportunities based on:
-        1. Over-concentration (ETF > 30% of portfolio)
-        2. Hot sectors (emerging trends with strong momentum)
-        3. Portfolio balance (Core too low, Satellite too high)
-
-        ``emerging_trends`` may be passed in (computed once by the caller) to
-        avoid recomputing the expensive trend sweep; if None it is computed here.
-        """
-        from deposit_advisor import DepositAdvisor
-
-        replacement_opportunities = []
-        advisor = DepositAdvisor(self.portfolio_file)
-
-        # Get current portfolio
-        portfolio = self.load_portfolio()
-        current_tickers = [h.get("ticker", "").upper() for h in portfolio.get("holdings", [])]
-        total_value = portfolio_metrics.get("total_value", 0)
-
-        # Get emerging trends (reuse caller's computation when provided)
-        if emerging_trends is None:
-            excluded_categories = etf_universe.EXCLUDED_CATEGORIES
-            emerging_trends = advisor.detect_emerging_trends(excluded_categories)
-        hot_sectors = {t.get("category", ""): t for t in emerging_trends[:5]}  # Top 5 hot sectors
-
-        # Calculate current portfolio balance
-        core_etfs = self.CORE_ETFS
-        bond_etfs = self.BOND_ETFS
-
-        core_value = 0
-        satellite_value = 0
-        bonds_value = 0
-        
-        for holding in holdings_analysis:
-            ticker = holding.get("ticker", "").upper()
-            value = holding.get("current_value", 0)
-            
-            if ticker in [e.upper() for e in core_etfs]:
-                core_value += value
-            elif ticker in [e.upper() for e in bond_etfs]:
-                bonds_value += value
-            else:
-                satellite_value += value
-        
-        core_pct = (core_value / total_value * 100) if total_value > 0 else 0
-        satellite_pct = (satellite_value / total_value * 100) if total_value > 0 else 0
-        
-        # Check each holding for over-concentration or opportunities
-        for holding in holdings_analysis:
-            ticker = holding.get("ticker", "").upper()
-            current_score = holding.get("recommendation_score", 50)
-            current_value = holding.get("current_value", 0)
-            current_weight = (current_value / total_value * 100) if total_value > 0 else 0
-            
-            # Skip if too small
-            if current_weight < 2:
-                continue
-            
-            is_core = ticker in [e.upper() for e in core_etfs]
-            is_bond = ticker in [e.upper() for e in bond_etfs]
-            
-            # 1. Check for over-concentration (>30% of portfolio)
-            if current_weight > 30:
-                # Find best alternative from hot sectors or Core
-                best_alternative = None
-                best_score = 0
-                best_analysis = None
-                reason = ""
-                
-                # Priority: If Core is low, recommend Core ETFs
-                if core_pct < 45:
-                    for core_etf in core_etfs:
-                        if core_etf.upper() not in current_tickers:
-                            try:
-                                analysis = advisor.analyze_etf(core_etf, verbose=False)
-                                score = analysis.get("score", 0)
-                                if score > best_score:
-                                    best_score = score
-                                    best_alternative = core_etf
-                                    best_analysis = analysis
-                                    reason = f"Over-concentration ({current_weight:.1f}%) + Low Core ({core_pct:.1f}%)"
-                            except Exception:
-                                continue
-                
-                # If no Core alternative or Core is OK, check hot sectors
-                if not best_alternative or core_pct >= 45:
-                    for category, trend_data in hot_sectors.items():
-                        if category in advisor.ETF_CATEGORIES:
-                            trend_etfs = advisor.ETF_CATEGORIES[category]
-                            momentum = trend_data.get("avg_momentum", 0)
-                            
-                            # Only consider very hot sectors (momentum > 10%)
-                            if momentum > 10:
-                                for etf in trend_etfs[:2]:
-                                    if etf.upper() not in current_tickers:
-                                        try:
-                                            analysis = advisor.analyze_etf(etf, verbose=False)
-                                            score = analysis.get("score", 0)
-                                            # Boost score for hot sectors
-                                            score = min(100, score + 10)
-                                            if score > best_score:
-                                                best_score = score
-                                                best_alternative = etf
-                                                best_analysis = analysis
-                                                reason = f"Over-concentration ({current_weight:.1f}%) + Hot sector ({category}, {momentum:.1f}% momentum)"
-                                        except Exception:
-                                            continue
-                
-                # If found alternative, recommend replacement
-                if best_alternative and best_analysis:
-                    # Recommend replacing 30-50% depending on concentration
-                    replace_percentage = 0.5 if current_weight > 40 else 0.3
-                    shares_to_sell = int(holding.get("quantity", 0) * replace_percentage)
-                    sell_amount = shares_to_sell * holding.get("current_price", 0)
-                    
-                    if sell_amount > 100:
-                        buy_price = best_analysis.get("current_price", 0)
-                        if buy_price > 0:
-                            buy_shares = int(sell_amount / buy_price)
-                            buy_amount = buy_shares * buy_price
-                        else:
-                            buy_shares = 0
-                            buy_amount = 0
-                        
-                        if buy_shares > 0:
-                            replacement_opportunities.append({
-                                "sell_ticker": ticker,
-                                "sell_score": current_score,
-                                "sell_shares": shares_to_sell,
-                                "sell_amount": sell_amount,
-                                "buy_ticker": best_alternative,
-                                "buy_score": best_score,
-                                "buy_shares": buy_shares,
-                                "buy_amount": buy_amount,
-                                "buy_price": buy_price,
-                                "score_improvement": best_score - current_score,
-                                "category": "DIVERSIFICATION",
-                                "expected_return": best_analysis.get("mid_term_forecast", {}).get("expected_3yr_return", 0),
-                                "current_return": holding.get("mid_term_forecast", {}).get("expected_3yr_return", 0) if isinstance(holding.get("mid_term_forecast"), dict) else 0,
-                                "replace_percentage": replace_percentage,
-                                "reason": reason
-                            })
-            
-            # 2. Check if Satellite is too high and Core is too low
-            elif not is_core and not is_bond and satellite_pct > 35 and core_pct < 45:
-                # Recommend replacing some Satellite with Core
-                for core_etf in core_etfs:
-                    if core_etf.upper() not in current_tickers:
-                        try:
-                            analysis = advisor.analyze_etf(core_etf, verbose=False)
-                            score = analysis.get("score", 0)
-                            # Boost score for Core when Core is low
-                            score = min(100, score + 15)
-                            
-                            # Only recommend if meaningful improvement
-                            if score >= current_score + 10:
-                                replace_percentage = 0.3
-                                shares_to_sell = int(holding.get("quantity", 0) * replace_percentage)
-                                sell_amount = shares_to_sell * holding.get("current_price", 0)
-                                
-                                if sell_amount > 100:
-                                    buy_price = analysis.get("current_price", 0)
-                                    if buy_price > 0:
-                                        buy_shares = int(sell_amount / buy_price)
-                                        buy_amount = buy_shares * buy_price
-                                    else:
-                                        buy_shares = 0
-                                        buy_amount = 0
-                                    
-                                    if buy_shares > 0:
-                                        replacement_opportunities.append({
-                                            "sell_ticker": ticker,
-                                            "sell_score": current_score,
-                                            "sell_shares": shares_to_sell,
-                                            "sell_amount": sell_amount,
-                                            "buy_ticker": core_etf,
-                                            "buy_score": score,
-                                            "buy_shares": buy_shares,
-                                            "buy_amount": buy_amount,
-                                            "buy_price": buy_price,
-                                            "score_improvement": score - current_score,
-                                            "category": "CORE",
-                                            "expected_return": analysis.get("mid_term_forecast", {}).get("expected_3yr_return", 0),
-                                            "current_return": holding.get("mid_term_forecast", {}).get("expected_3yr_return", 0) if isinstance(holding.get("mid_term_forecast"), dict) else 0,
-                                            "replace_percentage": replace_percentage,
-                                            "reason": f"Satellite too high ({satellite_pct:.1f}%) + Core too low ({core_pct:.1f}%) - Rebalance toward targets"
-                                        })
-                                        break  # Only one Core recommendation per Satellite holding
-                        except Exception:
-                            continue
-        
-        return replacement_opportunities
-    
     def _build_rebalance_plan(self, portfolio_metrics: Dict, analyses: List[Dict]) -> Dict:
         """Two concrete ways to get back to target, for the report:
 
@@ -1429,29 +816,22 @@ class PortfolioAnalyzer:
         current_tickers = [a["ticker"] for a in analyses]
         total_sell_amount = 0
         
-        # Check for over-concentration - BUT only if performance is poor
-        # Logic: Performance first, concentration is only an upper limit
+        # Over-concentration is a pure RISK rule, not a performance call:
+        # >50% in one holding always triggers a reduce; 40-50% is only noted.
+        # (Score-based carve-outs were removed - a good recent score is not a
+        # reason to hold half the portfolio in one ticker, and a bad one is
+        # not a reason to churn.)
         max_weight = max(weights.values()) if weights else 0
         if max_weight > 0.4:  # More than 40% in one holding
             ticker = max(weights, key=weights.get)
             ticker_analysis = next((a for a in analyses if a["ticker"] == ticker), None)
-            
-            # Only recommend selling if:
-            # 1. Concentration is VERY high (>50%) OR
-            # 2. Performance is poor (score < 50)
-            should_reduce = False
-            if max_weight > 0.5:  # Very high concentration (>50%)
-                should_reduce = True
-                reason_text = f"Very high concentration: {ticker} is {max_weight*100:.1f}% of portfolio (risk limit)"
-            elif ticker_analysis and ticker_analysis.get("recommendation_score", 50) < 50:
-                # High concentration + poor performance = sell
-                should_reduce = True
-                reason_text = f"Over-concentration + poor performance: {ticker} is {max_weight*100:.1f}% with score {ticker_analysis.get('recommendation_score', 0):.1f}/100"
-            elif ticker_analysis and ticker_analysis.get("recommendation_score", 50) >= 70:
-                # High concentration BUT good performance = keep it (just note it)
-                should_reduce = False
-                rebalancing["reason"] = f"Note: {ticker} is {max_weight*100:.1f}% of portfolio but performing well (Score: {ticker_analysis.get('recommendation_score', 0):.1f}/100) - keeping due to strong performance"
-            
+
+            should_reduce = max_weight > 0.5
+            reason_text = f"Very high concentration: {ticker} is {max_weight*100:.1f}% of portfolio (risk limit)"
+            if not should_reduce and not rebalancing["reason"]:
+                rebalancing["reason"] = (f"Note: {ticker} is {max_weight*100:.1f}% of portfolio - "
+                                         f"watch concentration (reduce trigger is 50%)")
+
             if should_reduce:
                 rebalancing["needed"] = True
                 current_value_usd = total_value_usd * max_weight
@@ -1490,335 +870,12 @@ class PortfolioAnalyzer:
             if not rebalancing["reason"]:
                 rebalancing["reason"] = "Low diversification - consider adding more holdings"
         
-        # PRIORITY 1: Check for underperforming holdings and compare with better alternatives
-        # Performance-based selling takes priority over concentration
-        # Also check if there are better ETF alternatives available
-        
-        # First, identify underperforming holdings
-        underperforming_holdings = []
-        for analysis in analyses:
-            score = analysis.get("recommendation_score", 50)
-            recommendation = analysis.get("recommendation", "HOLD")
-            ticker = analysis["ticker"]
-            
-            if recommendation == "STRONG SELL" or score < 30:
-                underperforming_holdings.append({
-                    "ticker": ticker,
-                    "score": score,
-                    "recommendation": recommendation,
-                    "analysis": analysis
-                })
-            elif recommendation == "SELL" or (30 <= score < 40):
-                underperforming_holdings.append({
-                    "ticker": ticker,
-                    "score": score,
-                    "recommendation": recommendation,
-                    "analysis": analysis,
-                    "moderate": True
-                })
-        
-        # Rebalancing cooldown: if last rebalance OR last make analyze was < 30 days ago,
-        # only recommend for really unique opportunities (severe underperformers: STRONG SELL / score < 25)
-        portfolio = self.load_portfolio()
-        today = datetime.now().date()
-        within_cooldown = False
-        for date_key in ("last_rebalancing_date", "last_analyze_run_date"):
-            last_d_str = portfolio.get(date_key)
-            if not last_d_str:
-                continue
-            try:
-                last_d = datetime.strptime(last_d_str, "%Y-%m-%d").date()
-                if (today - last_d).days < self.rebalancing_cooldown_days:
-                    within_cooldown = True
-                    break
-            except (ValueError, TypeError):
-                pass
-        if within_cooldown:
-            underperforming_holdings = [
-                u for u in underperforming_holdings
-                if u.get("recommendation") == "STRONG SELL" or u.get("score", 50) < 25
-            ]
-        
-        # For each underperforming holding, try to find better alternatives
-        if underperforming_holdings:
-            from deposit_advisor import DepositAdvisor
-            advisor = DepositAdvisor(self.portfolio_file)
-            
-            # Define categories for comparison
-            core_etfs = self.CORE_ETFS
-            satellite_etfs = self.SATELLITE_ETFS
-            bond_etfs = self.BOND_ETFS
-            
-            for underperformer in underperforming_holdings:
-                ticker = underperformer["ticker"]
-                current_score = underperformer["score"]
-                analysis = underperformer["analysis"]
-                current_weight = weights.get(ticker, 0)
-                is_moderate = underperformer.get("moderate", False)
-                
-                # Determine category of underperforming ETF
-                ticker_upper = ticker.upper()
-                is_core = ticker_upper in [e.upper() for e in core_etfs]
-                is_bond = ticker_upper in [e.upper() for e in bond_etfs]
-                is_satellite = ticker_upper in [e.upper() for e in satellite_etfs]
-                
-                # Find better alternatives in the same category
-                better_alternatives = []
-                candidates = []
-                
-                if is_core:
-                    candidates = [e for e in core_etfs if e.upper() != ticker_upper and e.upper() not in current_tickers]
-                elif is_bond:
-                    candidates = [e for e in bond_etfs if e.upper() != ticker_upper and e.upper() not in current_tickers]
-                elif is_satellite:
-                    candidates = [e for e in satellite_etfs if e.upper() != ticker_upper and e.upper() not in current_tickers]
-                
-                # Analyze candidates to find better alternatives
-                for candidate in candidates[:3]:  # Check top 3 alternatives
-                    try:
-                        candidate_analysis = advisor.analyze_etf(candidate, verbose=False)
-                        candidate_score = candidate_analysis.get("score", 0)
-                        
-                        # If alternative is significantly better (at least 20 points higher)
-                        if candidate_score > current_score + 20:
-                            better_alternatives.append({
-                                "ticker": candidate,
-                                "score": candidate_score,
-                                "name": candidate_analysis.get("name", candidate),
-                                "current_price": candidate_analysis.get("current_price", 0),
-                                "score_difference": candidate_score - current_score
-                            })
-                    except Exception as e:
-                        logger.debug(f"Failed to analyze alternative {candidate}: {e}")
-                        continue
-                
-                # Sort alternatives by score difference
-                better_alternatives.sort(key=lambda x: x["score_difference"], reverse=True)
-                
-                # Generate sell recommendation with replacement suggestion
-                rebalancing["needed"] = True
-                if is_moderate:
-                    sell_percentage = 0.25
-                else:
-                    sell_percentage = 0.75
-                
-                sell_value_usd = analysis["current_value"] * sell_percentage
-                sell_shares = int(analysis["quantity"] * sell_percentage)
-                # If fractional shares round to 0 (e.g. 25% of 1 share), recommend selling 1 share so the action is valid
-                if sell_shares == 0 and analysis["quantity"] >= 1 and sell_value_usd > 0:
-                    sell_shares = 1
-                    sell_value_usd = analysis["current_price"] * sell_shares
-                total_sell_amount += sell_value_usd
-                
-                reason = f"{underperformer['recommendation']} - Score: {current_score:.1f}/100. Poor performance"
-                if better_alternatives:
-                    best_alternative = better_alternatives[0]
-                    reason += f" | Better alternative: {best_alternative['ticker']} (Score: {best_alternative['score']:.1f}/100, +{best_alternative['score_difference']:.1f} points)"
-                    # Add buy recommendation for the better alternative
-                    if best_alternative["current_price"] > 0:
-                        buy_shares = max(1, int(sell_value_usd / best_alternative["current_price"]))
-                        buy_amount = buy_shares * best_alternative["current_price"]
-                        rebalancing["buy_recommendations"].append({
-                            "ticker": best_alternative["ticker"],
-                            "name": best_alternative["name"],
-                            "shares": buy_shares,
-                            "price": best_alternative["current_price"],
-                            "amount": buy_amount,
-                            "allocation_amount": buy_amount,
-                            "reason": f"Replace {ticker} (Score: {current_score:.1f}) with {best_alternative['ticker']} (Score: {best_alternative['score']:.1f}) - Better performance"
-                        })
-                else:
-                    reason += " - No better alternatives found in same category"
-                
-                if not rebalancing["reason"]:
-                    rebalancing["reason"] = f"Underperforming holding: {ticker} (Score: {current_score:.1f}/100)"
-                
-                rebalancing["recommendations"].append({
-                    "action": "SELL",
-                    "ticker": ticker,
-                    "sell_amount_usd": sell_value_usd,
-                    "sell_shares": sell_shares,
-                    "current_price_usd": analysis["current_price"],
-                    "current_weight": current_weight,
-                    "current_score": current_score,
-                    "better_alternatives": better_alternatives[:2],  # Top 2 alternatives
-                    "reason": f"{reason} - selling {sell_percentage*100:.0f}% ({sell_shares} shares, ${sell_value_usd:,.2f})"
-                })
-        
-        # Check for holdings with very low scores but not yet SELL (warning threshold)
-        low_score_holdings = [a for a in analyses if 30 <= a["recommendation_score"] < 40]
-        if low_score_holdings and not rebalancing["needed"]:
-            # Don't force rebalancing, but note it in the reason
-            rebalancing["reason"] = f"Some holdings have low scores: {', '.join([a['ticker'] for a in low_score_holdings])}"
-        
-        # PRIORITY 2: Rebalance for 80/20 balance by selling stocks to buy bonds
-        # BUT: Consider tax implications and alternatives
-        if not balance_check["is_balanced"]:
-            bonds_percent = balance_check.get("bonds_percent", 0)
-            stocks_percent = balance_check.get("stocks_percent", 0)
-            cash_available = portfolio_metrics.get("cash", 0)
-            
-            # If stocks exceed target and bonds fall short (targets from allocation.py)
-            _cats = allocation.category_targets()
-            target_stocks = (_cats.get("CORE", 0) + _cats.get("SATELLITE", 0)) * 100
-            target_bonds = _cats.get("BONDS", 0) * 100
-            if stocks_percent > target_stocks and bonds_percent < target_bonds:
-                excess_stocks = stocks_percent - target_stocks
-                needed_bonds = target_bonds - bonds_percent
-                
-                # Calculate how much to rebalance
-                total_value = portfolio_metrics["total_value"]
-                needed_bonds_value = total_value * (needed_bonds / 100)
-                
-                # STRATEGY DECISION: Should we sell or wait for deposit?
-                # Option 1: If we have significant cash, prefer using cash over selling
-                # Option 2: If we need to sell, prioritize tax-loss harvesting
-                
-                # Check if we can use cash instead (if cash covers >50% of needed bonds)
-                if cash_available > needed_bonds_value * 0.5:
-                    # Prefer using cash - add note but don't force selling
-                    if not rebalancing["reason"]:
-                        rebalancing["reason"] = f"Portfolio off target: Need ${needed_bonds_value:,.2f} in bonds. Consider using ${cash_available:,.2f} cash first, or wait for deposit to avoid tax on sales."
-                else:
-                    # Need to sell - but be smart about it
-                    rebalance_percentage = min(excess_stocks, needed_bonds) / 100
-                    
-                    if rebalance_percentage > 0.05:  # Only if difference is >5%
-                        rebalance_amount = total_value * rebalance_percentage
-                        
-                        # Load portfolio to check purchase dates for tax analysis
-                        portfolio = self.load_portfolio()
-                        from tax_analyzer import TaxAnalyzer
-                        tax_analyzer = TaxAnalyzer()
-                        # Use the live FX rate so tax ILS figures are accurate.
-                        tax_exchange_rate = market_data.get_exchange_rate()
-                        tax_analyzer.exchange_rate_usd_ils = tax_exchange_rate
-
-                        core_upper = {c.upper() for c in self.CORE_ETFS}
-                        bond_upper = {b.upper() for b in self.BOND_ETFS}
-
-                        # Analyze stocks for tax implications
-                        stocks_to_sell = []
-                        for analysis in analyses:
-                            ticker = analysis["ticker"]
-                            if ticker.upper() not in bond_upper:
-                                is_core = ticker.upper() in core_upper
-
-                                # Find holding info for tax calculation
-                                holding = next((h for h in portfolio.get("holdings", []) if h.get("ticker") == ticker), None)
-                                # Ensure purchase_date is not None
-                                purchase_date = None
-                                if holding:
-                                    purchase_date = holding.get("purchase_date")
-                                if not purchase_date:
-                                    purchase_date = portfolio.get("last_updated")
-                                if not purchase_date:
-                                    purchase_date = datetime.now().isoformat()
-                                
-                                # Use last_price as cost_basis if no cost_basis recorded (assume bought at last known price)
-                                cost_basis = holding.get("cost_basis", holding.get("last_price", analysis["current_price"])) if holding else analysis["current_price"]
-                                
-                                # Calculate tax impact
-                                tax_calc = tax_analyzer.calculate_capital_gains_tax(
-                                    purchase_price=cost_basis,
-                                    sale_price=analysis["current_price"],
-                                    quantity=analysis["quantity"],
-                                    purchase_date=purchase_date,
-                                    exchange_rate=tax_exchange_rate
-                                )
-                                
-                                # Calculate gain/loss
-                                gain_loss = tax_calc.get("total_gain_ils", 0)
-                                tax_cost = tax_calc.get("capital_gains_tax_ils", 0)
-                                is_loss = gain_loss < 0
-                                is_long_term = tax_calc.get("is_long_term", False)
-                                
-                                stocks_to_sell.append({
-                                    "ticker": ticker,
-                                    "analysis": analysis,
-                                    "is_core": is_core,
-                                    "weight": weights.get(ticker, 0),
-                                    "gain_loss": gain_loss,
-                                    "tax_cost": tax_cost,
-                                    "is_loss": is_loss,
-                                    "is_long_term": is_long_term,
-                                    "tax_impact": tax_cost / analysis["current_value"] if analysis["current_value"] > 0 else 0
-                                })
-                        
-                        # Sort by tax efficiency: losses first, then long-term gains, then short-term gains
-                        # Within each group: satellite first, then by tax impact (lower is better)
-                        stocks_to_sell.sort(key=lambda x: (
-                            not x["is_loss"],  # Losses first (True < False, so losses come first)
-                            not x["is_long_term"],  # Long-term before short-term
-                            x["is_core"],  # Satellite before core
-                            x["tax_impact"]  # Lower tax impact first
-                        ))
-                        
-                        # Sell stocks to get money for bonds
-                        remaining_to_sell = rebalance_amount
-                        total_tax_cost = 0
-                        for stock_info in stocks_to_sell:
-                            if remaining_to_sell <= 0:
-                                break
-                            
-                            ticker = stock_info["ticker"]
-                            analysis = stock_info["analysis"]
-                            current_value = analysis["current_value"]
-                            
-                            # Sell up to the needed amount, but max 30% of this holding
-                            sell_amount = min(remaining_to_sell, current_value * 0.30)
-                            if sell_amount > 100:  # Only if meaningful amount
-                                sell_shares = int(sell_amount / analysis["current_price"]) if analysis["current_price"] > 0 else 0
-                                if sell_shares > 0:
-                                    # Check if already in sell recommendations (avoid duplicates)
-                                    if not any(r.get("ticker") == ticker and r.get("action") == "SELL" 
-                                              for r in rebalancing["recommendations"]):
-                                        rebalancing["needed"] = True
-                                        total_sell_amount += sell_amount
-                                        
-                                        # Calculate proportional tax for this sale
-                                        proportional_tax = stock_info["tax_cost"] * (sell_amount / current_value) if current_value > 0 else 0
-                                        total_tax_cost += proportional_tax
-                                        
-                                        # Build reason with tax info
-                                        reason = f"Rebalancing: Sell {sell_shares} shares (${sell_amount:,.2f}) to buy bonds"
-                                        if stock_info["is_loss"]:
-                                            reason += f" | Tax benefit: {abs(stock_info['gain_loss']):,.0f} ILS loss"
-                                        elif stock_info["tax_cost"] > 0:
-                                            reason += f" | Tax cost: ~{proportional_tax:,.0f} ILS"
-                                        if stock_info["is_long_term"]:
-                                            reason += " | Long-term (lower tax)"
-                                        
-                                        rebalancing["recommendations"].append({
-                                            "action": "SELL",
-                                            "ticker": ticker,
-                                            "sell_amount_usd": sell_amount,
-                                            "sell_shares": sell_shares,
-                                            "current_price_usd": analysis["current_price"],
-                                            "current_weight": stock_info["weight"],
-                                            "reason": reason,
-                                            "tax_cost_ils": proportional_tax,
-                                            "is_loss": stock_info["is_loss"]
-                                        })
-                                        remaining_to_sell -= sell_amount
-                        
-                        # Add tax warning to reason
-                        if total_tax_cost > 0:
-                            rebalancing["reason"] += f" | Estimated tax cost: ~{total_tax_cost:,.0f} ILS. Consider waiting for deposit instead."
-                        
-                        # Now recommend bonds to buy with the proceeds
-                        if total_sell_amount > 0:
-                            bond_recs = self._generate_bond_recommendations(total_sell_amount, current_tickers, exchange_rate=self.get_exchange_rate())
-                            if bond_recs:
-                                rebalancing["buy_recommendations"].extend(bond_recs)
-        
-        # If we're selling for other reasons (performance, concentration), recommend what to buy instead
-        if total_sell_amount > 0 and rebalancing["recommendations"]:
-            sell_tickers = [r["ticker"] for r in rebalancing["recommendations"] if r["action"] == "SELL"]
-            # Only add buy recommendations if not already added for rebalancing
-            if not rebalancing["buy_recommendations"]:
-                buy_recs = self.find_best_etfs_to_buy(total_sell_amount, current_tickers, exclude_tickers=sell_tickers)
-                rebalancing["buy_recommendations"] = buy_recs
+        # NOTE (deliberate design): score-based "underperformer" sells, the
+        # better-alternative swap scans, and legacy sell-stocks-to-buy-bonds
+        # logic were REMOVED. Monthly technical scores on a multi-decade
+        # passive strategy generate taxable churn, not returns. Sells happen
+        # for exactly two reasons: rebalancing back to target (the plan above)
+        # and genuine risk events (stop-loss, extreme concentration).
 
         # If the only issue is target drift (no performance/concentration sells),
         # expose the trade-now plan (Option B) through the standard confirm-apply
@@ -1859,23 +916,9 @@ class PortfolioAnalyzer:
         print("=" * 60)
         print("Portfolio Analysis Starting...")
         print("=" * 60)
-        
-        # Check for emerging trends first (NEW - automatically detects hot sectors)
-        print("\n🔍 Checking for emerging trends and hot sectors...")
-        from deposit_advisor import DepositAdvisor
-        advisor = DepositAdvisor(self.portfolio_file)
-        excluded_categories = etf_universe.EXCLUDED_CATEGORIES
-        emerging_trends = advisor.detect_emerging_trends(excluded_categories)
-        if emerging_trends:
-            print(f"   ✅ Found {len(emerging_trends)} emerging trends with strong momentum:")
-            for trend in emerging_trends[:3]:  # Show top 3
-                category = trend.get("category", "")
-                momentum = trend.get("avg_momentum", 0)
-                return_pct = trend.get("avg_return", 0)
-                print(f"      🔥 {category}: {momentum:.1f}% momentum, {return_pct:.1f}% return (6mo)")
-        else:
-            print("   ℹ️  No strong emerging trends detected at this time")
-        
+        # (The emerging-trends scan was removed from analyze: trend information
+        # only influences the bounded satellite tilt inside `make deposit`.)
+
         # Load portfolio
         portfolio = self.load_portfolio()
         
@@ -1956,31 +999,10 @@ class PortfolioAnalyzer:
         # Calculate portfolio metrics
         portfolio_metrics = self.calculate_portfolio_metrics(portfolio, analyses)
         
-        # Check rebalancing
+        # Check rebalancing (drift plan + risk guards; trade recommendations
+        # come solely from the rebalance plan wired inside check_rebalancing)
         rebalancing = self.check_rebalancing(portfolio_metrics, analyses)
-        
-        # Add concrete 80/20 recommendations if needed
-        balance_info = rebalancing.get("balance_80_20", {})
-        if balance_info and not balance_info.get("is_balanced", False):
-            exchange_rate = self.get_exchange_rate()
-            concrete_recs = self._generate_concrete_80_20_recommendations(
-                balance_info, portfolio_metrics, analyses, exchange_rate
-            )
-            # Add to buy_recommendations if not already there
-            if concrete_recs and not rebalancing.get("buy_recommendations"):
-                rebalancing["buy_recommendations"] = []
-            for rec in concrete_recs:
-                # Check if not already in buy_recommendations
-                if not any(r.get("ticker") == rec["ticker"] for r in rebalancing.get("buy_recommendations", [])):
-                    rebalancing["buy_recommendations"].append({
-                        "ticker": rec["ticker"],
-                        "shares": rec["shares"],
-                        "price": rec["price"],
-                        "allocation_amount": rec["amount"],
-                        "name": rec["ticker"],
-                        "reasons": [rec["reason"]]
-                    })
-        
+
         # Update portfolio with current values.
         # analyses is reordered by the ThreadPool (as_completed) and filtered
         # (zero-price holdings dropped), so we must match by ticker - a positional
@@ -1996,22 +1018,10 @@ class PortfolioAnalyzer:
         # Save updated portfolio (sync deferred to the single end-of-run sync)
         self.save_portfolio(portfolio, sync_github_secret=False)
 
-        # Check for better alternatives (like critical_alert does)
-        print("\n🔍 Checking for better ETF alternatives...")
-        replacement_opportunities = self.find_better_alternatives(analyses, portfolio_metrics)
-        
-        # Also check for over-concentration and hot sector opportunities
-        # (reuse the emerging_trends computed at the top of analyze() - no recompute).
-        concentration_opportunities = self.find_concentration_opportunities(analyses, portfolio_metrics, emerging_trends=emerging_trends)
-        if concentration_opportunities:
-            replacement_opportunities.extend(concentration_opportunities)
-        
-        if replacement_opportunities:
-            print(f"   ✅ Found {len(replacement_opportunities)} better alternatives!")
-            rebalancing["replacement_opportunities"] = replacement_opportunities
-        else:
-            print("   ✅ All holdings are performing well - no better alternatives found")
-        
+        # (The "better ETF alternatives" and hot-sector replacement scans were
+        # removed deliberately: swapping funds on score differences generates
+        # taxable churn, not returns, for a passive target-weight strategy.)
+
         # Compile results
         results = {
             "portfolio_metrics": portfolio_metrics,
@@ -2042,15 +1052,6 @@ class PortfolioAnalyzer:
             else:
                 print("\n❌ Portfolio not updated. No changes were made.\n")
 
-        # Ask for confirmation if replacement opportunities exist
-        if rebalancing.get("replacement_opportunities"):
-            confirmed = self.ask_replacement_confirmation()
-            if confirmed:
-                self.update_portfolio_from_replacements(portfolio, rebalancing["replacement_opportunities"], analyses)
-                print("\n✅ Portfolio updated successfully based on replacement recommendations!\n")
-            else:
-                print("\n❌ Portfolio not updated. No changes were made.\n")
-
         # Stamp the run date now that the analysis (and its cooldown checks,
         # which read the PREVIOUS stamp) has completed, then do the SINGLE
         # save+GitHub-secret sync for the whole interactive run. Read-only/CI
@@ -2067,18 +1068,6 @@ class PortfolioAnalyzer:
         print("   Answer NO to keep portfolio.json unchanged (recommendations are for reference only).")
         while True:
             response = input("\nDid you execute these exact rebalancing trades in your broker? (yes/no): ").strip().lower()
-            if response in ['yes', 'y', 'כן', 'י']:
-                return True
-            elif response in ['no', 'n', 'לא', 'ל']:
-                return False
-            else:
-                print("Please enter 'yes' or 'no' (כן/לא)")
-    
-    def ask_replacement_confirmation(self) -> bool:
-        """Ask user: did you already execute these replacement trades in your broker?"""
-        print("\n⚠️  Answer YES only if you already did these exact replacement trades in your broker.")
-        while True:
-            response = input("\nDid you execute these exact replacement trades in your broker? (yes/no): ").strip().lower()
             if response in ['yes', 'y', 'כן', 'י']:
                 return True
             elif response in ['no', 'n', 'לא', 'ל']:
@@ -2182,62 +1171,6 @@ class PortfolioAnalyzer:
         # Print summary
         print("\n" + "-" * 60)
         print("PORTFOLIO UPDATE SUMMARY")
-        print("-" * 60)
-        print(f"Cash: ${portfolio.get('cash', 0):,.2f} (₪{portfolio.get('cash', 0) * exchange_rate:,.2f})")
-        print(f"Total Holdings: {len(portfolio.get('holdings', []))}")
-        print(f"Total Portfolio Value: ${total_value:,.2f} (₪{total_value * exchange_rate:,.2f})")
-        portfolio_path = os.path.abspath(self.portfolio_file)
-        print(f"\n✅ Portfolio saved locally to: {portfolio_path}")
-    
-    def update_portfolio_from_replacements(self, portfolio: Dict, replacement_opportunities: List[Dict], analyses: List[Dict]):
-        """Update portfolio.json based on replacement recommendations."""
-        exchange_rate = self.get_exchange_rate()
-        
-        # Process each replacement opportunity
-        for opp in replacement_opportunities:
-            sell_ticker = opp["sell_ticker"]
-            buy_ticker = opp["buy_ticker"]
-            shares_to_sell = opp["sell_shares"]
-            shares_to_buy = opp["buy_shares"]
-            sell_amount = opp["sell_amount"]
-            buy_price = opp["buy_price"]
-            buy_amount = opp["buy_amount"]
-            remaining_cash = sell_amount - buy_amount
-            
-            # Get current price for sell ticker from analyses
-            sell_price = 0
-            for analysis in analyses:
-                if analysis["ticker"] == sell_ticker:
-                    sell_price = analysis.get("current_price", 0)
-                    break
-
-            # SELL: Reduce or remove the old holding
-            used_price, sold = self._apply_sell(portfolio, sell_ticker, shares_to_sell, sell_price)
-            if sold < shares_to_sell:
-                # Fewer shares held than the recommendation assumed - shrink the
-                # proceeds so cash reflects reality, not the plan.
-                sell_amount = sold * used_price
-                remaining_cash = sell_amount - buy_amount
-
-            # BUY: Add or update the new holding
-            self._apply_buy(portfolio, buy_ticker, shares_to_buy, buy_price)
-
-            # Add remaining cash from the transaction
-            if remaining_cash > 0:
-                portfolio["cash"] = portfolio.get("cash", 0) + remaining_cash
-        
-        # Recalculate total value
-        total_value = portfolio.get("cash", 0)
-        for holding in portfolio.get("holdings", []):
-            total_value += holding.get("current_value", 0)
-        portfolio["total_value"] = total_value
-        
-        # Save updated portfolio
-        self.save_portfolio(portfolio, sync_github_secret=False)  # analyze() syncs once at end
-        
-        # Print summary
-        print("\n" + "-" * 60)
-        print("PORTFOLIO UPDATE SUMMARY (Replacements)")
         print("-" * 60)
         print(f"Cash: ${portfolio.get('cash', 0):,.2f} (₪{portfolio.get('cash', 0) * exchange_rate:,.2f})")
         print(f"Total Holdings: {len(portfolio.get('holdings', []))}")
@@ -2408,18 +1341,19 @@ class PortfolioAnalyzer:
         print("\n" + "-" * 76)
         print("HOLDINGS (USD, sorted by value - set VERBOSE_HOLDINGS=1 for full details)")
         print("-" * 76)
-        print(f"{'TICKER':<7}{'GROUP':<16}{'QTY':>5}{'PRICE':>10}{'VALUE':>12}{'WT%':>6}{'SCORE':>7}  {'SIGNAL'}")
+        # No BUY/SELL signal column - per-holding technical scores are
+        # informational only; trades come from the rebalance plan and risk
+        # events, never from monthly score wiggles.
+        print(f"{'TICKER':<7}{'GROUP':<16}{'QTY':>5}{'PRICE':>10}{'VALUE':>12}{'WT%':>6}{'SCORE':>7}")
         verbose_holdings = os.environ.get("VERBOSE_HOLDINGS", "").strip().lower() in ("1", "true", "yes")
         sorted_holdings = sorted(results["holdings_analysis"],
                                  key=lambda a: -a.get("current_value", 0))
         for analysis in sorted_holdings:
             weight = results['portfolio_metrics']['weights'].get(analysis['ticker'], 0) * 100
-            rec = analysis['recommendation']
-            marker = {"STRONG SELL": "🔴", "SELL": "🔻", "BUY": "🟢", "STRONG BUY": "🟢"}.get(rec, "")
             group = allocation.classify(analysis['ticker']) or "-"
             print(f"{analysis['ticker']:<7}{group:<16}{analysis['quantity']:>5}"
                   f"{analysis['current_price']:>10,.2f}{analysis['current_value']:>12,.2f}"
-                  f"{weight:>6.1f}{analysis['recommendation_score']:>7.1f}  {marker}{rec if rec != 'HOLD' else ''}")
+                  f"{weight:>6.1f}{analysis['recommendation_score']:>7.1f}")
             if verbose_holdings and analysis["technical_indicators"]:
                 ti = analysis["technical_indicators"]
                 beta_val = ti.get('beta')
@@ -2474,47 +1408,7 @@ class PortfolioAnalyzer:
         else:
             print("✅ Portfolio is well-balanced. No rebalancing needed at this time.")
         
-        # Show replacement opportunities if any
-        if rebalancing.get("replacement_opportunities"):
-            print("\n" + "=" * 60)
-            print("🔄 REPLACEMENT OPPORTUNITIES (Better Alternatives Found)")
-            print("=" * 60)
-            # Bug fix: portfolio_metrics has no "exchange_rate" key, so the old
-            # .get(..., 3.15) always used a stale hardcoded rate. Use the live rate
-            # already fetched at the top of this method.
 
-            for opp in rebalancing["replacement_opportunities"]:
-                sell_ticker = opp["sell_ticker"]
-                buy_ticker = opp["buy_ticker"]
-                score_diff = opp["score_improvement"]
-                sell_score = opp["sell_score"]
-                buy_score = opp["buy_score"]
-                sell_shares = opp["sell_shares"]
-                sell_amount = opp["sell_amount"]
-                buy_shares = opp["buy_shares"]
-                buy_amount = opp["buy_amount"]
-                buy_price = opp["buy_price"]
-                category = opp["category"]
-                replace_pct = opp["replace_percentage"] * 100
-                
-                priority = "HIGH" if score_diff >= 25 else "MEDIUM"
-                priority_icon = "🔴" if priority == "HIGH" else "🟡"
-                
-                print(f"\n{priority_icon} [{priority}] OPTIMIZE: {sell_ticker} → {buy_ticker}")
-                print(f"   Category: {category}")
-                print(f"   Score Improvement: {sell_score:.1f}/100 → {buy_score:.1f}/100 (+{score_diff:.1f} points)")
-                print(f"   Recommendation: Replace {replace_pct:.0f}% of {sell_ticker} with {buy_ticker}")
-                print(f"   🔴 SELL: {sell_shares} shares of {sell_ticker} = ${sell_amount:,.2f} (₪{sell_amount * exchange_rate:,.2f})")
-                print(f"   🟢 BUY: {buy_shares} shares of {buy_ticker} @ ${buy_price:.2f} = ${buy_amount:,.2f} (₪{buy_amount * exchange_rate:,.2f})")
-                tax_note = opp.get("tax_note")
-                if tax_note:
-                    print(f"   🧾 {tax_note}")
-                if sell_amount - buy_amount > 5:
-                    remaining = sell_amount - buy_amount
-                    print(f"   💰 Remaining Cash: ${remaining:,.2f} (₪{remaining * exchange_rate:,.2f})")
-            
-            print("\n" + "=" * 60)
-        
         print("\n" + "=" * 60)
         print(f"Analysis completed at: {results['timestamp']}")
         print("=" * 60 + "\n")

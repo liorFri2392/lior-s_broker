@@ -12,7 +12,6 @@ import logging
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from portfolio_analyzer import PortfolioAnalyzer
-from deposit_advisor import DepositAdvisor
 from email_notifier import EmailNotifier
 from etf_universe import SATELLITE_CATEGORIES, EXCLUDED_CATEGORIES
 import allocation
@@ -26,7 +25,6 @@ class CriticalAlertSystem:
     def __init__(self, portfolio_file: str = "portfolio.json"):
         self.portfolio_file = portfolio_file
         self.analyzer = PortfolioAnalyzer(portfolio_file)
-        self.advisor = DepositAdvisor(portfolio_file)
         self.critical_threshold = 75  # Score threshold for critical buy
         self.urgent_sell_threshold = 25  # Score threshold for urgent sell
         self.review_cooldown_days = 30  # Align with rebalance: fewer urgent emails soon after analyze/rebalance
@@ -187,101 +185,41 @@ class CriticalAlertSystem:
             weekday = datetime.now().weekday()
             return weekday < 5
     
-    def detect_emerging_trends(self) -> List[Dict]:
-        """
-        Detect emerging trends across all categories.
-        This automatically identifies new hot sectors and trends.
-        """
-        excluded_categories = EXCLUDED_CATEGORIES
-        emerging_trends = self.advisor.detect_emerging_trends(excluded_categories)
-        
-        # Filter to only very strong trends for critical alerts
-        strong_trends = [t for t in emerging_trends if t.get("trend") == "STRONG_UPTREND" and t.get("avg_momentum", 0) > 8]
-        
-        return strong_trends
-    
     def check_critical_opportunities(self) -> Dict:
-        """Run comprehensive analysis to find critical opportunities."""
-        print("=" * 60)
-        print("CRITICAL ALERT SYSTEM - Deep Analysis")
-        print("=" * 60)
-        
-        # Check if market is trading. Compute market status once per run via the
-        # shared cached layer (memoized) instead of re-fetching SPY repeatedly.
-        is_trading = self.is_market_trading_day()
-        market_status, market_message = market_data.is_market_open()
+        """Genuine-emergency scan - deliberately NO scoring and NO churn.
 
-        print(f"\n📊 Market Status: {market_message}")
-        print(f"   Trading Day: {'✅ Yes' if is_trading else '❌ No (Holiday/Weekend)'}")
-        print()
-        
-        if not is_trading:
+        The old version ran the full scoring engine, scanned 60 buy candidates,
+        hunted "better alternatives" and hot-sector replacements - machinery
+        that recommended taxable fund-switching on noisy monthly signals. The
+        daily alert now covers exactly what warrants an email:
+          1. stop-loss / take-profit triggers (cost-basis based),
+          2. extreme single-position concentration (>50%),
+          3. strategy drift beyond 10 percentage points (informational plan),
+          4. market anomaly (extreme SPY one-day move).
+        """
+        print("=" * 60)
+        print("CRITICAL ALERT SYSTEM - Risk & Drift Scan")
+        print("=" * 60)
+
+        if not self.is_market_trading_day():
             return {
                 "critical_items": [],
                 "has_critical": False,
                 "message": "Not a trading day - no analysis performed"
             }
-        
-        critical_items = []
-        
-        # 1. Analyze current portfolio for urgent sells.
-        # record_run=False: an automated alert scan is not a conscious "make analyze"
-        # run, so it must not stamp last_analyze_run_date (that would silence the
-        # 30-day reminder and keep the review cooldown permanently active).
-        print("Analyzing current portfolio for urgent actions...")
-        portfolio_analysis = self.analyzer.analyze(record_run=False)
-        
-        if portfolio_analysis:
-            holdings_analysis = portfolio_analysis.get("holdings_analysis", [])
-            portfolio_metrics = portfolio_analysis.get("portfolio_metrics", {})
-            
-            # Check for urgent sells (STRONG SELL, very low scores)
-            for holding in holdings_analysis:
-                score = holding.get("recommendation_score", 50)
-                recommendation = holding.get("recommendation", "HOLD")
-                ticker = holding.get("ticker", "")
-                current_value = holding.get("current_value", 0)
-                
-                if recommendation == "STRONG SELL" or score < self.urgent_sell_threshold:
-                    qty = int(holding.get("quantity", 0) or 0)
-                    price = float(holding.get("current_price", 0) or 0)
-                    shares = max(1, round(qty * 0.5)) if qty else 0
-                    amt = round(shares * price, 2) if price else 0
-                    critical_items.append({
-                        "type": "SELL",
-                        "ticker": ticker,
-                        "priority": "CRITICAL",
-                        "reason": f"STRONG SELL signal - Score: {score:.1f}/100. Risk of significant loss.",
-                        "amount": amt,
-                        "shares": shares,
-                        "score": round(score, 1),
-                        "current_price": price,
-                        "quantity": qty,
-                    })
-            
-            # Check for rebalancing needs (over-concentration)
-            rebalancing = portfolio_analysis.get("rebalancing", {})
-            if rebalancing.get("needed") and rebalancing.get("recommendations"):
-                for rec in rebalancing.get("recommendations", []):
-                    if rec.get("action") == "SELL":
-                        critical_items.append({
-                            "type": "SELL",
-                            "ticker": rec.get("ticker", ""),
-                            "priority": "HIGH",
-                            "reason": f"Over-concentration: {rec.get('current_weight', 0)*100:.1f}% of portfolio. Diversification needed.",
-                            "amount": rec.get("reduce_amount_usd", 0),
-                            "shares": rec.get("reduce_shares", 0),
-                            "score": round(next((h.get("recommendation_score", 50) for h in holdings_analysis if h.get("ticker") == rec.get("ticker")), 50), 1),
-                            "current_price": next((h.get("current_price", 0) for h in holdings_analysis if h.get("ticker") == rec.get("ticker")), 0),
-                        })
-        
-        # 1b. Stop-loss / take-profit triggers from the risk manager. These
-        # previously went only to a CI text artifact and never reached the
-        # email - a CRITICAL stop-loss was effectively invisible.
+
+        print("Refreshing prices...")
+        portfolio = self.analyzer.refresh_portfolio_prices(verbose=False, sync_github_secret=False)
+        holdings = portfolio.get("holdings", [])
+        cash = float(portfolio.get("cash", 0) or 0)
+        total_value = cash + sum(float(h.get("current_value", 0) or 0) for h in holdings)
+        critical_items: List[Dict] = []
+
+        # 1. Stop-loss / take-profit triggers (genuine risk events).
         try:
             from risk_manager import RiskManager
             rm = RiskManager(self.portfolio_file)
-            for act in rm.check_stop_loss_take_profit():
+            for act in rm.check_stop_loss_take_profit(portfolio):
                 qty = int(act.get("quantity", 0) or 0)
                 price = float(act.get("current_price", 0) or 0)
                 if qty <= 0 or price <= 0:
@@ -300,674 +238,64 @@ class CriticalAlertSystem:
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Risk-manager stop-loss check failed: {e}")
 
-        # 2. Scan for critical buy opportunities (high-yield ETFs)
-        # Only if portfolio is significantly unbalanced and cash available
-        portfolio = self.analyzer.load_portfolio()
-        cash_available = portfolio.get("cash", 0)
-        
-        # Check if portfolio needs balancing
-        if portfolio_analysis:
-            balance_check = self.analyzer.check_80_20_balance(
-                portfolio_metrics,
-                holdings_analysis
-            )
-            
-            needs_balancing = not balance_check.get("is_balanced", False)
-            bonds_percent = balance_check.get("bonds_percent", 0)
-        else:
-            needs_balancing = True  # If no analysis, assume needs balancing
-            bonds_percent = 0
-        
-        # Only scan for buys if:
-        # 1. Portfolio is unbalanced (needs bonds or stocks)
-        # 2. Have sufficient cash (>$500)
-        if needs_balancing and cash_available > 500:
-            print("\nScanning for critical buy opportunities...")
-            critical_buys = self.scan_critical_buy_opportunities()
-            
-            # Filter to only most critical (limit to top 3-5)
-            # Prioritize bonds if meaningfully under the bond target (75% of it)
-            bond_priority_pct = allocation.category_targets().get("BONDS", 0.15) * 100 * 0.75
-            if bonds_percent < bond_priority_pct:
-                bond_buys = [b for b in critical_buys if b.get("category") == "BONDS"]
-                other_buys = [b for b in critical_buys if b.get("category") != "BONDS"]
-                # Top 2 bonds + top 2 others (max 4 total)
-                critical_buys = bond_buys[:2] + other_buys[:2]
-            else:
-                critical_buys = critical_buys[:3]  # Top 3 overall
-            
-            critical_items.extend(critical_buys)
-        else:
-            if cash_available <= 500:
-                print("\n⚠️  Insufficient cash for new purchases (${:.2f})".format(cash_available))
-            elif not needs_balancing:
-                print("\n✅ Portfolio is balanced - no critical buy opportunities needed")
-        
-        # 3. Detect emerging trends and recommend replacing weak holdings
-        print("\n🔍 Detecting emerging trends and hot sectors...")
-        emerging_trends = self.detect_emerging_trends()
-        if emerging_trends:
-            print(f"   Found {len(emerging_trends)} emerging trends with strong momentum!")
-            
-            # Get current holdings for comparison
-            holdings_analysis = portfolio_analysis.get("holdings_analysis", []) if portfolio_analysis else []
-            portfolio_metrics = portfolio_analysis.get("portfolio_metrics", {}) if portfolio_analysis else {}
-            total_value = portfolio_metrics.get("total_value", 0)
-            
-            for trend in emerging_trends[:3]:  # Top 3 emerging trends
-                category = trend.get("category", "")
-                momentum = trend.get("avg_momentum", 0)
-                return_pct = trend.get("avg_return", 0)
-                trend_etfs = trend.get("etfs", [])
-                
-                # Check if we should recommend replacing weak holdings with hot trend ETFs
-                if trend_etfs and holdings_analysis:
-                    # Find weak holdings (score < 50 or STRONG SELL)
-                    weak_holdings = [
-                        h for h in holdings_analysis 
-                        if h.get("recommendation_score", 50) < 50 
-                        or h.get("recommendation", "") == "STRONG SELL"
-                    ]
-                    
-                    # Analyze the best ETF from the hot trend
-                    best_trend_etf = None
-                    best_trend_score = 0
-                    for etf_ticker in trend_etfs[:2]:  # Check top 2 from trend
-                        try:
-                            etf_analysis = self.advisor.analyze_etf(etf_ticker, verbose=False)
-                            etf_score = etf_analysis.get("score", 0)
-                            if etf_score > best_trend_score:
-                                best_trend_score = etf_score
-                                best_trend_etf = {
-                                    "ticker": etf_ticker,
-                                    "score": etf_score,
-                                    "analysis": etf_analysis,
-                                    "category": category,
-                                    "momentum": momentum,
-                                    "return": return_pct
-                                }
-                        except Exception as e:
-                            logger.debug(f"Failed to analyze trend ETF {etf_ticker}: {e}")
-                            continue
-                    
-                    # If we found a strong trend ETF and have weak holdings, recommend replacement
-                    if best_trend_etf and best_trend_etf["score"] >= 70 and weak_holdings:
-                        # Find the weakest holding to replace
-                        weakest_holding = min(weak_holdings, key=lambda h: h.get("recommendation_score", 0))
-                        weakest_score = weakest_holding.get("recommendation_score", 0)
-                        weakest_ticker = weakest_holding.get("ticker", "")
-                        weakest_value = weakest_holding.get("current_value", 0)
-                        
-                        # Only recommend if the trend ETF is significantly better (at least 20 points difference)
-                        if best_trend_etf["score"] >= weakest_score + 20:
-                            shares_to_sell = int(weakest_holding.get("quantity", 0) * 0.5)  # Sell 50% of weak holding
-                            sell_amount = shares_to_sell * weakest_holding.get("current_price", 0)
-                            
-                            if sell_amount > 100:  # Only if meaningful amount
-                                # Size the buy using the (cached) trend ETF price.
-                                trend_analysis = best_trend_etf.get("analysis", {})
-                                buy_shares, buy_price, remaining_cash = self._shares_for_amount(
-                                    best_trend_etf["ticker"],
-                                    sell_amount,
-                                    known_price=trend_analysis.get("current_price", 0),
-                                )
-                                buy_amount = buy_shares * buy_price
-
-                                # Only recommend REPLACE if we can actually buy at least 1 share
-                                if buy_shares > 0 and buy_price > 0:
-                                    critical_items.append({
-                                        "type": "REPLACE",
-                                        "priority": "HIGH",
-                                        "sell_ticker": weakest_ticker,
-                                        "sell_score": weakest_score,
-                                        "sell_amount": sell_amount,
-                                        "sell_shares": shares_to_sell,
-                                        "buy_ticker": best_trend_etf["ticker"],
-                                        "buy_price": buy_price,
-                                        "buy_shares": buy_shares,
-                                        "buy_amount": buy_amount,
-                                        "remaining_cash": remaining_cash,
-                                        "buy_score": best_trend_etf["score"],
-                                        "buy_category": category,
-                                        "reason": f"🔄 REPLACE: Sell {weakest_ticker} (Score: {weakest_score:.1f}/100) → Buy {best_trend_etf['ticker']} from 🔥 {category} trend (Score: {best_trend_etf['score']:.1f}/100, {momentum:.1f}% momentum)",
-                                        "momentum": momentum,
-                                        "return": return_pct,
-                                        "details": f"Replace weak holding with hot trend: {category} showing {momentum:.1f}% momentum and {return_pct:.1f}% return"
-                                    })
-                                    print(f"   🔄 REPLACE: {weakest_ticker} (Score: {weakest_score:.1f}) → {best_trend_etf['ticker']} from {category} (Score: {best_trend_etf['score']:.1f})")
-                                    continue  # Skip adding as separate EMERGING_TREND if we already added REPLACE
-                                else:
-                                    # Can't buy enough shares, skip this replacement
-                                    logger.debug(f"Skipping REPLACE {weakest_ticker} → {best_trend_etf['ticker']}: sell_amount ${sell_amount:.2f} insufficient for buy_price ${buy_price:.2f}")
-                
-                # Only add emerging trend alerts if:
-                # 1. We have cash available (>$100) to potentially buy, OR
-                # 2. We already have other specific recommendations (BUY/SELL/REPLACE)
-                has_specific_actions = any(item.get("type") in ["BUY", "SELL", "REPLACE"] for item in critical_items)
-                
-                # Check if we have enough cash to buy at least 1 share of the cheapest ETF in the trend
-                has_cash_for_trend = False
-                if cash_available > 100 and trend_etfs:
-                    # Cached + batched price lookup for the first 3 trend ETFs.
-                    try:
-                        prices, _, _ = market_data.get_prices(trend_etfs[:3])
-                        valid_prices = [p for p in prices.values() if p and p > 0]
-                        min_price = min(valid_prices) if valid_prices else float('inf')
-
-                        # If we found a price and have enough cash, we can potentially buy
-                        if min_price != float('inf') and cash_available >= min_price:
-                            has_cash_for_trend = True
-                        elif min_price != float('inf'):
-                            logger.debug(f"Trend {category}: cash ${cash_available:.2f} insufficient for cheapest ETF (${min_price:.2f})")
-                    except Exception as e:
-                        logger.debug(f"Failed to check trend ETF prices: {e}")
-                        # Fallback: use simple cash check
-                        has_cash_for_trend = cash_available > 100
-                elif cash_available > 100:
-                    # Fallback: if we can't check prices, use simple threshold
-                    has_cash_for_trend = True
-                
-                if has_cash_for_trend or has_specific_actions:
-                    # If no replacement recommended, add as regular emerging trend alert
+        # 2. Extreme concentration (>50% in one position) - pure risk rule.
+        if total_value > 0:
+            for h in holdings:
+                weight = float(h.get("current_value", 0) or 0) / total_value
+                if weight > 0.5:
+                    price = float(h.get("last_price", 0) or 0)
+                    qty = int(h.get("quantity", 0) or 0)
+                    excess_shares = max(1, int(qty * (weight - 0.35) / weight)) if qty else 0
                     critical_items.append({
-                        "type": "EMERGING_TREND",
-                        "category": category,
+                        "type": "SELL",
+                        "ticker": h.get("ticker", ""),
                         "priority": "HIGH",
-                        "reason": f"🔥 EMERGING TREND: {category} showing strong momentum ({momentum:.1f}% in 20 days, {return_pct:.1f}% in 6mo)",
-                        "etfs": trend_etfs,
-                        "momentum": momentum,
-                        "return": return_pct,
-                        "score": trend.get("score", 50)
+                        "reason": f"Over-concentration: {weight*100:.1f}% of portfolio in one position (risk limit 50%)",
+                        "amount": round(excess_shares * price, 2),
+                        "shares": excess_shares,
+                        "score": 50,
+                        "current_price": price,
+                        "quantity": qty,
                     })
-                    print(f"   🔥 {category}: {momentum:.1f}% momentum, {return_pct:.1f}% return - ETFs: {', '.join(trend_etfs)}")
-                else:
-                    print(f"   🔥 {category}: {momentum:.1f}% momentum detected, but insufficient cash (${cash_available:.2f}) - skipping alert")
-        else:
-            print("   No strong emerging trends detected at this time")
-        
-        # 4. Deep analysis: Compare ALL existing holdings with market alternatives
-        print("\n🔍 Deep Analysis: Comparing existing holdings with market alternatives...")
-        if portfolio_analysis and holdings_analysis:
-            replacement_opportunities = self.find_better_alternatives(holdings_analysis, portfolio_metrics)
-            
-            # Also check for over-concentration and hot sector opportunities (same logic as analyze)
-            concentration_opportunities = self.analyzer.find_concentration_opportunities(holdings_analysis, portfolio_metrics)
-            if concentration_opportunities:
-                # Convert to critical_alert format
-                for opp in concentration_opportunities:
-                    replacement_opportunities.append({
-                        "type": "REPLACE",
-                        "priority": "HIGH" if opp.get("category") == "DIVERSIFICATION" else "MEDIUM",
-                        "sell_ticker": opp.get("sell_ticker", ""),
-                        "sell_score": opp.get("sell_score", 50),
-                        "sell_amount": opp.get("sell_amount", 0),
-                        "sell_shares": opp.get("sell_shares", 0),
-                        "sell_category": opp.get("category", "SATELLITE"),
-                        "buy_ticker": opp.get("buy_ticker", ""),
-                        "buy_price": opp.get("buy_price", 0),
-                        "buy_shares": opp.get("buy_shares", 0),
-                        "buy_amount": opp.get("buy_amount", 0),
-                        "remaining_cash": opp.get("sell_amount", 0) - opp.get("buy_amount", 0),
-                        "buy_score": opp.get("buy_score", 0),
-                        "buy_category": opp.get("category", "SATELLITE"),
-                        "score_improvement": opp.get("score_improvement", 0),
-                        "reason": f"🔄 OPTIMIZE: {opp.get('sell_ticker', '')} → {opp.get('buy_ticker', '')} - {opp.get('reason', '')}",
-                        "details": f"Replace {opp.get('replace_percentage', 0)*100:.0f}% of {opp.get('sell_ticker', '')} with {opp.get('buy_ticker', '')}. Expected return: {opp.get('expected_return', 0):.1f}% vs {opp.get('current_return', 0):.1f}%",
-                        "strategy": "Balanced Growth (targets from allocation.py)"
-                    })
-            
-            if replacement_opportunities:
-                # Filter out duplicate buy recommendations (same ETF recommended multiple times)
-                # Keep only the best replacement opportunity for each buy_ticker
-                seen_buy_tickers = {}
-                filtered_opportunities = []
-                for opp in replacement_opportunities:
-                    buy_ticker = opp.get("buy_ticker", "").upper()
-                    if buy_ticker not in seen_buy_tickers:
-                        seen_buy_tickers[buy_ticker] = opp
-                        filtered_opportunities.append(opp)
-                    else:
-                        # Keep the one with higher priority or better score improvement
-                        existing = seen_buy_tickers[buy_ticker]
-                        existing_priority = existing.get("priority", "MEDIUM")
-                        new_priority = opp.get("priority", "MEDIUM")
-                        priority_order = {"HIGH": 0, "MEDIUM": 1}
-                        if priority_order.get(new_priority, 2) < priority_order.get(existing_priority, 2):
-                            # New one has higher priority, replace
-                            seen_buy_tickers[buy_ticker] = opp
-                            filtered_opportunities = [o for o in filtered_opportunities if o != existing]
-                            filtered_opportunities.append(opp)
-                        elif opp.get("score_improvement", 0) > existing.get("score_improvement", 0):
-                            # New one has better score improvement, replace
-                            seen_buy_tickers[buy_ticker] = opp
-                            filtered_opportunities = [o for o in filtered_opportunities if o != existing]
-                            filtered_opportunities.append(opp)
-                
-                if filtered_opportunities:
-                    print(f"   Found {len(filtered_opportunities)} better alternatives for existing holdings!")
-                    if len(replacement_opportunities) > len(filtered_opportunities):
-                        print(f"   (Filtered out {len(replacement_opportunities) - len(filtered_opportunities)} duplicate recommendations)")
-                    critical_items.extend(filtered_opportunities)
-                else:
-                    print("   ✅ All existing holdings are performing well - no better alternatives found")
-            else:
-                print("   ✅ All existing holdings are performing well - no better alternatives found")
-        
-        # 5. Check for market anomalies or extreme opportunities
-        print("\nChecking for market anomalies...")
-        anomalies = self.check_market_anomalies()
-        critical_items.extend(anomalies)
-        
-        # Dedupe SELLs, fix share math, align urgency with 30-day review cooldown
-        portfolio_metrics = portfolio_analysis.get("portfolio_metrics", {}) if portfolio_analysis else {}
-        portfolio = self.analyzer.load_portfolio()
-        total_val = float(portfolio_metrics.get("total_value", 0) or portfolio.get("total_value", 0) or 1)
-        critical_items, any_critical_sell = self._refine_critical_items(critical_items, portfolio, total_val)
-        
-        # Sort by priority (CRITICAL > HIGH > MEDIUM)
-        priority_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2}
-        critical_items.sort(key=lambda x: priority_order.get(x.get("priority", "MEDIUM"), 3))
-        
-        # has_critical should be True only if there are specific actionable recommendations
-        # (BUY/SELL/REPLACE), not just trends
-        specific_action_types = ["BUY", "SELL", "REPLACE"]
-        has_specific_actions = any(item.get("type") in specific_action_types for item in critical_items)
-        
+
+        # 3. Strategy drift beyond 10 percentage points -> informational item.
+        try:
+            analyses = [{"ticker": h.get("ticker", ""),
+                         "current_value": float(h.get("current_value", 0) or 0)}
+                        for h in holdings]
+            balance = self.analyzer.check_80_20_balance({"total_value": total_value}, analyses)
+            tgts = balance.get("targets", {})
+            drift = max(
+                abs(balance.get("stocks_percent", 0) - tgts.get("stocks", 85)),
+                abs(balance.get("bonds_percent", 0) - tgts.get("bonds", 15)),
+                abs(balance.get("core_percent", 0) - tgts.get("core", 70)),
+            )
+            if drift >= 10 and not self._within_review_cooldown(portfolio):
+                critical_items.append({
+                    "type": "REBALANCE",
+                    "priority": "MEDIUM",
+                    "reason": (f"Allocation drift of {drift:.0f} percentage points from target "
+                               f"(core {balance.get('core_percent', 0):.0f}% vs {tgts.get('core', 70):.0f}%, "
+                               f"bonds {balance.get('bonds_percent', 0):.0f}% vs {tgts.get('bonds', 15):.0f}%)"),
+                    "details": "Your regular deposits close this gap tax-free over time.",
+                })
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Drift check failed: {e}")
+
+        # 4. Market anomalies (extreme one-day SPY moves).
+        critical_items.extend(self.check_market_anomalies())
+
+        critical_items, any_critical = self._refine_critical_items(
+            critical_items, portfolio, total_value
+        )
+
         return {
             "critical_items": critical_items,
-            "has_critical": has_specific_actions,  # Only true if specific actions exist
-            "portfolio_value": portfolio_metrics.get("total_value", 0),
-            "portfolio_metrics": portfolio_metrics,  # Include full metrics for email
-            "market_status": market_message,
-            "timestamp": datetime.now().isoformat(),
-            "within_review_cooldown": self._within_review_cooldown(portfolio),
-            "any_critical_sell": any_critical_sell,
+            "has_critical": bool(critical_items),
+            "any_critical_sell": any_critical,
+            "message": f"Found {len(critical_items)} alert(s)" if critical_items else "No alerts",
         }
-    
-    def scan_critical_buy_opportunities(self) -> List[Dict]:
-        """
-        Scan for critical buy opportunities following the model target-weight strategy.
-        Prioritizes Core ETFs and Bonds over high-risk trends.
-        """
-        critical_buys = []
-        
-        # Get current portfolio holdings to avoid recommending what we already have
-        portfolio = self.analyzer.load_portfolio()
-        current_holdings = [h.get("ticker", "").upper() for h in portfolio.get("holdings", [])]
-        portfolio_value = portfolio.get("total_value", 0)
-        cash_available = portfolio.get("cash", 0)
-        
-        logger.info(f"Current portfolio has {len(current_holdings)} holdings: {current_holdings}")
-        logger.info(f"Portfolio value: ${portfolio_value:,.2f}, Cash available: ${cash_available:,.2f}")
 
-        # Strategy targets from allocation.py (computed once, used in the loop)
-        _cats = allocation.category_targets()
-        target_bonds_pct = _cats.get("BONDS", 0.15) * 100
-        target_stocks_pct = 100 - target_bonds_pct
-        
-        # 80/20 Strategy: Focus on Core, Satellite, and Bonds
-        # Exclude high-risk categories (leveraged, crypto)
-        # Note: Crypto is excluded by default for balanced risk profile
-        # To enable crypto, remove "CRYPTO" from excluded_categories (not recommended for young families)
-        excluded_categories = EXCLUDED_CATEGORIES
-        
-        # Core ETFs (essential for portfolio stability)
-        core_etfs = ["SPY", "VOO", "IVV", "VXUS", "VEA"]
-        
-        # Satellite ETF categories (shared module constant).
-        satellite_categories = SATELLITE_CATEGORIES
-
-        # Bond ETFs (protection)
-        bond_etfs = ["BND", "AGG", "TIP", "SCHP", "VTIP"]
-        
-        # Collect ETFs to analyze
-        analyzed_etfs = []
-        
-        # Add Core ETFs (highest priority)
-        for etf in core_etfs:
-            if etf.upper() not in analyzed_etfs:
-                analyzed_etfs.append(etf)
-        
-        # Add Satellite ETFs from safe categories
-        for category in satellite_categories:
-            if category in self.advisor.ETF_CATEGORIES:
-                etfs = self.advisor.ETF_CATEGORIES[category][:3]  # Top 3 from each category (increased from 2)
-                for etf in etfs:
-                    etf_upper = etf.upper()
-                    # Skip excluded categories
-                    is_excluded = any(etf_upper in self.advisor.ETF_CATEGORIES.get(cat, []) 
-                                     for cat in excluded_categories)
-                    if not is_excluded and etf_upper not in analyzed_etfs:
-                        analyzed_etfs.append(etf)
-        
-        # Add Bond ETFs
-        for etf in bond_etfs:
-            if etf.upper() not in analyzed_etfs:
-                analyzed_etfs.append(etf)
-        
-        print(f"   Analyzing {len(analyzed_etfs)} ETFs (Core, Satellite, Bonds) following the target-weight strategy...")
-        print("   (Excluding leveraged ETFs and crypto for balanced risk)")
-
-        # Prefetch the whole candidate universe in one batched download so every
-        # analyze_etf() below is served from cache.
-        market_data.prefetch(analyzed_etfs[:60], period="1y")
-
-        # Analyze in batches
-        # Increased limit to 60 to cover more opportunities (was 25)
-        for i, etf in enumerate(analyzed_etfs[:60]):  # Limit to 60 for comprehensive coverage
-            try:
-                etf_upper = etf.upper()
-                
-                # Skip if already in portfolio (unless it's Core or Bonds - those we might want to increase)
-                is_core = etf_upper in [e.upper() for e in core_etfs]
-                is_bond = etf_upper in [e.upper() for e in bond_etfs]
-                
-                if etf_upper in current_holdings and not (is_core or is_bond):
-                    logger.debug(f"Skipping {etf} - already in portfolio")
-                    continue
-                
-                analysis = self.advisor.analyze_etf(etf, verbose=False)
-                score = analysis.get("score", 0)
-                
-                # Check if already in portfolio with sufficient allocation
-                holding = next((h for h in portfolio.get("holdings", []) if h.get("ticker", "").upper() == etf_upper), None)
-                if holding:
-                    holding_value = holding.get("current_value", 0)
-                    holding_weight = (holding_value / portfolio_value * 100) if portfolio_value > 0 else 0
-                    
-                    # Skip if already has sufficient allocation
-                    if is_core and holding_weight >= 15:  # Core should be 15-20% each
-                        logger.debug(f"Skipping {etf} - already has {holding_weight:.1f}% allocation")
-                        continue
-                    elif is_bond and holding_weight >= 10:  # Bonds should be 10-15% each
-                        logger.debug(f"Skipping {etf} - already has {holding_weight:.1f}% allocation")
-                        continue
-                    elif not (is_core or is_bond) and holding_weight >= 5:  # Satellite should be 5-10% each
-                        logger.debug(f"Skipping {etf} - already has {holding_weight:.1f}% allocation")
-                        continue
-                
-                # Check if portfolio actually needs this (strategy balance check;
-                # targets computed once above from allocation.py)
-                bonds_value = sum(h.get("current_value", 0) for h in portfolio.get("holdings", [])
-                                if h.get("ticker", "").upper() in [b.upper() for b in bond_etfs])
-                bonds_percent = (bonds_value / portfolio_value * 100) if portfolio_value > 0 else 0
-
-                # Only recommend bonds if the portfolio is under its bond target
-                if is_bond and bonds_percent >= target_bonds_pct:
-                    logger.debug(f"Skipping {etf} - portfolio already has {bonds_percent:.1f}% bonds")
-                    continue
-
-                # Only recommend Core/Satellite while stocks are under target.
-                # (The old "still allow if bonds < 20%" carve-out was inverted:
-                # when stocks are over target, bonds are almost always under, so
-                # stock buys were never blocked - the opposite of balancing.)
-                stocks_value = portfolio_value - bonds_value
-                stocks_percent = (stocks_value / portfolio_value * 100) if portfolio_value > 0 else 100
-                if not is_bond and stocks_percent >= target_stocks_pct:
-                    logger.debug(f"Skipping {etf} - portfolio already has {stocks_percent:.1f}% stocks")
-                    continue
-                
-                # Boost score for Core and Bonds (they're essential) - but cap at 100
-                if is_core:
-                    score = min(100, score + 15)
-                    analysis["reasons"].append("Core holding - essential for portfolio stability")
-                elif is_bond:
-                    score = min(100, score + 20)
-                    analysis["reasons"].append("Bond holding - essential for portfolio protection")
-                
-                # Ensure score doesn't exceed 100
-                score = min(100, score)
-                
-                # Check for critical buy signals (lower threshold for Core/Bonds)
-                threshold = 70 if (is_core or is_bond) else self.critical_threshold
-                
-                if score >= threshold:
-                    expected_return = analysis.get("mid_term_forecast", {}).get("expected_3yr_return", 0)
-                    reasons = analysis.get("reasons", [])
-                    
-                    # Filter out unrealistic returns (>50% is not realistic for 3
-                    # years) and non-finite forecasts (NaN/inf slip past bare >/<
-                    # comparisons, which are always False for NaN).
-                    if not math.isfinite(expected_return) or expected_return > 50 or expected_return < -50:
-                        logger.debug(f"Skipping {etf} - unrealistic expected return: {expected_return}")
-                        continue
-                    
-                    # For Core and Bonds, lower the expected return requirement
-                    min_return = 5 if (is_core or is_bond) else 10  # Lowered from 10/15
-                    
-                    # Only flag as critical if:
-                    # 1. High score (>=threshold)
-                    # 2. Reasonable expected return (filtered unrealistic ones)
-                    # 3. Not leveraged (we exclude those)
-                    # 4. Have cash available
-                    is_leveraged = analysis.get("is_leveraged", False)
-                    
-                    if is_leveraged:
-                        # Skip leveraged ETFs - not suitable for 80/20 strategy
-                        logger.debug(f"Skipping {etf} - leveraged ETF, not suitable for balanced strategy")
-                        continue
-                    
-                    # Check if we have cash available
-                    if cash_available < 100:
-                        logger.debug(f"Skipping {etf} - insufficient cash (${cash_available:.2f})")
-                        continue
-                    
-                    # Only recommend if expected return is reasonable OR score is very high
-                    if (expected_return > min_return and expected_return <= 50) or score >= 85:
-                        leverage_mult = analysis.get("leverage_multiplier", 1.0)
-                        
-                        # Calculate recommended amount based on category and available cash
-                        if is_core:
-                            # Core gets higher allocation, but not more than available cash
-                            recommended_amount = min(1500, cash_available * 0.3, cash_available * 0.5)
-                            category_note = "Core holding - increase allocation"
-                        elif is_bond:
-                            # Bonds get moderate allocation, prioritize if well under target
-                            if bonds_percent < target_bonds_pct * 0.75:
-                                recommended_amount = min(1000, cash_available * 0.4, cash_available * 0.6)
-                            else:
-                                recommended_amount = min(1000, cash_available * 0.2, cash_available * 0.3)
-                            category_note = "Bond holding - add protection"
-                        else:
-                            # Satellite gets smaller allocation
-                            recommended_amount = min(800, cash_available * 0.15, cash_available * 0.25)
-                            category_note = "Satellite holding - growth opportunity"
-                        
-                        # Ensure we don't recommend more than available cash
-                        recommended_amount = min(recommended_amount, cash_available)
-                        
-                        if recommended_amount < 50:  # Skip if amount too small
-                            logger.debug(f"Skipping {etf} - recommended amount too small (${recommended_amount:.2f})")
-                            continue
-                        
-                        # Cap expected return display at 50% to avoid confusion
-                        display_return = min(expected_return, 50) if expected_return > 0 else expected_return
-                        
-                        critical_buys.append({
-                            "type": "BUY",
-                            "ticker": etf,
-                            "priority": "CRITICAL" if (score >= 85 or (is_bond and bonds_percent < 10)) else "HIGH",
-                            "reason": f"{category_note} - Score: {score}/100. Expected 3yr return: {display_return:.1f}%.",
-                            "amount": recommended_amount,
-                            "expected_return": display_return,
-                            "score": score,
-                            "details": "; ".join(reasons[:3]),  # Top 3 reasons
-                            "diversification": "Balanced target-weight strategy",
-                            "is_leveraged": False,
-                            "leverage_multiplier": 1.0,
-                            "category": "CORE" if is_core else ("BONDS" if is_bond else "SATELLITE")
-                        })
-                        # Buys share ONE cash pool: deduct so the next candidate
-                        # is sized against what's actually left (previously every
-                        # buy was sized against the full balance and the total
-                        # could exceed cash).
-                        cash_available -= recommended_amount
-
-                # Progress indicator
-                if (i + 1) % 10 == 0:
-                    print(f"   Progress: {i + 1}/{min(len(analyzed_etfs), 60)} ETFs analyzed...")
-                    
-            except Exception as e:
-                logger.debug(f"Failed to analyze ETF {etf}: {e}")
-                continue  # Skip failed analyses
-        
-        return critical_buys
-    
-    def find_better_alternatives(self, holdings_analysis: List[Dict], portfolio_metrics: Dict) -> List[Dict]:
-        """
-        Deep analysis: Compare ALL existing holdings with market alternatives.
-        Finds better ETFs even if current holdings are not weak.
-        This ensures portfolio is always optimized according to the target-weight strategy.
-        """
-        replacement_opportunities = []
-        
-        # Get current portfolio
-        portfolio = self.analyzer.load_portfolio()
-        current_tickers = [h.get("ticker", "").upper() for h in portfolio.get("holdings", [])]
-        total_value = portfolio_metrics.get("total_value", 0)
-        
-        # Define categories for comparison
-        core_etfs = ["SPY", "VOO", "IVV", "VXUS", "VEA"]
-        bond_etfs = ["BND", "AGG", "TIP", "SCHP", "VTIP"]
-        
-        # Satellite ETF categories (shared module constant).
-        satellite_categories = SATELLITE_CATEGORIES
-
-        # Warm the cache for every plausible candidate (core + bonds + top-2 of
-        # each satellite category) in one batched download up front.
-        prefetch_set = set(core_etfs) | set(bond_etfs)
-        for cat in satellite_categories:
-            for etf in self.advisor.ETF_CATEGORIES.get(cat, [])[:2]:
-                prefetch_set.add(etf)
-        market_data.prefetch(list(prefetch_set), period="1y")
-
-        print(f"   Analyzing {len(holdings_analysis)} existing holdings for better alternatives...")
-        
-        for holding in holdings_analysis:
-            ticker = holding.get("ticker", "").upper()
-            current_score = holding.get("recommendation_score", 50)
-            current_value = holding.get("current_value", 0)
-            current_weight = (current_value / total_value * 100) if total_value > 0 else 0
-            
-            # Skip if holding is too small (<2% of portfolio) - not worth replacing
-            if current_weight < 2:
-                continue
-            
-            # Determine category
-            is_core = ticker in [e.upper() for e in core_etfs]
-            is_bond = ticker in [e.upper() for e in bond_etfs]
-            
-            # Find candidates in same category
-            candidates = []
-            category_name = ""
-            
-            if is_core:
-                candidates = [e for e in core_etfs if e.upper() != ticker and e.upper() not in current_tickers]
-                category_name = "CORE"
-            elif is_bond:
-                candidates = [e for e in bond_etfs if e.upper() != ticker and e.upper() not in current_tickers]
-                category_name = "BONDS"
-            else:
-                # For satellite ETFs, search in all satellite categories
-                category_name = "SATELLITE"
-                for cat in satellite_categories:
-                    if cat in self.advisor.ETF_CATEGORIES:
-                        cat_etfs = self.advisor.ETF_CATEGORIES[cat]
-                        # Add top 2 from each category that we don't already have
-                        for etf in cat_etfs[:2]:
-                            if etf.upper() != ticker and etf.upper() not in current_tickers:
-                                if etf.upper() not in [c.upper() for c in candidates]:
-                                    candidates.append(etf)
-            
-            # Analyze candidates to find better alternatives
-            best_alternative = None
-            best_score = 0
-            best_analysis = None
-            
-            for candidate in candidates[:5]:  # Check top 5 candidates
-                try:
-                    candidate_analysis = self.advisor.analyze_etf(candidate, verbose=False)
-                    candidate_score = candidate_analysis.get("score", 0)
-                    
-                    # Boost score for Core and Bonds (they're essential for 80/20 strategy)
-                    if is_core:
-                        candidate_score = min(100, candidate_score + 15)
-                    elif is_bond:
-                        candidate_score = min(100, candidate_score + 20)
-                    
-                    # Check if significantly better (at least 15 points higher for moderate replacement)
-                    # Or at least 25 points higher for strong replacement
-                    score_diff = candidate_score - current_score
-                    
-                    if score_diff >= 15 and candidate_score > best_score:
-                        # Additional checks: ensure alternative has good fundamentals
-                        expected_return = candidate_analysis.get("mid_term_forecast", {}).get("expected_3yr_return", 0)
-                        
-                        # Filter unrealistic returns
-                        if -50 <= expected_return <= 50:
-                            best_score = candidate_score
-                            best_alternative = candidate
-                            best_analysis = candidate_analysis
-                            
-                except Exception as e:
-                    logger.debug(f"Failed to analyze alternative {candidate}: {e}")
-                    continue
-            
-            # If found significantly better alternative, recommend replacement
-            if best_alternative and best_analysis:
-                score_diff = best_score - current_score
-                priority = "HIGH" if score_diff >= 25 else "MEDIUM"
-                
-                # Only recommend if meaningful improvement
-                if score_diff >= 15:
-                    # Recommend replacing 30-50% depending on score difference
-                    replace_percentage = 0.5 if score_diff >= 25 else 0.3
-                    shares_to_sell = int(holding.get("quantity", 0) * replace_percentage)
-                    sell_amount = shares_to_sell * holding.get("current_price", 0)
-                    
-                    if sell_amount > 100:  # Only if meaningful amount
-                        expected_return = best_analysis.get("mid_term_forecast", {}).get("expected_3yr_return", 0)
-                        current_return = holding.get("mid_term_forecast", {}).get("expected_3yr_return", 0) if isinstance(holding.get("mid_term_forecast"), dict) else 0
-                        
-                        # Size the buy using all proceeds of the sale, preferring
-                        # the (cached) analyzed price and falling back to the
-                        # shared market-data layer.
-                        buy_shares, buy_price, remaining_cash = self._shares_for_amount(
-                            best_alternative,
-                            sell_amount,
-                            known_price=best_analysis.get("current_price", 0),
-                        )
-                        buy_amount = buy_shares * buy_price
-
-                        # Only recommend REPLACE if we can actually buy at least 1 share
-                        if buy_shares > 0 and buy_price > 0:
-                            replacement_opportunities.append({
-                                "type": "REPLACE",
-                                "priority": priority,
-                                "sell_ticker": ticker,
-                                "sell_score": current_score,
-                                "sell_amount": sell_amount,
-                                "sell_shares": shares_to_sell,
-                                "sell_category": category_name,
-                                "buy_ticker": best_alternative,
-                                "buy_price": buy_price,
-                                "buy_shares": buy_shares,
-                                "buy_amount": buy_amount,
-                                "remaining_cash": remaining_cash,
-                                "buy_score": best_score,
-                                "buy_category": category_name,
-                                "score_improvement": score_diff,
-                                "reason": f"🔄 OPTIMIZE: {ticker} (Score: {current_score:.1f}/100) → {best_alternative} (Score: {best_score:.1f}/100, +{score_diff:.1f} points) - Better performance for {category_name} allocation",
-                                "details": f"Replace {replace_percentage*100:.0f}% of {ticker} with {best_alternative} to improve {category_name} allocation. Expected return: {expected_return:.1f}% vs {current_return:.1f}%",
-                                "strategy": "Balanced Growth (targets from allocation.py)"
-                            })
-                            print(f"   🔄 {ticker} (Score: {current_score:.1f}) → {best_alternative} (Score: {best_score:.1f}, +{score_diff:.1f})")
-                        else:
-                            # Can't buy enough shares, skip this replacement
-                            logger.debug(f"Skipping REPLACE {ticker} → {best_alternative}: sell_amount ${sell_amount:.2f} insufficient for buy_price ${buy_price:.2f} (would buy {buy_shares} shares)")
-        
-        return replacement_opportunities
-    
     def check_market_anomalies(self) -> List[Dict]:
         """Check for market anomalies that require immediate attention."""
         anomalies = []
@@ -1250,11 +578,12 @@ class CriticalAlertSystem:
             buy_count = sum(1 for item in critical_items if item.get("type") == "BUY")
             sell_count = sum(1 for item in critical_items if item.get("type") == "SELL")
             replace_count = sum(1 for item in critical_items if item.get("type") == "REPLACE")
+            info_count = sum(1 for item in critical_items if item.get("type") in ("REBALANCE", "ACTION"))
             trend_count = sum(1 for item in critical_items if item.get("type") == "EMERGING_TREND")
             
             # Only send email if there are specific actionable recommendations (BUY/SELL/REPLACE)
             # Trends alone are not actionable without cash or specific recommendations
-            has_specific_actions = buy_count > 0 or sell_count > 0 or replace_count > 0
+            has_specific_actions = buy_count > 0 or sell_count > 0 or replace_count > 0 or info_count > 0
             
             if not has_specific_actions:
                 print("\n✅ No specific actionable recommendations (only trends detected, but no cash or weak holdings to replace).")
@@ -1304,7 +633,7 @@ class CriticalAlertSystem:
         results = self.check_critical_opportunities()
         
         critical_items = results.get("critical_items", [])
-        specific_action_types = ["BUY", "SELL", "REPLACE"]
+        specific_action_types = ["BUY", "SELL", "REPLACE", "REBALANCE", "ACTION"]
         specific_actions = [item for item in critical_items if item.get("type") in specific_action_types]
         trends_only = [item for item in critical_items if item.get("type") == "EMERGING_TREND"]
         

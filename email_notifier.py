@@ -209,6 +209,16 @@ class EmailNotifier:
                         <p><strong>Current Score:</strong> {sc_disp}/100</p>
                     </div>
                     """
+                elif action_type == "REBALANCE":
+                    body += f"""
+                    <div class="action">
+                        <h3>🧭 Rebalancing suggested (no urgency)</h3>
+                        <p><strong>Reason:</strong> {item.get('reason', 'N/A')}</p>
+                        <p>{item.get('details', '')}</p>
+                        <p>Run <code>make analyze</code> to see the full plan
+                        (Option A: keep depositing, no tax; Option B: trade now).</p>
+                    </div>
+                    """
                 elif action_type == "REPLACE":
                     # Check if it's an optimization (better alternative) or trend replacement
                     is_optimization = "OPTIMIZE" in item.get('reason', '') or item.get('strategy') is not None
