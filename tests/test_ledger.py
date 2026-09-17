@@ -80,10 +80,15 @@ def test_average_monthly_deposit():
 
 
 def test_parse_cash_input():
-    assert ledger.parse_cash_input("133.5", 3.0) == 133.5
+    # Bare number defaults to NIS (Israeli broker app) - a bare "294" must
+    # NOT be read as USD, which previously turned an actual ₪294 into a
+    # wrongly-reconciled $294 (~₪890).
+    assert ledger.parse_cash_input("400", 3.2) == 125.0
     assert ledger.parse_cash_input("400 ils", 3.2) == 125.0
     assert ledger.parse_cash_input("₪400", 3.2) == 125.0
     assert ledger.parse_cash_input("1,200 nis", 3.0) == 400.0
+    # Explicit USD marker required to mean dollars.
+    assert ledger.parse_cash_input("133.5 usd", 3.0) == 133.5
     assert ledger.parse_cash_input("$99", 3.0) == 99.0
     assert ledger.parse_cash_input("", 3.0) is None
     assert ledger.parse_cash_input("abc", 3.0) is None

@@ -141,12 +141,18 @@ def _xirr(flows: List[Dict], current_value: float, now: datetime) -> Optional[fl
 
 
 def parse_cash_input(raw: str, ils_per_usd: float) -> Optional[float]:
-    """Parse a user-entered cash amount. Plain numbers are USD; an ILS marker
-    ('ils', 'nis', '₪', 'שח') converts at ``ils_per_usd``. Empty/invalid -> None."""
+    """Parse a user-entered cash amount.
+
+    A BARE number (no unit) defaults to NIS - this is an Israeli broker app
+    and the user thinks in shekels; treating a bare '294' as USD once turned
+    an actual ₪294 into a wrongly-reconciled $294 (₪890), a real data error.
+    An explicit 'usd'/'$' marker is required to mean dollars; an ILS marker
+    ('ils', 'nis', '₪', 'שח') is accepted but not required. Empty/invalid -> None.
+    """
     s = (raw or "").strip().lower().replace(",", "")
     if not s:
         return None
-    is_ils = any(tok in s for tok in ("₪", "ils", "nis", "שח", 'ש"ח'))
+    is_usd = any(tok in s for tok in ("usd", "$"))
     for tok in ("₪", "ils", "nis", "שח", 'ש"ח', "usd", "$"):
         s = s.replace(tok, "")
     try:
@@ -155,7 +161,7 @@ def parse_cash_input(raw: str, ils_per_usd: float) -> Optional[float]:
         return None
     if val < 0:
         return None
-    return round(val / ils_per_usd, 2) if is_ils else round(val, 2)
+    return round(val, 2) if is_usd else round(val / ils_per_usd, 2)
 
 
 def ask_actual_cash(expected_usd: float, ils_per_usd: float) -> Optional[float]:
@@ -164,8 +170,10 @@ def ask_actual_cash(expected_usd: float, ils_per_usd: float) -> Optional[float]:
     import sys
     if not sys.stdin.isatty():
         return None
-    raw = input(f"   Broker's ACTUAL remaining cash "
-                f"[Enter = keep ${expected_usd:,.2f}; e.g. '133.5' USD or '400 ils']: ")
+    expected_ils = expected_usd * ils_per_usd
+    raw = input(f"   Broker's ACTUAL remaining cash - NIS by default "
+                f"[Enter = keep ₪{expected_ils:,.2f} (${expected_usd:,.2f}); "
+                f"e.g. '400' = ₪400, '133.5 usd' for dollars]: ")
     return parse_cash_input(raw, ils_per_usd)
 
 
