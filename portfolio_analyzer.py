@@ -1317,19 +1317,20 @@ class PortfolioAnalyzer:
         # True performance: gains net of deposits, from the transaction ledger.
         perf = metrics.get("true_performance")
         if perf:
-            gain_ils = perf["gain_usd"] * exchange_rate
-            invested_ils = perf["net_invested_usd"] * exchange_rate
+            # Dollars only here: converting USD figures at TODAY's rate is not
+            # a real shekel number (the honest ₪ view is printed below).
             icon = "📈" if perf["gain_usd"] >= 0 else "📉"
             print("\n" + "-" * 60)
             print("💵 TRUE INVESTMENT PERFORMANCE (net of deposits)")
             print("-" * 60)
             print(f"Tracking Since: {perf['ledger_start_date']} ({perf['days']} days)")
-            print(f"Money Put In: ₪{invested_ils:,.2f} (${perf['net_invested_usd']:,.2f})")
-            print(f"{icon} Investment Gain: ₪{gain_ils:+,.2f} (${perf['gain_usd']:+,.2f})  [{perf['gain_pct']:+.2f}%]")
+            print(f"\n   In DOLLARS:")
+            print(f"   Money Put In: ${perf['net_invested_usd']:,.2f}")
+            print(f"   {icon} Investment Gain: ${perf['gain_usd']:+,.2f}  [{perf['gain_pct']:+.2f}%]")
             if perf.get("xirr_pct") is not None:
-                print(f"📊 Money-Weighted Annual Return (XIRR): {perf['xirr_pct']:+.2f}%")
+                print(f"   📊 XIRR ($): {perf['xirr_pct']:+.2f}%")
             else:
-                print("📊 Money-Weighted Annual Return (XIRR): available after 30 days of tracking")
+                print("   📊 XIRR: available after 30 days of tracking")
         perf_ils = metrics.get("true_performance_ils")
         if perf_ils:
             icon = "📈" if perf_ils["gain_ils"] >= 0 else "📉"
