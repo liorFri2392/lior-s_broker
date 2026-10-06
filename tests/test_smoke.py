@@ -304,3 +304,21 @@ def test_prices_reject_non_finite_and_nonpositive(monkeypatch):
 ])
 def test_module_imports(mod):
     __import__(mod)
+
+
+def test_confirm_executed_shares_partial_fill(monkeypatch):
+    """Per-line prompt: Enter keeps the recommendation, a number overrides it
+    (partial fill), 0 drops the line; amounts are recomputed."""
+    import sys
+    from deposit_advisor import DepositAdvisor
+    recs = [
+        {"ticker": "SPY", "shares": 3, "price": 700.0, "allocation_amount": 2100.0},
+        {"ticker": "AGG", "shares": 5, "price": 100.0, "allocation_amount": 500.0},
+        {"ticker": "VWO", "shares": 4, "price": 50.0, "allocation_amount": 200.0},
+    ]
+    answers = iter(["", "2", "0"])
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    out = DepositAdvisor._confirm_executed_shares(recs)
+    assert [(r["ticker"], r["shares"], r["allocation_amount"]) for r in out] == [
+        ("SPY", 3, 2100.0), ("AGG", 2, 200.0)]
