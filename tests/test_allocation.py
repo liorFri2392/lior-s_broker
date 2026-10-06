@@ -145,7 +145,9 @@ def test_gap_fill_funds_group_via_cheaper_equivalent_when_preferred_unaffordable
 def test_gap_fill_prefers_held_when_affordable():
     # US_CORE underweight and the budget affords SPY: the held/preferred ticker
     # wins (no gratuitous switch to a cheaper twin).
-    holdings = [_holding("VEA", 10000), _holding("SPY", 745, qty=1)]
+    # (Bonds/satellite present so CORE is under its category target too.)
+    holdings = [_holding("VEA", 3000), _holding("SPY", 745, qty=1),
+                _holding("BND", 3000), _holding("XLE", 3000)]
     buys = allocation.gap_fill_allocate(holdings, 1000.0, PRICES)
     us_core = next(b for b in buys if b["group"] == "US_CORE")
     assert us_core["ticker"] == "SPY"
@@ -282,3 +284,24 @@ def test_tilt_still_converges_stock_bond_split():
     bond_target_total = sum(v for k, v in tilt.items()
                             if allocation.GROUP_BY_KEY[k]["category"] == "BONDS")
     assert bond_target_total == pytest.approx(allocation.category_targets()["BONDS"])
+
+
+def test_no_bond_buys_when_bond_category_over_target():
+    """Regression: AGG under its 9% sub-target but TIPS heavily overweight, so
+    bonds overall exceed 15%. Money must go to the underweight equity side,
+    never to AGG (which used to happen: a real deposit put $481 into AGG with
+    bonds already at 17.9%)."""
+    holdings = [
+        _holding("SPY", 5000), _holding("VEA", 2000), _holding("VWO", 800),
+        _holding("AGG", 600),    # ~6% < 9% sub-target ...
+        _holding("VTIP", 1400),  # ... but TIPS ~14% >> 6%, bonds ~20% > 15%
+    ]
+    buys = allocation.gap_fill_allocate(holdings, 1500.0, PRICES)
+    assert buys, "deposit should still be invested"
+    assert all(b["category"] != "BONDS" for b in buys)
+
+
+def test_category_guard_still_allows_bonds_when_category_under():
+    holdings = [_holding("SPY", 9000), _holding("AGG", 300)]  # bonds ~3% << 15%
+    buys = allocation.gap_fill_allocate(holdings, 1500.0, PRICES)
+    assert any(b["category"] == "BONDS" for b in buys)

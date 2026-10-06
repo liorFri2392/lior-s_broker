@@ -123,6 +123,30 @@ class PortfolioAnalyzer:
         """Best-effort sync of the portfolio to the GitHub secret (shared impl)."""
         return github_secret.update_portfolio_secret(portfolio)
 
+    def _backfill_opening_fx(self, portfolio: Dict) -> bool:
+        """One-time: record the USD/ILS rate on the ledger's opening date so
+        shekel-denominated performance can be computed. Returns True if set."""
+        opening = next((t for t in portfolio.get("transactions", []) or []
+                        if t.get("type") == "opening"), None)
+        if not opening or opening.get("ils_per_usd"):
+            return False
+        try:
+            hist = market_data.get_history("USDILS=X", period="2y")
+            if hist is None or hist.empty:
+                return False
+            on_or_before = hist[hist.index.strftime("%Y-%m-%d") <= opening["date"]]
+            if on_or_before.empty:
+                return False
+            rate = market_data.MarketData.normalize_ils_per_usd(
+                float(on_or_before["Close"].iloc[-1]))
+            if not (2.0 <= rate <= 6.0):
+                return False
+            opening["ils_per_usd"] = round(rate, 4)
+            return True
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"Opening FX backfill failed: {e}")
+            return False
+
     def is_market_open(self) -> Tuple[bool, str]:
         """Check if US stock market (NYSE/NASDAQ) is currently open (DST-correct)."""
         return market_data.is_market_open()
@@ -606,6 +630,8 @@ class PortfolioAnalyzer:
         # True (deposit-adjusted) performance from the ledger. The baseline
         # "cumulative return" above counts deposits as gains; this one doesn't.
         true_performance = ledger.performance(portfolio, total_value)
+        true_performance_ils = ledger.performance_ils(
+            portfolio, total_value, self.get_exchange_rate())
 
         return {
             "total_value": total_value,
@@ -622,6 +648,7 @@ class PortfolioAnalyzer:
             "minutes_since_start": minutes_since_start,
             "start_date": start_date,
             "true_performance": true_performance,
+            "true_performance_ils": true_performance_ils,
         }
     
     def check_80_20_balance(self, portfolio_metrics: Dict, analyses: List[Dict]) -> Dict:
@@ -954,6 +981,8 @@ class PortfolioAnalyzer:
             for h in portfolio["holdings"]
         )
         if ledger.ensure_ledger(portfolio, current_total):
+            self.save_portfolio(portfolio, sync_github_secret=False)
+        if self._backfill_opening_fx(portfolio):
             self.save_portfolio(portfolio, sync_github_secret=False)
         
         # Display market status
@@ -1301,6 +1330,13 @@ class PortfolioAnalyzer:
                 print(f"📊 Money-Weighted Annual Return (XIRR): {perf['xirr_pct']:+.2f}%")
             else:
                 print("📊 Money-Weighted Annual Return (XIRR): available after 30 days of tracking")
+        perf_ils = metrics.get("true_performance_ils")
+        if perf_ils:
+            icon = "📈" if perf_ils["gain_ils"] >= 0 else "📉"
+            print(f"\n   In SHEKELS (what you actually experience, incl. currency moves):")
+            print(f"   Money Put In: ₪{perf_ils['net_invested_ils']:,.2f}  |  Worth now: ₪{perf_ils['value_ils']:,.2f}")
+            print(f"   {icon} Gain: ₪{perf_ils['gain_ils']:+,.2f}  [{perf_ils['gain_pct']:+.2f}%]"
+                  + (f"  |  XIRR (₪): {perf_ils['xirr_pct']:+.2f}%" if perf_ils.get('xirr_pct') is not None else ""))
         
         # Show strategy balance status (targets come from allocation.py -
         # the same source `make deposit` uses).

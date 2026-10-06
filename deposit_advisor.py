@@ -1136,6 +1136,29 @@ class DepositAdvisor:
         """Best-effort sync of the portfolio to the GitHub secret (shared impl)."""
         return github_secret.update_portfolio_secret(portfolio, verbose=True)
 
+    @staticmethod
+    def _confirm_executed_shares(recommendations: List[Dict]) -> List[Dict]:
+        """Ask per line how many shares were actually bought (Enter = as
+        recommended). Lines with 0 are dropped; amounts are recomputed."""
+        if not sys.stdin.isatty():
+            return recommendations
+        print("\n   Shares actually bought per line (Enter = as recommended, 0 = skipped):")
+        executed = []
+        for rec in recommendations:
+            while True:
+                raw = input(f"     {rec['ticker']:<6} [{rec['shares']}]: ").strip()
+                if not raw:
+                    shares = rec["shares"]
+                    break
+                if raw.isdigit():
+                    shares = int(raw)
+                    break
+                print("     Please enter a whole number of shares.")
+            if shares > 0:
+                executed.append(dict(rec, shares=shares,
+                                     allocation_amount=round(shares * rec["price"], 2)))
+        return executed
+
     def ask_confirmation(self) -> bool:
         """Ask user for confirmation."""
         while True:
@@ -1338,8 +1361,10 @@ class DepositAdvisor:
             confirmed = self.ask_confirmation()
             
             if confirmed:
-                # Update portfolio with purchases
-                self.update_portfolio_with_purchases(portfolio, recommendations, deposit_amount_usd)
+                # Partial fills happen (e.g. only 2 of 5 AGG) - record what was
+                # ACTUALLY bought, not what was recommended.
+                executed = self._confirm_executed_shares(recommendations)
+                self.update_portfolio_with_purchases(portfolio, executed, deposit_amount_usd)
             else:
                 print("\n❌ Portfolio not updated. No changes were made.\n")
         else:

@@ -241,6 +241,19 @@ def gap_fill_allocate(holdings: List[Dict], budget_usd: float,
                     return t, p
         return None
 
+    # Category-level guard: a sub-group below its own target must not receive
+    # money while its whole CATEGORY is at/above target (e.g. AGG under 9% but
+    # bonds overall over 15% because TIPS is overweight - buying AGG would push
+    # the stock/bond split further off). Category targets are the sum of their
+    # groups' (possibly tilted) targets, so tilt never changes them.
+    cat_of = {g["key"]: g["category"] for g in TARGET_GROUPS}
+    cat_target: Dict[str, float] = {}
+    cat_value: Dict[str, float] = {}
+    for g in TARGET_GROUPS:
+        c = g["category"]
+        cat_target[c] = cat_target.get(c, 0.0) + tgt[g["key"]]
+        cat_value[c] = cat_value.get(c, 0.0) + values[g["key"]]
+
     remaining = float(budget_usd)
     bought: Dict[tuple, Dict] = {}
     while True:
@@ -250,14 +263,19 @@ def gap_fill_allocate(holdings: List[Dict], budget_usd: float,
             if pick is None:
                 continue
             gap = tgt[key] * total_after - values[key]
-            # Buy only while the group stays at-or-below target after the share.
-            if gap >= pick[1] * 0.5 and gap > best_gap:
+            cat = cat_of[key]
+            cat_gap = cat_target[cat] * total_after - cat_value[cat]
+            # Buy only while BOTH the group and its category stay at-or-below
+            # target after the share.
+            if (gap >= pick[1] * 0.5 and cat_gap >= pick[1] * 0.5
+                    and gap > best_gap):
                 best_key, best_gap, best_pick = key, gap, pick
         if best_key is None:
             break
 
         ticker, price = best_pick
         values[best_key] += price
+        cat_value[cat_of[best_key]] += price
         remaining -= price
         rec = bought.setdefault((best_key, ticker), {
             "ticker": ticker,

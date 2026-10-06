@@ -220,6 +220,56 @@ def average_monthly_deposit(portfolio: Dict,
     return round(total / months, 2)
 
 
+def performance_ils(portfolio: Dict, current_total_usd: float,
+                    ils_per_usd_now: float,
+                    now: Optional[datetime] = None) -> Optional[Dict]:
+    """Same as performance(), but measured in SHEKELS - what an Israeli
+    investor actually experiences. Money in = opening value at its own-date FX
+    + each deposit's recorded amount_ils; value = current USD total at today's
+    FX. Captures currency gains/losses that the USD view hides. None when the
+    opening FX or any flow's ILS amount is unknown."""
+    flows = []
+    for t in portfolio.get("transactions", []) or []:
+        d = _parse_date(t.get("date"))
+        if d is None:
+            continue
+        if t.get("type") == "opening" and t.get("value_usd", 0) > 0:
+            fx = t.get("ils_per_usd")
+            if not fx:
+                return None
+            flows.append({"date": d, "amount": float(t["value_usd"]) * float(fx)})
+        elif t.get("type") in ("deposit", "withdrawal") and t.get("amount_usd", 0) > 0:
+            ils = t.get("amount_ils")
+            if ils is None:
+                fx = t.get("ils_per_usd")
+                if not fx:
+                    return None
+                ils = float(t["amount_usd"]) * float(fx)
+            sign = 1.0 if t["type"] == "deposit" else -1.0
+            flows.append({"date": d, "amount": sign * float(ils)})
+    if not flows or not ils_per_usd_now:
+        return None
+    flows.sort(key=lambda f: f["date"])
+    now = now or datetime.now()
+    value_ils = float(current_total_usd) * float(ils_per_usd_now)
+    net_in = sum(f["amount"] for f in flows)
+    if net_in <= 0:
+        return None
+    days = max((now - flows[0]["date"]).days, 0)
+    xirr_pct = None
+    if days >= 30:
+        r = _xirr(flows, value_ils, now)
+        if r is not None:
+            xirr_pct = round(r * 100.0, 2)
+    return {
+        "net_invested_ils": round(net_in, 2),
+        "value_ils": round(value_ils, 2),
+        "gain_ils": round(value_ils - net_in, 2),
+        "gain_pct": round((value_ils - net_in) / net_in * 100.0, 2),
+        "xirr_pct": xirr_pct,
+    }
+
+
 def performance(portfolio: Dict, current_total_value: float,
                 now: Optional[datetime] = None) -> Optional[Dict]:
     """True performance from the ledger, or None when no ledger exists.

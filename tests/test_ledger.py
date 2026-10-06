@@ -116,3 +116,27 @@ def test_short_period_has_no_xirr():
     perf = ledger.performance(p, 1050.0, now=datetime(2026, 7, 10))
     assert perf["gain_usd"] == 50.0
     assert perf["xirr_pct"] is None  # < 30 days: annualizing would be noise
+
+
+def test_performance_ils_captures_currency_loss():
+    """USD flat, but shekel strengthened 3.3 -> 3.0: the ILS investor lost ~9%."""
+    p = {"transactions": [
+        {"type": "opening", "date": "2026-01-01", "value_usd": 1000, "ils_per_usd": 3.3},
+    ]}
+    perf = ledger.performance_ils(p, 1000.0, 3.0, now=datetime(2027, 1, 1))
+    assert perf["net_invested_ils"] == 3300.0
+    assert perf["value_ils"] == 3000.0
+    assert perf["gain_pct"] == pytest.approx(-9.09, abs=0.01)
+    assert perf["xirr_pct"] == pytest.approx(-9.09, abs=0.1)
+
+
+def test_performance_ils_uses_deposit_amount_ils_and_needs_opening_fx():
+    p = {"transactions": [
+        {"type": "opening", "date": "2026-01-01", "value_usd": 1000, "ils_per_usd": 3.0},
+        {"type": "deposit", "date": "2026-02-01", "amount_usd": 300, "amount_ils": 900},
+    ]}
+    perf = ledger.performance_ils(p, 1300.0, 3.0, now=datetime(2026, 3, 1))
+    assert perf["net_invested_ils"] == 3900.0 and perf["gain_ils"] == 0.0
+    # Opening without FX -> cannot compute honestly.
+    p["transactions"][0].pop("ils_per_usd")
+    assert ledger.performance_ils(p, 1300.0, 3.0) is None
